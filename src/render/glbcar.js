@@ -242,6 +242,7 @@ export function buildCarFromGlb(buffer) {
 
   const problems = [];
   const bodyAcc = empty();
+  let wheelHubIndex = -1;
   const wheelAcc = empty();
   const steerAcc = empty();
   const hubs = [];
@@ -264,18 +265,55 @@ export function buildCarFromGlb(buffer) {
         front: name === "wheel_fl" || name === "wheel_fr",
       });
       // Only one wheel's geometry is kept: the renderer draws one mesh at four
-      // hubs. Re-centred on its own hub, because the renderer spins it about
-      // its origin -- geometry left at the node's world position would swing
-      // around the car instead.
+      // hubs.
       if (!wheelTaken) {
         for (const p of prims) expandPrimitive(doc, bin, p, [0, 0, 0], wheelAcc, problems);
         wheelTaken = true;
+        wheelHubIndex = hubs.length - 1;
       }
     } else if (name === "steering_wheel") {
       steerCentre = at;
       for (const p of prims) expandPrimitive(doc, bin, p, [0, 0, 0], steerAcc, problems);
     } else {
       for (const p of prims) expandPrimitive(doc, bin, p, at, bodyAcc, problems);
+    }
+  }
+
+  // Re-centre the wheel on its own geometry, and move its hub to match.
+  //
+  // The renderer spins a wheel about the origin of its mesh, so geometry that
+  // is not centred there orbits instead of rotating. Rather than require every
+  // exporter to place each wheel's origin at its hub -- which is fiddly in CAD
+  // and usually has to be redone in Blender anyway, because part origins do not
+  // survive STEP as object origins -- measure where the geometry actually is
+  // and correct for it.
+  //
+  // A wheel is symmetric about its hub, so the centre of its bounding box IS
+  // the hub to well within the accuracy anyone would notice. The offset is
+  // added back to the hub position, so the wheel still appears exactly where
+  // the model put it; only the point it turns about changes.
+  const wheelOffset = [0, 0, 0];
+  if (wheelAcc.position.length) {
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < wheelAcc.position.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], wheelAcc.position[i + k]);
+        hi[k] = Math.max(hi[k], wheelAcc.position[i + k]);
+      }
+    }
+    for (let k = 0; k < 3; k++) wheelOffset[k] = (lo[k] + hi[k]) / 2;
+    for (let i = 0; i < wheelAcc.position.length; i += 3) {
+      for (let k = 0; k < 3; k++) wheelAcc.position[i + k] -= wheelOffset[k];
+    }
+    // The measured offset belongs to the wheel the geometry came from. Applying
+    // it to all four assumes they were modelled alike, which they are -- and if
+    // they are not, the checker reports the hub positions and the difference is
+    // visible.
+    for (const h of hubs) {
+      h.x += wheelOffset[0];
+      h.y += wheelOffset[1];
+      h.z += wheelOffset[2];
     }
   }
 
@@ -292,6 +330,7 @@ export function buildCarFromGlb(buffer) {
     steeringWheel: finish(steerAcc),
     hubs: hubs.length === 4 ? hubs : null,
     steerCentre,
+    wheelOffset,
     stats: {
       triangles: (bodyAcc.position.length + wheelAcc.position.length +
                   steerAcc.position.length) / 9,

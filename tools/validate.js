@@ -533,12 +533,13 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
 {
   // A minimal but complete .glb: one body triangle and one wheel triangle,
   // each on its own named node, with a material apiece.
-  const buildGlb = () => {
+  const buildGlb = (wheelOffset = [0, 0, 0]) => {
+    const [ox, oy, oz] = wheelOffset;
     const positions = new Float32Array([
       // body triangle, around the origin
       0, 0.3, 0, 1, 0.3, 0, 0, 0.9, 0,
-      // wheel triangle, centred on ITS OWN origin
-      -0.2, -0.2, 0, 0.2, -0.2, 0, 0, 0.2, 0,
+      // wheel triangle, displaced from its node origin by `wheelOffset`
+      -0.2 + ox, -0.2 + oy, 0 + oz, 0.2 + ox, -0.2 + oy, 0 + oz, 0 + ox, 0.2 + oy, 0 + oz,
     ]);
     const normals = new Float32Array([
       0, 0, 1, 0, 0, 1, 0, 0, 1,
@@ -580,7 +581,7 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
       ],
       accessors: [
         { bufferView: 0, componentType: 5126, count: 3, type: "VEC3", min: [0, 0.3, 0], max: [1, 0.9, 0] },
-        { bufferView: 0, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3", min: [-0.2, -0.2, 0], max: [0.2, 0.2, 0] },
+        { bufferView: 0, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3", min: [-0.2 + ox, -0.2 + oy, oz], max: [0.2 + ox, 0.2 + oy, oz] },
         { bufferView: 1, componentType: 5126, count: 3, type: "VEC3" },
         { bufferView: 1, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3" },
         { bufferView: 2, componentType: 5125, count: 3, type: "SCALAR" },
@@ -649,6 +650,38 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
   // Material colours reach the vertices, or everything renders default grey.
   check("wheel takes its material colour", car.tire.color[0], 0.059, 0.061, "");
   check("body takes its material colour", car.body.color[1], 0.109, 0.111, "");
+
+  // A wheel whose geometry is NOT centred on its node must still spin about
+  // its own axle rather than orbiting the car.
+  //
+  // This is the check that lets a CAD export skip a fiddly step. Part origins
+  // do not survive STEP as object origins, so a wheel usually arrives with its
+  // geometry sitting wherever the assembly put it. Measuring the geometry and
+  // correcting the hub to match means the model does not have to be right about
+  // this, and the wheel still appears exactly where it was modelled.
+  {
+    const offset = [0.05, -0.03, 0.02];
+    const shifted = buildGlb(offset);
+    const car2 = buildCarFromGlb(shifted);
+
+    check("measures the wheel's own offset", car2.wheelOffset[0], 0.049, 0.051, " m");
+
+    let lo2 = [1e9, 1e9, 1e9];
+    let hi2 = [-1e9, -1e9, -1e9];
+    for (let i = 0; i < car2.tire.position.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        lo2[k] = Math.min(lo2[k], car2.tire.position[i + k]);
+        hi2[k] = Math.max(hi2[k], car2.tire.position[i + k]);
+      }
+    }
+    const off2 = Math.max(...lo2.map((v, k) => Math.abs((v + hi2[k]) / 2)));
+    check("off-centre wheel is re-centred", off2, 0, 1e-6, " m");
+
+    // And the wheel must still be DRAWN where the model put it: the hub moves
+    // by exactly what was taken out of the geometry.
+    const fl2 = car2.hubs.find((h) => h.name === "FL");
+    check("hub compensates, so it still sits right", fl2.x, 0.788 + 0.049, 0.788 + 0.051, " m");
+  }
 
   // A non-glb must be refused with a message, not parsed into nonsense.
   let refused = 0;

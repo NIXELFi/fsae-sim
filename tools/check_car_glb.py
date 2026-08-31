@@ -6,8 +6,13 @@ Every problem this reports is one that is either invisible or badly misleading
 in the simulator itself. A model exported in millimetres does not look "a bit
 big" -- it fills the sky and you cannot tell what went wrong. A model built
 about the front axle instead of the CG looks fine standing still and rotates
-about the wrong point the moment the car yaws. A wheel whose geometry is not
-centred on its own node orbits instead of spinning.
+about the wrong point the moment the car yaws.
+
+Note what is NOT checked: whether each wheel's geometry is centred on its own
+node. The loader measures that and moves the hub to compensate, so a wheel can
+sit anywhere within its node and still spin about its own axle. Part origins do
+not survive STEP as object origins, so requiring it would have meant redoing the
+work in Blender for no gain.
 
 So this checks the things that are cheap to verify and expensive to debug, and
 says what to change rather than only what is wrong.
@@ -140,7 +145,11 @@ def check(path):
             bad(f"{name} is at ({got[0]:+.3f}, {got[1]:+.3f}, {got[2]:+.3f}) but "
                 f"the physics puts that hub at ({expected[0]:+.3f}, "
                 f"{expected[1]:+.3f}, {expected[2]:+.3f}) -- {d:.3f} m out. The "
-                f"origin is the CG projected to the ground, NOT the front axle.")
+                f"origin is the CG projected to the ground, NOT the front axle. "
+                f"In SolidWorks: Insert > Reference Geometry > Coordinate System "
+                f"at the CG, then pick it as the Output coordinate system in the "
+                f"STEP export options -- that reframes the file without moving "
+                f"any geometry.")
         elif d > 0.08:
             warn(f"{name} is {d:.3f} m from where the physics puts that hub. "
                  f"Tolerable, but the wheels will not line up with the tyre "

@@ -532,6 +532,14 @@ python tools/make_reference_car.py reference-car.glb   # a model in the right fr
 python tools/check_car_glb.py your-export.glb          # check yours before driving it
 ```
 
+### Setting the origin in SolidWorks
+
+You can reframe the export without moving any geometry: create
+`Insert → Reference Geometry → Coordinate System` at the CG on the ground, then
+choose it as the **Output coordinate system** in the STEP export options. The
+model is untouched; only the frame the file is written in changes, and you can
+keep several coordinate systems and export different frames from one model.
+
 ### The frame
 
 | | |
@@ -551,11 +559,16 @@ the wrong point the moment the car yaws. `check_car_glb.py` detects it by name.
 
 `body`, `wheel_fl`, `wheel_fr`, `wheel_rl`, `wheel_rr`, `steering_wheel`.
 
-The wheels and the steering wheel must be **separate nodes**, each with its
-geometry centred on its own origin. The simulator animates them by setting the
-node's rotation, so a wheel merged into the body cannot turn, and one left at
-its world position orbits the car instead of spinning. Everything not named is
-treated as bodywork and drawn fixed to the chassis.
+The wheels and the steering wheel must be **separate nodes** — the simulator
+animates them by setting the node's rotation, so a wheel merged into the body
+cannot turn. Everything not named is treated as bodywork and drawn fixed to the
+chassis.
+
+You do **not** need to set each wheel's origin at its hub. The loader measures
+where the geometry actually sits and moves the hub to match, so a wheel can be
+anywhere within its node and still spin about its own axle. Part origins do not
+survive STEP as object origins anyway, so requiring it would only have meant
+redoing the work in Blender.
 
 **Hub positions come from the file**, not from the vehicle parameters. If the
 two disagree the fix is the model, and seeing the wheels in the wrong place is
