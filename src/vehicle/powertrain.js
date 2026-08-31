@@ -47,8 +47,17 @@ export class Powertrain {
     if (rpm <= p[0].rpm) {
       // Below the sweep's first point, fall away toward a plausible idle
       // torque rather than holding 61 N.m down to zero rpm.
+      //
+      // The 0.56 floor is not a guess any more. It is pinned by the measured
+      // idle point: the engine idles at 2000 rpm with the plate at 14%, so at
+      // 2000 rpm a 14% opening must exactly balance friction. Solving
+      //     drag / (wot + drag) = 0.14   with drag = 5.54 N.m
+      // gives wot(2000) = 34 N.m, which is 0.56 of the 61 N.m peak. That also
+      // lands squarely in the 55-70% of peak a naturally aspirated four
+      // normally makes at 2000 rpm. The previous 0.35 was invented, and it
+      // could not sustain an idle at any plate opening.
       const f = Math.max(0, rpm - this.v.idleRpm) / Math.max(1, p[0].rpm - this.v.idleRpm);
-      return p[0].torqueNm * (0.35 + 0.65 * Math.min(1, f));
+      return p[0].torqueNm * (0.56 + 0.44 * Math.min(1, f));
     }
     const last = p[p.length - 1];
     if (rpm >= last.rpm) return last.torqueNm;
@@ -88,6 +97,57 @@ export class Powertrain {
     return (this.fmepBar(rpm) * 1e5 * this.displacement) / (4 * Math.PI);
   }
 
+  /**
+   * Throttle plate position, 0..1, for a driver demand.
+   *
+   * The plate does not fully close at idle: the ETC holds it open a little to
+   * keep the engine alive, and on SDM26 that idle position is 14%. The floor
+   * fades out as revs rise, because a real ETC *does* close on the overrun --
+   * that is what engine braking is, and holding 14% all the way up the range
+   * would delete most of it.
+   */
+  platePosition(rpm, demand) {
+    const v = this.v;
+    const nominal = v.idleThrottleFrac ?? 0;
+    if (nominal <= 0) return demand;
+
+    // Proportional idle-speed control, which is what an ETC idle circuit
+    // actually is. A fixed opening is not enough: below idle speed the
+    // wide-open torque curve is flat and so is friction, so a fixed plate makes
+    // net torque very nearly zero at EVERY sub-idle rpm. That is a neutral
+    // equilibrium, not a stable one -- the engine settled wherever it happened
+    // to be, which in the running game was 982 rpm rather than 2000.
+    //
+    // The error term gives the restoring force. At the target the commanded
+    // opening is exactly the measured 14%.
+    const err = (v.idleRpm - rpm) / v.idleRpm;
+    const commanded = Math.max(0, nominal * (1 + 3 * err));
+
+    // Above idle the control backs out entirely, because a real ETC closes on
+    // the overrun -- that is what engine braking is, and holding any opening
+    // across the range would delete most of it.
+    const fadeTop = v.idleRpm * 1.6;
+    const scale = rpm <= v.idleRpm
+      ? 1
+      : Math.max(0, (fadeTop - rpm) / (fadeTop - v.idleRpm));
+
+    return Math.max(demand, Math.min(commanded, nominal * 3) * scale);
+  }
+
+  /**
+   * Indicated crankshaft torque, N.m -- the work combustion actually does,
+   * before friction is subtracted.
+   *
+   * This is what the engine sound model wants: it solves its heat release to
+   * reproduce this much work per cycle. Net torque is the wrong input there,
+   * because an engine idling at zero net torque is still burning fuel and
+   * still making noise.
+   */
+  indicatedTorque(rpm, demand) {
+    const plate = this.platePosition(rpm, demand);
+    return plate * (this.wotTorque(rpm) + this.motoringTorque(rpm));
+  }
+
   /** Net crankshaft torque for a throttle demand 0..1. */
   engineTorque(rpm, throttle) {
     if (this.shiftTimer > 0) return -this.motoringTorque(rpm) * 0.5; // ignition cut
@@ -97,11 +157,12 @@ export class Powertrain {
 
     const wot = this.wotTorque(rpm);
     const drag = this.motoringTorque(rpm);
-    let t = throttle * (wot + drag) - drag;
-
-    // Idle air control: keep the engine alive when the driver is off it.
-    if (rpm < this.v.idleRpm) t += (this.v.idleRpm - rpm) * 0.02;
-    return t;
+    // The idle plate floor replaces what used to be an ad-hoc torque added
+    // below idle speed. Modelling it as a plate position rather than a torque
+    // is both closer to what the ETC does and self-correcting: the engine
+    // settles wherever that opening balances friction.
+    const plate = this.platePosition(rpm, throttle);
+    return plate * (wot + drag) - drag;
   }
 
   ratio() { return totalReduction(this.v, this.gear); }
@@ -149,8 +210,12 @@ export class Powertrain {
     if (this.shiftTimer > 0) return 0;
     const full = 220; // EST: well above peak torque, so it locks when rolling
     if (speed > 4) return full;
-    const launch = 0.12 + 0.88 * Math.min(1, throttle * 1.15);
-    return full * Math.max(0.1, launch);
+    // Below walking pace the clutch is being managed, and with the driver off
+    // the pedal it is fully in. The old floor of 0.1 meant it always carried
+    // about 26 N.m, which is several times what the engine makes at idle -- so
+    // a stationary car dragged its own engine down to 1600 rpm and it could
+    // never actually idle. A real FSAE car does not creep; you slip the clutch.
+    return full * Math.min(1, throttle * 1.15);
   }
 
   /**
@@ -185,7 +250,14 @@ export class Powertrain {
 
     // Try locked first: does the clutch have enough capacity to hold the
     // engine and driveline together at the acceleration that implies?
-    const lockable = cap > 0 && Math.abs(slip) < 8 && n > 0;
+    // A clutch cannot be locked below idle speed. That is not a detail -- it is
+    // the reason you slip a clutch pulling away, and without it the model
+    // locked up at a standstill and pinned the engine to a stall-guard floor
+    // rather than letting it idle. The car then sat at 1323 rpm instead of the
+    // 2000 it actually idles at.
+    const clutchSideRpm = omegaClutchSide * RADS_TO_RPM;
+    const lockable =
+      cap > 0 && Math.abs(slip) < 8 && n > 0 && clutchSideRpm >= v.idleRpm * 0.95;
     let locked = false;
 
     if (lockable) {
@@ -199,7 +271,9 @@ export class Powertrain {
       this.clutchSlipRpm = 0;
       // Engine is tied to the wheel: rpm follows the wheel, and the wheel
       // inherits the engine's reflected inertia.
-      this.engineRpm = Math.max(v.idleRpm * 0.6, omegaClutchSide * RADS_TO_RPM);
+      // Floor at idle, not below it: a running engine cannot be dragged under
+      // its governed idle speed -- the clutch gives up first.
+      this.engineRpm = Math.max(v.idleRpm, omegaClutchSide * RADS_TO_RPM);
       this.stalled = this.engineRpm < 900;
       // Reflected driveline inertia, each component at its own speed ratio:
       // the crank turns `n` times the wheel, everything downstream of the

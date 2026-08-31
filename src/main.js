@@ -259,9 +259,14 @@ class Game {
     this.audio.update({
       rpm: pt.engineRpm,
       throttle,
-      // The engine model solves its combustion to produce this much work, so
-      // the note and the acceleration answer to the same number.
-      torqueNm: pt.wotTorque(pt.engineRpm) * (pt.shiftTimer > 0 ? 0 : throttle),
+      // Indicated torque, not net: the sound model solves its heat release to
+      // reproduce this much combustion work, and an engine idling at zero NET
+      // torque is still burning fuel and still audible. This also carries the
+      // idle plate, so the idle note comes from the 14% opening the ETC really
+      // holds rather than from a closed throttle.
+      torqueNm: pt.shiftTimer > 0 ? 0 : pt.indicatedTorque(pt.engineRpm, throttle),
+      // Same for the throttle the sound sees.
+      throttlePlate: pt.shiftTimer > 0 ? 0 : pt.platePosition(pt.engineRpm, throttle),
       speed: this.car.speed,
       slip: Math.max(tel.utilF, tel.utilR),
       wheelspin: Math.max(0, tel.kappaR - 0.15),

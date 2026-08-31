@@ -435,7 +435,7 @@ console.log("\nENGINE AUDIO  (tonal balance and loudness)");
 
   const at = {};
   for (const [label, rpm, throttle, torque] of [
-    ["idle 1600", 1600, 0.08, 3],
+    ["idle 2000", 2000, 0.14, 5.6],
     ["2500 part", 2500, 0.3, 20],
     ["4000 WOT", 4000, 1.0, 48],
     ["7000 WOT", 7000, 1.0, 58],
@@ -463,7 +463,7 @@ console.log("\nENGINE AUDIO  (tonal balance and loudness)");
   // 25-35 dB below full throttle; normalising every operating point to one
   // level is what made idle sound louder than the rest of the rev range.
   const limiter = at["13000 WOT"].dBA;
-  check("idle below the limiter", limiter - at["idle 1600"].dBA, 14, 32, " dB");
+  check("idle below the limiter", limiter - at["idle 2000"].dBA, 14, 32, " dB");
   check("part throttle below the limiter", limiter - at["2500 part"].dBA, 6, 24, " dB");
   check("overrun below the limiter", limiter - at["3000 overrun"].dBA, 14, 40, " dB");
   check(
@@ -480,5 +480,41 @@ console.log("\nENGINE AUDIO  (tonal balance and loudness)");
   check("spread across full throttle", Math.max(...wot) - Math.min(...wot), 0, 8, " dB");
 }
 
+
+// ------------------------------------------------------- measured idle ------
+// Daniel measured the car idling near 2000 rpm with the throttle plate at 14%.
+// Those are two independent numbers, and the model has to reproduce BOTH from
+// one of them -- otherwise the idle is scripted rather than emergent.
+//
+// It also pins the low-rpm end of the torque curve, which used to be a pure
+// guess (0.35 of peak below the sweep's first point, a value that could not
+// sustain an idle at any plate opening). Requiring a 14% plate to balance
+// friction at 2000 rpm forces wot(2000) = 34 N.m, or 0.56 of peak -- which
+// independently lands in the 55-70% a naturally aspirated four really makes
+// there.
+console.log("\nIDLE  (measured: ~2000 rpm at ~14% throttle plate)");
+{
+  const { pt } = fresh();
+
+  // Let a free crank find its own equilibrium with the pedal at rest.
+  let rpm = 1500;
+  const I = SDM26.engineInertiaKgM2;
+  for (let i = 0; i < 40000; i++) {
+    rpm += (pt.engineTorque(rpm, 0) / I) * DT * (60 / (2 * Math.PI));
+    rpm = Math.max(200, rpm);
+  }
+  check("idle settles at", rpm, 1850, 2200, " rpm");
+  check("plate held at idle", pt.platePosition(rpm, 0) * 100, 13, 15, " %");
+
+  // Engine braking must survive: the plate has to close off-throttle, or
+  // holding the idle opening across the range would delete most of it.
+  check("plate off-throttle at 6000 rpm", pt.platePosition(6000, 0) * 100, 0, 0.5, " %");
+  check("engine drag at 6000 rpm off-throttle", -pt.engineTorque(6000, 0), 3, 20, " N.m");
+
+  // Indicated torque is positive at idle even though net torque is zero --
+  // which is the whole reason the sound model takes indicated, not net.
+  check("indicated torque at idle", pt.indicatedTorque(rpm, 0), 3, 9, " N.m");
+  check("net torque at idle", Math.abs(pt.engineTorque(rpm, 0)), 0, 0.5, " N.m");
+}
 console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}\n`);
 process.exit(failures === 0 ? 0 : 1);

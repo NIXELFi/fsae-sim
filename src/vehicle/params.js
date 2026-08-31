@@ -51,7 +51,14 @@ export const SDM26 = {
   primaryReduction: 2.111, // 76/36
   finalDrive: 3.0,
   revLimitRpm: 14500,
-  idleRpm: 1600,
+  // Measured on the car (Daniel): the engine idles near 2000 rpm with the
+  // throttle plate held at about 14%. Those two numbers are very nearly
+  // self-consistent through the CFD torque curve and the friction model, which
+  // put the zero-net-torque plate position at 14% somewhere around 2350 rpm --
+  // agreement to a few hundred rpm, using nothing from the measurement itself.
+  idleRpm: 2000,
+  /** Throttle plate position the ETC holds at idle, 0..1. */
+  idleThrottleFrac: 0.14,
   shiftTimeS: 0.1,
 
   // ---- roll balance (Helios SDM26_ROLL, from the team's ARB calculator) ----

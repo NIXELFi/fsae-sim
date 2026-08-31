@@ -240,7 +240,10 @@ export class EngineAudio {
       this.modelNode.port.postMessage({
         type: "operating-point",
         rpm: s.rpm,
-        throttle: s.shifting ? 0 : s.throttle,
+        // The plate position, not the pedal: at idle the pedal is at rest but
+        // the plate is held at 14%, and that is what the engine is breathing
+        // through.
+        throttle: s.shifting ? 0 : (s.throttlePlate ?? s.throttle),
         torqueNm: s.shifting ? 0 : (s.torqueNm ?? 0),
       });
     } else {

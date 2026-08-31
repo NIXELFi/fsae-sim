@@ -388,7 +388,7 @@ export function cbr600rrSdm26() {
     // damping on this pipe is cruder than modelling its chambers, and it is the
     // difference between a burble and a whine at idle.
     tailpipes: [pipeFromDiameter(0.55, 0.045, 0.03, 1100)],
-    idleRpm: 1600,
+    idleRpm: 2000,
     redlineRpm: 14500,
     gas: { ...DEFAULT_GAS },
   };

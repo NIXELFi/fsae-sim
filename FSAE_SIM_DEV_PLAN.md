@@ -77,7 +77,7 @@ matters.
 | Check | Value | Anchor |
 |---|---|---|
 | Skidpad, 9.125 m | 4.986 s, 1.477 g | SDM26 ran **5.02 s** |
-| 75 m accel, managed launch | 4.762 s | QSS says 4.2 s — see below |
+| 75 m accel, managed launch | 4.874 s | QSS says 4.2 s — see below |
 | Braking from 25 m/s | 23.08 m, 1.74 g | — |
 | ETC map, 4000 random curves | 0 overshoot | monotone guarantee |
 
@@ -614,3 +614,51 @@ ground. **Scale is metres** — a millimetre export arrives a thousand times too
 big, which is the most common mistake and the easiest to spot.
 
 The WebGL build has no glTF loader yet; that is a separate piece of work.
+
+## 14. The idle point, and what it pinned down
+
+Daniel measured the car: **idle is about 2000 rpm with the throttle plate at
+about 14%.** Two numbers, and between them they fixed four things that had been
+guesses.
+
+**They cross-check each other.** Before using either, the model already said a
+14% plate balances friction at about 2350 rpm — from the CFD torque curve and
+the friction model alone. Agreement to a few hundred rpm on numbers that had
+never seen the measurement.
+
+**They pin the low-rpm end of the torque curve.** Below the sweep's first point
+(4000 rpm) the curve was extrapolated to `0.35 x peak`, invented. Requiring a
+14% plate to balance friction at 2000 rpm forces `wot(2000) = 34 N.m`, which is
+**0.56 x peak** — and that independently lands in the 55-70% a naturally
+aspirated four really makes there. The old 0.35 could not sustain an idle at any
+plate opening.
+
+**Idle is now modelled as a plate position, not a torque fudge.** What used to
+be `t += (idleRpm - rpm) * 0.02` is a proportional idle-speed control on the
+plate, which is what an ETC idle circuit actually is. A *fixed* 14% opening is
+not enough and the reason is worth remembering: below idle the WOT curve is flat
+and so is friction, so a fixed plate makes net torque very nearly zero at every
+sub-idle rpm. That is a **neutral** equilibrium, and the engine settled wherever
+it happened to be -- 982 rpm in the running game. The error term supplies the
+restoring force; at the target the commanded opening is exactly 14%.
+
+**Two clutch faults surfaced only because the idle became observable.** Neither
+would have been found by looking at lap times.
+
+1. **The clutch could lock below idle speed.** At a standstill it locked and
+   pinned the engine to a `0.6 x idleRpm` stall guard. A clutch cannot be locked
+   below idle -- that is precisely why you slip one pulling away.
+2. **The clutch never fully released.** `max(0.1, launch)` meant it always
+   carried about 26 N.m, several times what the engine makes at idle, so a
+   stationary car dragged its own engine down and could never idle at all. A
+   real FSAE car does not creep.
+
+**Cost: the 75 m went from 4.762 s to 4.874 s.** The clutch now slips until the
+wheel reaches idle-equivalent speed (2.4 m/s in first) instead of locking early
+against a fictitious 960 rpm floor. That is more honest and in the same
+direction as the driveline-inertia note in section 2 -- the launch is slower
+because less of it is free. Skidpad and braking did not move.
+
+**Verified in the running game:** stationary, pedal at rest, the engine settles
+at 2001 rpm with the plate at 14.0%, and the measured spectral peak of the
+engine note is 67.4 Hz against a firing frequency of 66.7 Hz.
