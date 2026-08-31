@@ -8,3 +8,6 @@
 # Not committed: it is your model, it is large, and it is not the default.
 /data/car.glb
 /reference-car.glb
+
+# A CAD wheel, same story as car.glb. 23 MB of Hoosier and OZ magnesium.
+/data/wheel.glb

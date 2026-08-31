@@ -588,3 +588,209 @@ export async function loadCarModel(url) {
     return { error: String(err?.message ?? err) };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Wheel-only models
+// ---------------------------------------------------------------------------
+
+/**
+ * Load a wheel-and-tyre assembly on its own, replacing the procedural wheel.
+ *
+ * A wheel is a much easier thing to supply than a whole car -- it is one
+ * sub-assembly, it is the same on all four corners, and it is four of the
+ * largest objects on screen -- so it gets its own path rather than requiring a
+ * complete car with `wheel_fl` and friends.
+ *
+ * Nothing has to be named, oriented, scaled or centred. A wheel is a solid of
+ * revolution, so its own geometry says which way the axle points (the short
+ * axis), where the centre is (the middle of its bounds) and how big it is (the
+ * tyre's outer diameter). All three are read from the file:
+ *
+ *   axle    the axis with the smallest extent
+ *   centre  the centre of the bounding box
+ *   scale   tyre outer diameter -> 2 x the vehicle's tyre radius
+ *
+ * Tyre and rim are told apart by radius, not by name: whichever geometry
+ * reaches furthest from the axle is the tyre. That keeps them as separate
+ * meshes, which matters because the renderer fades the rim out at speed so the
+ * spokes do not strobe.
+ */
+export function buildWheelFromGlb(buffer, geo = null) {
+  const g = geo ?? { tireRadius: 0.2, rimRadius: 0.127 };
+  const { doc, bin } = parseGlb(buffer);
+  const places = nodeTranslations(doc);
+  const problems = [];
+  const notes = [];
+
+  // ---- gather each node's geometry and its extents ------------------------
+  const parts = [];
+  for (let i = 0; i < (doc.nodes ?? []).length; i++) {
+    const node = doc.nodes[i];
+    if (node.mesh === undefined) continue;
+    const name = node.name ?? `node${i}`;
+    const at = places.get(name) ?? [0, 0, 0];
+    const acc = empty();
+    for (const prim of doc.meshes[node.mesh].primitives ?? []) {
+      expandPrimitive(doc, bin, prim, at, acc, problems);
+    }
+    if (!acc.position.length) continue;
+
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (let k = 0; k < acc.position.length; k += 3) {
+      for (let a = 0; a < 3; a++) {
+        lo[a] = Math.min(lo[a], acc.position[k + a]);
+        hi[a] = Math.max(hi[a], acc.position[k + a]);
+      }
+    }
+    parts.push({ name, acc, lo, hi, size: hi.map((v, a) => v - lo[a]) });
+  }
+  if (!parts.length) return { error: "no geometry in the file" };
+
+  // ---- drop stray objects -------------------------------------------------
+  // A default Blender cube left in the scene is small, at the origin, and
+  // nowhere near the wheel -- and if it is kept it drags the bounding box to
+  // the origin, which moves the computed centre and throws the scale off. It
+  // is a common enough leftover to be worth handling rather than complaining
+  // about.
+  const biggest = Math.max(...parts.map((p) => Math.max(...p.size)));
+  const kept = [];
+  for (const part of parts) {
+    if (Math.max(...part.size) < biggest * 0.25) {
+      notes.push(`ignored '${part.name}' — ${Math.max(...part.size).toFixed(3)} ` +
+                 `units across, far too small to be part of a wheel`);
+    } else {
+      kept.push(part);
+    }
+  }
+  if (!kept.length) return { error: "everything in the file looked like stray geometry" };
+
+  // ---- the frame, from the geometry itself --------------------------------
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (const part of kept) {
+    for (let a = 0; a < 3; a++) {
+      lo[a] = Math.min(lo[a], part.lo[a]);
+      hi[a] = Math.max(hi[a], part.hi[a]);
+    }
+  }
+  const size = hi.map((v, a) => v - lo[a]);
+  const centre = hi.map((v, a) => (v + lo[a]) / 2);
+
+  // The axle is the short axis. On a wheel that is unambiguous: the other two
+  // are both the tyre's outer diameter and are equal to within a rounding.
+  let axle = 0;
+  for (let a = 1; a < 3; a++) if (size[a] < size[axle]) axle = a;
+  const radial = [0, 1, 2].filter((a) => a !== axle);
+  const diameter = Math.max(size[radial[0]], size[radial[1]]);
+  const aspect = Math.min(size[radial[0]], size[radial[1]]) / diameter;
+  if (aspect < 0.9) {
+    problems.push(
+      `this does not look like a wheel: the two axes across the axle differ by ` +
+      `${((1 - aspect) * 100).toFixed(0)}%, and a wheel is round.`,
+    );
+  }
+
+  const scale = (g.tireRadius * 2) / diameter;
+  notes.push(`axle along ${"XYZ"[axle]}, ${diameter.toFixed(1)} units across`);
+  if (Math.abs(scale - 1) > 0.01) {
+    const guess = Math.abs(scale - 0.001) < 0.0002 ? " (millimetres)" : "";
+    notes.push(`scaled by ${scale.toExponential(2)}${guess} to a ` +
+               `${(g.tireRadius * 2 * 1000).toFixed(0)} mm outer diameter`);
+  }
+
+  // ---- classify, then transform -------------------------------------------
+  // Furthest from the axle is the tyre; everything else is the rim.
+  const reach = (part) => {
+    let r = 0;
+    for (let k = 0; k < part.acc.position.length; k += 3) {
+      const a = part.acc.position[k + radial[0]] - centre[radial[0]];
+      const b = part.acc.position[k + radial[1]] - centre[radial[1]];
+      r = Math.max(r, Math.hypot(a, b));
+    }
+    return r;
+  };
+  const reaches = kept.map(reach);
+  const maxReach = Math.max(...reaches);
+
+  const tyreAcc = empty();
+  const rimAcc = empty();
+  kept.forEach((part, i) => {
+    const isTyre = reaches[i] > maxReach * 0.9;
+    const target = isTyre ? tyreAcc : rimAcc;
+    notes.push(`'${part.name}' → ${isTyre ? "tyre" : "rim"} ` +
+               `(${(part.acc.position.length / 9).toFixed(0)} triangles)`);
+
+    // Most CAD exports carry no base colour, so the loader's neutral grey would
+    // make a tyre and a magnesium rim the same shade. Colouring by role is a
+    // better guess than that, and an explicit material still wins.
+    const flat = isTyre ? [0.105, 0.108, 0.115] : [0.60, 0.61, 0.64];
+    for (let k = 0; k < part.acc.position.length; k += 3) {
+      // Centre, scale, then rotate the axle onto +Z, which is the axis the
+      // renderer spins a wheel about.
+      const c = [
+        (part.acc.position[k] - centre[0]) * scale,
+        (part.acc.position[k + 1] - centre[1]) * scale,
+        (part.acc.position[k + 2] - centre[2]) * scale,
+      ];
+      const n = [part.acc.normal[k], part.acc.normal[k + 1], part.acc.normal[k + 2]];
+      const [px, py, pz] = axleToZ(c, axle);
+      const [nx, ny, nz] = axleToZ(n, axle);
+      target.position.push(px, py, pz);
+      target.normal.push(nx, ny, nz);
+      const hasColour = part.acc.color[k] !== 0.55 || part.acc.color[k + 1] !== 0.56;
+      if (hasColour) {
+        target.color.push(part.acc.color[k], part.acc.color[k + 1], part.acc.color[k + 2]);
+      } else {
+        target.color.push(flat[0], flat[1], flat[2]);
+      }
+    }
+  });
+
+  const tire = finish(tyreAcc);
+  const rim = finish(rimAcc);
+  if (rim.count === 0) {
+    notes.push("no separate rim — the whole wheel will fade together at speed");
+  }
+
+  return {
+    tire,
+    rim,
+    stats: {
+      triangles: (tire.count + rim.count) / 3,
+      tyreTriangles: tire.count / 3,
+      rimTriangles: rim.count / 3,
+      generator: doc.asset?.generator ?? "(unstated)",
+      axle: "XYZ"[axle],
+      scale,
+      notes,
+      problems,
+    },
+  };
+}
+
+/** Rotate so `axle` becomes +Z, leaving a right-handed frame. */
+function axleToZ(v, axle) {
+  if (axle === 2) return v;                 // already +Z
+  if (axle === 0) return [v[1], v[2], v[0]]; // X -> Z
+  return [v[2], v[0], v[1]];                 // Y -> Z
+}
+
+/** Fetch and build a wheel. Never throws; null means there is no model. */
+export async function loadWheelModel(url, geo = null) {
+  let buffer;
+  try {
+    const res = await fetch(url, { cache: "no-cache" });
+    if (!res.ok) return null;
+    buffer = await res.arrayBuffer();
+  } catch {
+    return null;
+  }
+  if (buffer.byteLength < 12) return null;
+  if (new DataView(buffer).getUint32(0, true) !== MAGIC) return null;
+  try {
+    return buildWheelFromGlb(buffer, geo);
+  } catch (err) {
+    return { error: String(err?.message ?? err) };
+  }
+}

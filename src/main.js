@@ -2,7 +2,7 @@
 
 import { SDM26 } from "./vehicle/params.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
-import { loadCarModel } from "./render/glbcar.js";
+import { loadCarModel, loadWheelModel } from "./render/glbcar.js";
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
@@ -32,12 +32,21 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
 // `rigid` means the camera is bolted to the chassis, so the cockpit stays
 // still relative to the driver's head and the world rolls instead. Chase is
 // deliberately not rigid.
+// What an imported wheel is scaled to match.
+const GEO_FOR_WHEEL = { tireRadius: SDM26.tireRadiusM, rimRadius: 0.127 };
+
 const CAMERAS = [
   // `live` means the eye point is read from the parameters every frame rather
   // than captured here, so the eye-height slider actually moves the camera.
   { name: "Cockpit", live: true, pitch: 0, fov: 78, rigid: true },
   { name: "Nose", ahead: 1.35, height: 0.46, pitch: -0.03, fov: 82, rigid: true },
   { name: "Chase", ahead: -4.6, height: 1.85, pitch: -0.14, fov: 70, rigid: false },
+  // Circles the car rather than following it. The only view that shows the car
+  // from anywhere but directly behind, which is what you need to judge the
+  // bodywork -- or to check that an imported CAD model is the right shape and
+  // the right way round.
+  { name: "Walkaround", orbit: true, radius: 3.6, height: 1.05, focusHeight: 0.42,
+    fov: 55, rigid: false },
 ];
 
 class Game {
@@ -104,13 +113,18 @@ class Game {
 
   async load(trackId) {
     const spec = TRACKS.find((t) => t.id === trackId) ?? TRACKS[0];
-    const [curve, track, cadCar] = await Promise.all([
+    const [curve, track, cadCar, cadWheel] = await Promise.all([
       loadTorqueCurve(),
       spec.kind === "venue" ? loadVenue(spec.url) : loadTrack(spec.url),
       // Optional CAD bodywork. Absent is the normal case, not an error, so
       // this resolves to null rather than rejecting and taking the load with
       // it.
       this.cadCar !== undefined ? Promise.resolve(this.cadCar) : loadCarModel("./data/car.glb"),
+      // A wheel on its own, which is a much easier thing to supply than a
+      // whole car and is four of the biggest objects on screen.
+      this.cadWheel !== undefined
+        ? Promise.resolve(this.cadWheel)
+        : loadWheelModel("./data/wheel.glb", GEO_FOR_WHEEL),
     ]);
     this.powertrain = new Powertrain(SDM26, curve);
     this.car = new BicycleModel(SDM26, this.powertrain);
@@ -135,8 +149,27 @@ class Game {
     } else {
       this.cadStatus = "No data/car.glb — drawing the procedural body.";
     }
+    this.cadWheel = cadWheel ?? null;
+    if (this.cadWheel?.error) {
+      this.wheelStatus = `data/wheel.glb could not be read: ${this.cadWheel.error}`;
+      console.warn(this.wheelStatus);
+      this.cadWheel = null;
+    } else if (this.cadWheel && !this.cadCar) {
+      // A whole-car model already brings its own wheels; only use a separate
+      // wheel when the body is procedural.
+      this.renderer.useWheelModel(this.cadWheel);
+      const w = this.cadWheel.stats;
+      this.wheelStatus = `CAD wheel: ${w.triangles.toLocaleString()} triangles ` +
+        `(${w.tyreTriangles.toLocaleString()} tyre + ${w.rimTriangles.toLocaleString()} rim)`;
+      console.info(this.wheelStatus, w.notes);
+    } else {
+      this.wheelStatus = "";
+    }
+
     const cadNote = document.getElementById("cadNote");
-    if (cadNote) cadNote.textContent = this.cadStatus;
+    if (cadNote) {
+      cadNote.textContent = [this.cadStatus, this.wheelStatus].filter(Boolean).join("  ·  ");
+    }
 
     this.restart();
     return { track, curve };
@@ -168,6 +201,7 @@ class Game {
   }
 
   update(dt) {
+    this.lastDt = dt;
     const inp = this.input.poll();
 
     // Hand the control profile's steering dynamics to the vehicle model, and
@@ -335,6 +369,14 @@ class Game {
     const wheelRate = Math.max(Math.abs(this.car.wF), Math.abs(this.car.wR));
     const rimFade = Math.max(0, Math.min(0.85, (wheelRate - 22) / 70));
 
+    // The walkaround camera turns on its own, and stops while the car is
+    // moving -- orbiting a car that is driving away is nauseating.
+    if (cam.orbit) {
+      const still = this.car.speed < 0.5;
+      this.orbitAngle = (this.orbitAngle ?? Math.PI * 0.75) +
+                        (still ? 0.22 : 0) * (this.lastDt ?? 1 / 60);
+    }
+
     this.renderer.fovDeg = cam.fov;
     this.renderer.draw({
       car: {
@@ -346,9 +388,16 @@ class Game {
       },
       view: {
         ahead: cam.live ? SDM26.eyeAheadOfCgM : cam.ahead,
-        height: cam.live ? SDM26.eyeHeightM : cam.height,
+        height: cam.orbit ? (this.orbitHeight ?? cam.height)
+              : cam.live ? SDM26.eyeHeightM : cam.height,
         pitchOffset: cam.pitch,
         rigid: cam.rigid,
+        orbit: cam.orbit,
+        // Live, so the walkaround can be moved while looking at the car --
+        // which is the entire point of having it.
+        radius: this.orbitRadius ?? cam.radius,
+        focusHeight: this.orbitFocus ?? cam.focusHeight,
+        orbitAngle: this.orbitAngle,
       },
       hubs: hubsFor(SDM26),
       wheels: {

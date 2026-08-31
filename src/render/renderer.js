@@ -410,11 +410,51 @@ export class Renderer {
     }
   }
 
+  /**
+   * Replace just the wheel, keeping whatever body is in use.
+   *
+   * Separate from `useCarModel` because a wheel is a far easier thing to
+   * supply than a whole car -- one sub-assembly, identical on all four
+   * corners, and four of the largest objects on screen. Nobody should have to
+   * model a complete car to stop looking at a procedural tyre.
+   */
+  useWheelModel(wheel) {
+    const gl = this.gl;
+    for (const key of ["tire", "rim"]) {
+      const mesh = this.car[key];
+      if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
+      for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
+    }
+    if (wheel) {
+      this.car.tire = this.makeMesh(wheel.tire);
+      this.car.rim = this.makeMesh(wheel.rim);
+      this.wheelModel = true;
+    } else {
+      const meshes = buildCarMeshes(this.carParams ?? null);
+      this.car.tire = this.makeMesh(meshes.tire);
+      this.car.rim = this.makeMesh(meshes.rim);
+      this.wheelModel = false;
+    }
+  }
+
   rebuildCar(params) {
     this.carParams = params;
     // A CAD model is not built from the vehicle parameters, so stretching the
     // wheelbase must not quietly replace it with procedural geometry.
     if (this.carModel) return;
+    if (this.wheelModel) {
+      // Same for an imported wheel: rebuild the body, keep the wheel.
+      const meshes = buildCarMeshes(params);
+      const gl = this.gl;
+      for (const key of ["body", "steeringWheel"]) {
+        const mesh = this.car[key];
+        if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
+        for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
+      }
+      this.car.body = this.makeMesh(meshes.body);
+      this.car.steeringWheel = this.makeMesh(meshes.steeringWheel);
+      return;
+    }
     const gl = this.gl;
     const body = buildCarMeshes(params).body;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.car.body.buffers.position);
@@ -640,10 +680,35 @@ export class Renderer {
       ]);
     }
 
-    const eye = transformPoint(this.camFrame, [s.view.ahead, s.view.height + s.heaveM, 0]);
-    const pitched = this.chain(T[4], [this.camFrame, rotZ(T[0], s.view.pitchOffset || 0)]);
-    const forward = normalize(transformDir(pitched, [1, 0, 0]));
-    const up = normalize(transformDir(pitched, [0, 1, 0]));
+    let eye;
+    let forward;
+    let up;
+    if (s.view.orbit) {
+      // Walkaround: circle the car at a fixed radius, looking at it.
+      //
+      // Every other camera sits on the car's centreline and looks along it,
+      // which is right for driving and useless for judging the car -- you can
+      // never see it from the side. This one is for looking at the model, and
+      // it is the only view that can show whether an imported CAD body is the
+      // right shape, the right way round, or sitting at the right height.
+      const a = s.view.orbitAngle || 0;
+      const r = s.view.radius ?? 3.4;
+      // The car sits at (x, -y) in GL space; orbit in that plane.
+      const cx = cam.x;
+      const cz = -cam.y;
+      const focusY = s.view.focusHeight ?? 0.45;
+      eye = [cx + Math.cos(a) * r, s.view.height, cz + Math.sin(a) * r];
+      const to = [cx - eye[0], focusY - eye[1], cz - eye[2]];
+      forward = normalize(to);
+      // World up, re-orthogonalised against the view direction.
+      const dotUp = forward[1];
+      up = normalize([-forward[0] * dotUp, 1 - dotUp * dotUp, -forward[2] * dotUp]);
+    } else {
+      eye = transformPoint(this.camFrame, [s.view.ahead, s.view.height + s.heaveM, 0]);
+      const pitched = this.chain(T[4], [this.camFrame, rotZ(T[0], s.view.pitchOffset || 0)]);
+      forward = normalize(transformDir(pitched, [1, 0, 0]));
+      up = normalize(transformDir(pitched, [0, 1, 0]));
+    }
 
     perspective(this.proj, ((this.fovDeg + (s.fovBoost || 0)) * Math.PI) / 180, aspect, 0.05, 700);
     lookAlong(this.view, eye, forward, up);

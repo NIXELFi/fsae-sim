@@ -45,6 +45,13 @@ export const GEO = {
   rimRadius: 0.127,       // 10 in wheel
   noseTip: 1.25,
   tail: -1.05,
+  // The foremost and rearmost points of the CAR, which are the wings and not
+  // the bodywork. The cone hitbox is derived from these: a front wing that
+  // reaches past the hitbox lets cones pass straight through it, which is both
+  // wrong and the opposite of the real car's problem -- the front wing is what
+  // actually hits cones.
+  frontWingTip: 1.42,
+  rearWingTip: -1.16,
   // Driver's eye, and where the wheel sits relative to it.
   // Wheel centre sits low enough that the driver looks OVER the rim, which is
   // where it is in the car -- put it at eye height and it blocks the course.
@@ -209,6 +216,90 @@ function section(x, halfW, yBot, yTop, round = 0.35) {
   return pts;
 }
 
+/**
+ * A cambered aerofoil section, as a closed loop in the chord plane.
+ *
+ * Returned in chord-normalised coordinates: x from 0 at the leading edge to 1
+ * at the trailing edge, y positive upward. Thickness follows the NACA 4-digit
+ * distribution, which is a shape everyone recognises even at this size, applied
+ * about a circular-arc camber line.
+ *
+ * This exists because a wing drawn as a flat plate is the single thing that
+ * most makes a formula car look unfinished. A real wing has a blunt leading
+ * edge, a sharp trailing edge and visible curvature, and at the angles a
+ * Formula Student car runs -- steep enough to be obvious -- you see all three
+ * from any angle.
+ */
+function aerofoil(thickness = 0.12, camber = 0.055, n = 16) {
+  const yt = (x) =>
+    (thickness / 0.2) *
+    (0.2969 * Math.sqrt(x) - 0.1260 * x - 0.3516 * x * x +
+     0.2843 * x * x * x - 0.1015 * x * x * x * x);
+  // Circular-arc camber line: peak `camber` at mid-chord, zero at both ends.
+  const yc = (x) => camber * 4 * x * (1 - x);
+  const dyc = (x) => camber * 4 * (1 - 2 * x);
+
+  const upper = [];
+  const lower = [];
+  for (let i = 0; i <= n; i++) {
+    // Cosine spacing: points bunch at the leading edge, where the curvature is.
+    const x = 0.5 * (1 - Math.cos((Math.PI * i) / n));
+    const t = yt(x);
+    const c = yc(x);
+    const theta = Math.atan(dyc(x));
+    upper.push([x - t * Math.sin(theta), c + t * Math.cos(theta)]);
+    lower.push([x + t * Math.sin(theta), c - t * Math.cos(theta)]);
+  }
+  // One closed loop, trailing edge -> upper -> leading edge -> lower.
+  return upper.concat(lower.slice(1, -1).reverse());
+}
+
+/**
+ * A wing endplate: a solid plate with thickness, from an outline in the XY
+ * plane.
+ *
+ * Built as a closed prism rather than two facing quads. Two quads have no
+ * edges, so from any oblique angle you see straight through the gap between
+ * them and the plate reads as a pair of flags rather than a piece of carbon.
+ */
+function endplate(b, z, side, outline, color) {
+  const t = 0.012;
+  const inner = outline.map(([x, y]) => [x, y, z]);
+  const outer = outline.map(([x, y]) => [x, y, z + side * t]);
+  b.loft([inner, outer], color, true, true);
+}
+
+/**
+ * Lay an aerofoil section into the car's frame as a spanwise wing element.
+ *
+ * The chord runs backwards (-X) from the leading edge, the span runs along Z,
+ * and a positive angle of attack pitches the leading edge up -- which for a
+ * downforce wing means the section is upside down relative to an aircraft's.
+ */
+function wingElement(b, opts) {
+  const {
+    xLead, y, chord, span, aoaDeg = 0, thickness = 0.12, camber = 0.055,
+    zCentre = 0, color = CARBON_LT, taper = 1,
+  } = opts;
+  const profile = aerofoil(thickness, camber);
+  const a = (aoaDeg * Math.PI) / 180;
+  const ca = Math.cos(a);
+  const sa = Math.sin(a);
+
+  const at = (zFrac) => {
+    const z = zCentre + zFrac * span / 2;
+    // Taper toward the tips, which is what stops a wing reading as a slab.
+    const c = chord * (1 - (1 - taper) * Math.abs(zFrac));
+    return profile.map(([px, py]) => {
+      // Downforce wing: flip the section so camber points down.
+      const cx = px * c;
+      const cy = -py * c;
+      return [xLead - (cx * ca - cy * sa), y + (cx * sa + cy * ca), z];
+    });
+  };
+  b.loft([at(-1), at(-0.55), at(0), at(0.55), at(1)], color, true, true);
+}
+
 // -------------------------------------------------------------------- parts ---
 
 /**
@@ -221,10 +312,26 @@ function buildBody() {
   const b = new Builder();
   const fa = GEO.frontAxle, ra = GEO.rearAxle;
 
-  // ---- floor + tub sides. Left open on top so it reads as a cockpit. ----
-  b.box(-0.15, 0.045, 0, 1.45, 0.05, 0.62, CARBON);
+  // ---- tub ----
+  // Lofted rather than built from slabs. The nose and the engine cover were
+  // already lofted, and the box between them is what made the car read as a
+  // stack of panels: a monocoque is a continuous surface that narrows toward
+  // the bulkhead, and the join is the whole reason it looks like one piece.
+  //
+  // The top of this loft sits below the cockpit rim, so the rim and its padding
+  // are still added on top and the cockpit stays open.
+  b.loft([
+    section(0.58, 0.295, 0.045, 0.33, 0.45),
+    section(0.30, 0.315, 0.040, 0.34, 0.50),
+    section(-0.05, 0.325, 0.038, 0.35, 0.55),
+    section(-0.35, 0.315, 0.040, 0.36, 0.50),
+    section(-0.58, 0.300, 0.045, 0.38, 0.45),
+  ], MAROON, false, false);
+
+  // Floor, flat and slightly proud of the tub underside so it catches light.
+  b.box(-0.15, 0.038, 0, 1.45, 0.014, 0.60, CARBON);
+
   for (const side of [-1, 1]) {
-    b.box(-0.15, 0.215, side * 0.315, 1.45, 0.30, 0.045, MAROON);
     // Cockpit edge is dark foam padding, which is both what the real car has
     // and what keeps the driver's peripheral vision quiet -- a gold rail here
     // sits right where the front wheel is and swamps it.
@@ -263,17 +370,59 @@ function buildBody() {
   }
 
   // ---- front wing: main plane, flap and endplates ----
-  b.box(1.10, 0.105, 0, 0.20, 0.022, 1.06, CARBON_LT);
-  b.box(0.97, 0.175, 0, 0.13, 0.020, 1.00, CARBON_LT);
+  // Ahead of the nose, which is where a Formula Student front wing sits. It
+  // used to start behind the nose tip, so the nose poked through it and the
+  // whole front of the car read as one maroon mass.
+  wingElement(b, { xLead: GEO.frontWingTip, y: 0.105, chord: 0.22, span: 1.10,
+                   aoaDeg: 6, thickness: 0.13, camber: 0.075, taper: 0.92 });
+  wingElement(b, { xLead: 1.22, y: 0.175, chord: 0.14, span: 1.02,
+                   aoaDeg: 22, thickness: 0.11, camber: 0.085 });
   for (const side of [-1, 1]) {
-    b.box(1.06, 0.150, side * 0.545, 0.30, 0.20, 0.016, MAROON);
+    endplate(b, side * 0.565, side, [
+      [GEO.frontWingTip + 0.02, 0.060], [GEO.frontWingTip + 0.02, 0.175],
+      [1.14, 0.250], [1.12, 0.055],
+    ], MAROON);
   }
 
   // ---- rear wing on twin pylons ----
-  for (const side of [-1, 1]) b.box(-0.94, 0.55, side * 0.16, 0.05, 0.55, 0.030, CARBON);
-  b.box(-0.96, 0.845, 0, 0.26, 0.024, 1.00, CARBON_LT);
-  b.box(-1.05, 0.930, 0, 0.17, 0.022, 1.00, CARBON_LT);
-  for (const side of [-1, 1]) b.box(-0.99, 0.885, side * 0.505, 0.36, 0.24, 0.016, MAROON);
+  // Swan-neck mounts: they meet the UPPER surface, which is what a real one
+  // does so the pylon does not disturb the working side of the wing.
+  for (const side of [-1, 1]) {
+    b.polyTube([
+      [-0.90, 0.40, side * 0.16],
+      [-0.94, 0.72, side * 0.16],
+      [-0.90, 0.90, side * 0.16],
+    ], 0.016, 6, CARBON);
+  }
+  wingElement(b, { xLead: -0.83, y: 0.855, chord: 0.26, span: 1.00,
+                   aoaDeg: 14, thickness: 0.12, camber: 0.06 });
+  wingElement(b, { xLead: -1.00, y: 0.945, chord: 0.17, span: 1.00,
+                   aoaDeg: 30, thickness: 0.10, camber: 0.09 });
+  for (const side of [-1, 1]) {
+    endplate(b, side * 0.505, side, [
+      [-0.78, 0.760], [-0.78, 0.905],
+      [GEO.rearWingTip, 1.010], [GEO.rearWingTip, 0.735],
+    ], MAROON);
+  }
+
+  // ---- diffuser ----
+  // The floor has to end somewhere, and a flat cut-off is the one thing that
+  // most says "this model stopped here". A ramp reads as a car.
+  b.quad([-0.80, 0.038, -0.30], [-0.80, 0.038, 0.30],
+         [GEO.tail, 0.20, 0.26], [GEO.tail, 0.20, -0.26], CARBON_LT);
+  for (const side of [-1, 1]) {
+    b.quad([-0.80, 0.038, side * 0.30], [GEO.tail, 0.20, side * 0.26],
+           [GEO.tail, 0.05, side * 0.26], [-0.80, 0.030, side * 0.30], CARBON);
+  }
+
+  // ---- headrest ----
+  // Required by the rules, and from outside it is the thing that turns an open
+  // box into a cockpit with someone sitting in it.
+  b.loft([
+    section(-0.36, 0.135, 0.42, 0.60, 0.8),
+    section(-0.46, 0.150, 0.42, 0.62, 0.8),
+    section(-0.54, 0.130, 0.42, 0.58, 0.8),
+  ], CARBON_LT, true, true);
 
   // ---- roll hoops ----
   const mainHoop = [];
@@ -336,14 +485,35 @@ function buildBody() {
 function buildTire() {
   const b = new Builder();
   const R = GEO.tireRadius, HW = GEO.tireHalfWidth;
-  b.cylZ(0, 0, 0, R, HW * 0.86, 24, TIRE);
-  // Shoulders, so the tread does not end in a hard edge.
-  for (const s of [-1, 1]) {
-    b.loft([
-      ringZ(R, s * HW * 0.86, 24),
-      ringZ(R * 0.97, s * HW, 24),
-    ], TIRE_WALL, false, false);
-    b.annulusZ(0, 0, s * HW, GEO.rimRadius, R * 0.97, 24, TIRE_WALL);
+  const SEG = 28;
+
+  // A slick's cross-section is a continuous curve: crowned across the tread,
+  // rolling into the shoulder, then a sidewall that bulges before it meets the
+  // rim. The previous version was a cylinder with one chamfer at each end,
+  // which from any angle reads as a machined edge rather than rubber -- and
+  // there are four of these filling the frame, so it is the most-seen surface
+  // on the car.
+  //
+  // Each entry is [z as a fraction of half-width, radius as a fraction of R].
+  const profile = [
+    [0.00, 1.000],
+    [0.45, 0.997],   // crown: the tread is very slightly domed
+    [0.70, 0.988],
+    [0.85, 0.965],   // shoulder
+    [0.94, 0.925],
+    [1.00, 0.870],   // sidewall bulge
+    [0.97, 0.760],
+    [0.90, 0.660],
+  ];
+
+  for (const side of [-1, 1]) {
+    const rings = profile.map(([zf, rf]) => ringZ(R * rf, side * HW * zf, SEG));
+    // Tread and shoulder in tyre black; the sidewall a touch lighter, which is
+    // what makes the shoulder line visible at all.
+    b.loft(rings.slice(0, 4), TIRE, false, false);
+    b.loft(rings.slice(3), TIRE_WALL, false, false);
+    // Close the sidewall onto the rim.
+    b.annulusZ(0, 0, side * HW * 0.90, GEO.rimRadius, R * 0.660, SEG, TIRE_WALL);
   }
   return b.mesh();
 }
@@ -525,8 +695,8 @@ export function bodyBoxFor(p) {
 }
 
 // Overhang beyond each axle, from the authored body.
-const FRONT_OVERHANG = GEO.noseTip - GEO.frontAxle;   // 0.462 m
-const REAR_OVERHANG = GEO.rearAxle - GEO.tail;        // 0.308 m
+const FRONT_OVERHANG = Math.max(GEO.noseTip, GEO.frontWingTip) - GEO.frontAxle;
+const REAR_OVERHANG = GEO.rearAxle - Math.min(GEO.tail, GEO.rearWingTip);
 
 export function buildCarMeshes(params) {
   const body = buildBody();
