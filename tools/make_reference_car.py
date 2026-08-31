@@ -29,8 +29,13 @@ from glb import GlbBuilder  # noqa: E402
 #
 # ORIGIN is the centre of gravity projected onto the ground:
 #   X = 0 at the CG,  Y = 0 at the ground plane,  Z = 0 on centreline.
-# AXES are +X forward, +Y up, +Z to the left.
+# AXES are +X forward, +Y up, +Z to the RIGHT.
 # UNITS are metres.
+#
+# +Z right is not arbitrary: it is what carmesh.js uses (FL sits at
+# z = -track/2), and it is the only choice that makes the triad right-handed,
+# because forward x up = right. Get it backwards and the car is mirrored --
+# invisible on a symmetric model, baffling on a real one.
 #
 # Getting the origin wrong is the mistake with the least visible symptom -- the
 # car simply sits offset from where the physics thinks it is, and only looks
@@ -181,10 +186,10 @@ def build():
     wheel = cylinder_z(TYRE_RADIUS, TYRE_HALF_WIDTH)
     wheel_mesh = g.mesh("wheel_mesh", *wheel, material=rubber)
     for name, x, z in [
-        ("wheel_fl", FRONT_AXLE, TRACK_FRONT / 2),
-        ("wheel_fr", FRONT_AXLE, -TRACK_FRONT / 2),
-        ("wheel_rl", REAR_AXLE, TRACK_REAR / 2),
-        ("wheel_rr", REAR_AXLE, -TRACK_REAR / 2),
+        ("wheel_fl", FRONT_AXLE, -TRACK_FRONT / 2),
+        ("wheel_fr", FRONT_AXLE, TRACK_FRONT / 2),
+        ("wheel_rl", REAR_AXLE, -TRACK_REAR / 2),
+        ("wheel_rr", REAR_AXLE, TRACK_REAR / 2),
     ]:
         g.node(name, mesh=wheel_mesh, translation=(x, TYRE_RADIUS, z))
 
@@ -208,7 +213,7 @@ def main():
     )
     print(f"wrote {out}  ({size / 1024:.1f} KB, {tris} triangles)")
     print(f"  nodes: {', '.join(n['name'] for n in g.doc['nodes'])}")
-    print(f"  frame: origin at the CG on the ground, +X forward, +Y up, +Z left, metres")
+    print(f"  frame: origin at the CG on the ground, +X forward, +Y up, +Z right, metres")
     print(f"  front axle x = {FRONT_AXLE:+.3f}, rear axle x = {REAR_AXLE:+.3f}")
 
 

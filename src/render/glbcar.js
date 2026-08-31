@@ -227,6 +227,164 @@ function finish(acc) {
   };
 }
 
+
+// ---------------------------------------------------------------------------
+// Fitting an arbitrary export into the simulator's frame
+// ---------------------------------------------------------------------------
+
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+const norm = (a) => {
+  const l = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0] / l, a[1] / l, a[2] / l];
+};
+
+/** Unit conversions worth recognising, as a factor to metres. */
+const UNIT_GUESSES = [
+  [1, "metres"],
+  [0.001, "millimetres"],
+  [0.01, "centimetres"],
+  [0.0254, "inches"],
+  [0.3048, "feet"],
+];
+
+/**
+ * Work out the transform that puts an arbitrary export into the simulator's
+ * frame, using the four wheel hubs as fiducials.
+ *
+ * The point of this is that a CAD assembly has no reason to share the
+ * simulator's idea of which way is forward or where the origin should be, and
+ * making that the exporter's problem is a poor trade: it is fiddly, easy to get
+ * subtly wrong, and completely determined by information already in the file.
+ *
+ * Four named hubs pin the frame down exactly:
+ *
+ *   forward  rear hub midpoint -> front hub midpoint
+ *   right    left hub -> right hub
+ *   up       right x forward
+ *
+ * Scale comes from comparing the model's wheelbase with the vehicle's, snapped
+ * to a real unit conversion rather than applied continuously -- a model whose
+ * wheelbase genuinely differs from the parameters should be reported, not
+ * silently stretched to fit.
+ *
+ * Only the two glTF-mandated conventions are left for the exporter: Y-up and
+ * metres, both of which Blender's exporter handles on its own.
+ */
+function solveFrame(hubs, geo) {
+  const by = (n) => hubs.find((h) => h.name === n);
+  const fl = by("FL");
+  const fr = by("FR");
+  const rl = by("RL");
+  const rr = by("RR");
+  if (!fl || !fr || !rl || !rr) return null;
+
+  const v = (h) => [h.x, h.y, h.z];
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+  const frontMid = mid(v(fl), v(fr));
+  const rearMid = mid(v(rl), v(rr));
+
+  const spanForward = sub(frontMid, rearMid);
+  const modelWheelbase = Math.hypot(...spanForward);
+  if (modelWheelbase < 1e-9) return null; // front and rear hubs coincide
+
+  // Scale, snapped to a plausible unit conversion.
+  const wheelbase = geo.frontAxle - geo.rearAxle;
+  const ratio = wheelbase / modelWheelbase;
+  let scale = 1;
+  let units = "metres";
+  let unitConfident = false;
+  for (const [factor, name] of UNIT_GUESSES) {
+    if (Math.abs(ratio / factor - 1) < 0.1) {
+      scale = factor;
+      units = name;
+      unitConfident = true;
+      break;
+    }
+  }
+
+  // The frame.
+  //
+  // +Z is to the RIGHT, not the left. That is what `carmesh.js` uses -- it puts
+  // FL at z = -track/2 -- and it is the only choice that makes the triad
+  // right-handed, since forward x up = right. Getting this backwards produces a
+  // mirrored car, which on a symmetric model is completely invisible and on a
+  // real asymmetric one is baffling.
+  //
+  // `right` is re-derived from `up` so the axes come out exactly orthonormal
+  // even when the hubs are not square, which on a real assembly they are not:
+  // there is toe and camber in it.
+  const forward = norm(spanForward);
+  const lateral = norm(sub(v(fr), v(fl)));   // FL -> FR points right
+  const up = norm(cross(lateral, forward));  // right x forward = up
+  const right = cross(forward, up);          // forward x up = right
+
+  // Where the origin has to be, expressed in the model's own axes.
+  //
+  // Along the car: the CG, which the vehicle parameters place a fixed distance
+  // behind the front axle. Vertically: the ground, a tyre radius below the hub
+  // centres. Laterally: the centreline between the hubs.
+  const S = (p) => [p[0] * scale, p[1] * scale, p[2] * scale];
+  const frontMidS = S(frontMid);
+  const rearMidS = S(rearMid);
+  const originForward = dot(frontMidS, forward) - geo.frontAxle;
+  const originUp = dot(frontMidS, up) - geo.tireRadius;
+  const originRight = (dot(frontMidS, right) + dot(rearMidS, right)) / 2;
+
+  return {
+    scale,
+    units,
+    unitConfident,
+    forward,
+    up,
+    right,
+    origin: [originForward, originUp, originRight],
+    modelWheelbase: modelWheelbase * scale,
+    /** Apply to a position. */
+    point(p) {
+      const q = S(p);
+      return [
+        dot(q, forward) - originForward,
+        dot(q, up) - originUp,
+        dot(q, right) - originRight,
+      ];
+    },
+    /** Apply to a direction -- rotation only, no translation or scale. */
+    direction(d) {
+      return [dot(d, forward), dot(d, up), dot(d, right)];
+    },
+    /** How far this is from the identity, as a human-readable summary. */
+    describe() {
+      const deg = (Math.acos(Math.min(1, Math.max(-1, forward[0]))) * 180) / Math.PI;
+      const moved = Math.hypot(originForward, originUp, originRight);
+      const parts = [];
+      if (scale !== 1) parts.push(`scaled from ${units}`);
+      if (deg > 1) parts.push(`rotated ${deg.toFixed(0)}°`);
+      if (moved > 0.01) parts.push(`origin moved ${moved.toFixed(3)} m`);
+      return parts.length ? `fitted: ${parts.join(", ")}` : "already in the simulator's frame";
+    },
+  };
+}
+
+/** Rewrite a mesh in place through a solved frame. */
+function applyFrame(mesh, frame) {
+  for (let i = 0; i < mesh.position.length; i += 3) {
+    const p = frame.point([mesh.position[i], mesh.position[i + 1], mesh.position[i + 2]]);
+    mesh.position[i] = p[0];
+    mesh.position[i + 1] = p[1];
+    mesh.position[i + 2] = p[2];
+    const n = frame.direction([mesh.normal[i], mesh.normal[i + 1], mesh.normal[i + 2]]);
+    mesh.normal[i] = n[0];
+    mesh.normal[i + 1] = n[1];
+    mesh.normal[i + 2] = n[2];
+  }
+}
+
 const WHEEL_NAMES = ["wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"];
 
 /**
@@ -236,7 +394,8 @@ const WHEEL_NAMES = ["wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"];
  *   in exactly the shape `buildCarMeshes` produces, plus the hub positions
  *   read from the file so the drawn wheels sit where the CAD puts them.
  */
-export function buildCarFromGlb(buffer) {
+export function buildCarFromGlb(buffer, geo = null) {
+  const g = geo ?? { frontAxle: 0.788, rearAxle: -0.742, tireRadius: 0.2 };
   const { doc, bin } = parseGlb(buffer);
   const places = nodeTranslations(doc);
 
@@ -317,21 +476,75 @@ export function buildCarFromGlb(buffer) {
     }
   }
 
+  // Fit the whole thing into the simulator's frame. Everything below this line
+  // is in simulator coordinates regardless of what the exporter chose.
+  const body = finish(bodyAcc);
+  const tire = finish(wheelAcc);
+  const steeringWheel = finish(steerAcc);
+  let frame = null;
+  if (hubs.length === 4) {
+    frame = solveFrame(hubs, g);
+    if (frame) {
+      applyFrame(body, frame);
+      // The wheel and steering wheel are already centred on their own origins,
+      // so they need the rotation but NOT the translation -- running them
+      // through `point` would push them back out to a world position.
+      for (const mesh of [tire, steeringWheel]) {
+        for (let i = 0; i < mesh.position.length; i += 3) {
+          const p = frame.direction([
+            mesh.position[i] * frame.scale,
+            mesh.position[i + 1] * frame.scale,
+            mesh.position[i + 2] * frame.scale,
+          ]);
+          const n = frame.direction([mesh.normal[i], mesh.normal[i + 1], mesh.normal[i + 2]]);
+          mesh.position[i] = p[0];
+          mesh.position[i + 1] = p[1];
+          mesh.position[i + 2] = p[2];
+          mesh.normal[i] = n[0];
+          mesh.normal[i + 1] = n[1];
+          mesh.normal[i + 2] = n[2];
+        }
+      }
+      for (const h of hubs) {
+        const p = frame.point([h.x, h.y, h.z]);
+        h.x = p[0];
+        h.y = p[1];
+        h.z = p[2];
+      }
+      if (steerCentre) steerCentre = frame.point(steerCentre);
+      if (!frame.unitConfident) {
+        problems.push(
+          `the model's wheelbase is ${frame.modelWheelbase.toFixed(3)} m against ` +
+          `${(g.frontAxle - g.rearAxle).toFixed(3)} m in the vehicle parameters, ` +
+          `and that is not a unit conversion — check the export scale, or the ` +
+          `wheelbase parameter`,
+        );
+      }
+    }
+  } else {
+    problems.push(
+      `only ${hubs.length} of 4 wheel nodes found, so the model's frame cannot ` +
+      `be solved — it is being used exactly as exported`,
+    );
+  }
+
   if (bodyAcc.position.length === 0) problems.push("no bodywork geometry");
   if (hubs.length !== 4) {
     problems.push(`${hubs.length} of 4 wheel nodes found (${WHEEL_NAMES.join(", ")})`);
   }
 
   return {
-    body: finish(bodyAcc),
-    tire: finish(wheelAcc),
+    body,
+    tire,
     // The CAD wheel includes its own rim, so the procedural rim is not used.
     rim: finish(empty()),
-    steeringWheel: finish(steerAcc),
+    steeringWheel,
     hubs: hubs.length === 4 ? hubs : null,
     steerCentre,
     wheelOffset,
+    frame,
     stats: {
+      fit: frame ? frame.describe() : "not fitted",
       triangles: (bodyAcc.position.length + wheelAcc.position.length +
                   steerAcc.position.length) / 9,
       nodes: (doc.nodes ?? []).length,

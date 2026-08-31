@@ -529,31 +529,57 @@ The Bevy build reads the same model from `apps/bevy-spike/assets/car.glb`.
 
 ```bash
 python tools/make_reference_car.py reference-car.glb   # a model in the right frame
-python tools/check_car_glb.py your-export.glb          # check yours before driving it
+node tools/check_car_glb.mjs your-export.glb           # check yours before driving it
 ```
 
-### Setting the origin in SolidWorks
+### You do not have to match the simulator's coordinate system
 
-You can reframe the export without moving any geometry: create
-`Insert → Reference Geometry → Coordinate System` at the CG on the ground, then
-choose it as the **Output coordinate system** in the STEP export options. The
-model is untouched; only the frame the file is written in changes, and you can
-keep several coordinate systems and export different frames from one model.
+Export in whatever frame your assembly is already in. The loader solves the
+frame from the four wheel hubs and fits the model itself:
 
-### The frame
+```
+forward   rear hub midpoint -> front hub midpoint
+right     left hub -> right hub
+up        right x forward
+origin    the CG, placed from the vehicle parameters relative to the axles
+scale     wheelbase ratio, snapped to a real unit conversion
+```
+
+A Z-up, millimetre, arbitrary-origin export facing +Y comes out identical to one
+authored in the simulator's own frame — that is a regression test, not a claim.
+The checker prints what it did, e.g. *"fitted: scaled from millimetres, rotated
+90°, origin moved 0.743 m"*.
+
+Two conventions are **not** negotiable, and neither of them is ours: glTF
+mandates **Y-up** and **metres**. Blender's exporter converts Z-up to Y-up on
+its own, so in practice this costs you nothing.
+
+Scale is snapped to a recognised unit conversion (mm, cm, inches, feet) rather
+than applied continuously — a wheelbase that genuinely disagrees with the
+vehicle parameters is reported rather than silently stretched to fit.
+
+If you would rather set the frame in CAD anyway, you can do it without moving
+geometry: `Insert → Reference Geometry → Coordinate System`, then choose it as
+the **Output coordinate system** in the STEP export options.
+
+### The frame it fits into
 
 | | |
 |---|---|
 | **Origin** | the centre of gravity, projected onto the ground |
-| **Axes** | +X forward, +Y up, +Z to the left |
+| **Axes** | +X forward, +Y up, **+Z to the right** |
 | **Units** | metres |
 | **Front axle** | x = +0.788 |
 | **Rear axle** | x = −0.742 |
 | **Wheel centres** | y = +0.200 |
 
-Building the model about the **front axle** instead of the CG is the mistake
-with the least visible symptom: it looks fine standing still and pivots about
-the wrong point the moment the car yaws. `check_car_glb.py` detects it by name.
+`+Z` is to the **right**, matching `carmesh.js` (which puts FL at `z = −track/2`)
+and the only choice that makes the triad right-handed, since forward × up =
+right. Backwards mirrors the car, which on a symmetric model is completely
+invisible — it is how the reference car was wrong for a while.
+
+**The Bevy build does not auto-fit.** It uses the glTF node transforms directly,
+so a model for it does have to be in the frame above.
 
 ### Node names
 
@@ -586,10 +612,12 @@ how you find out.
    parts rather than decimating them — most of an assembly is inside the car.
 4. **Name the nodes** as above, apply any node scale (Ctrl+A in Blender), and
    orient to the frame in the table.
-5. **Export .glb** with normals and materials, to `data/car.glb`.
-6. **Run the checker.** It reports scale, orientation, ground plane, node names,
-   hub positions against the vehicle parameters, node transforms, triangle count
-   and missing normals — and says what to change, not just what is wrong.
+5. **Export .glb** with normals and materials, to `data/car.glb`. Orientation
+   and origin do not matter; the loader fits them.
+6. **Run the checker.** It runs the simulator's own loader rather than
+   restating its rules, so what it reports is by construction what the
+   simulator will do — the fit it applied, the hub positions against the
+   vehicle parameters, triangle count and missing materials.
 
 ## Validation
 
@@ -658,7 +686,7 @@ tools/
   make_mis.py       generates the Michigan International Speedway venue
   glb.py            minimal glTF binary reader/writer, no dependencies
   make_reference_car.py  a car.glb in the frame the simulator expects
-  check_car_glb.py  validates a CAD export before you try to drive it
+  check_car_glb.mjs runs the real loader over an export and reports what it did
   plan_view.py      draws the venue plan + cross-section for review
   validate.js       headless physics + ETC-map checks
   smoke_desktop.mjs launches the built exe and interrogates it over DevTools

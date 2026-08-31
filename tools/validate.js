@@ -533,8 +533,13 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
 {
   // A minimal but complete .glb: one body triangle and one wheel triangle,
   // each on its own named node, with a material apiece.
-  const buildGlb = (wheelOffset = [0, 0, 0]) => {
+  const buildGlb = (wheelOffset = [0, 0, 0], frame = null) => {
     const [ox, oy, oz] = wheelOffset;
+    // `rot` transforms mesh-local geometry; `place` transforms node
+    // translations. They differ by the assembly origin offset.
+    const rot = frame ? frame.rot : (p) => p;
+    const place = frame ? frame.place : (p) => p;
+    const tri = (pts) => pts.flatMap((p) => rot(p));
     const positions = new Float32Array([
       // body triangle, around the origin
       0, 0.3, 0, 1, 0.3, 0, 0, 0.9, 0,
@@ -566,10 +571,11 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
         { name: "body", mesh: 0 },
         // The hub is well away from the origin: if the loader fails to
         // re-centre the geometry, the wheel's bounding box gives it away.
-        { name: "wheel_fl", mesh: 1, translation: [0.788, 0.2, 0.604] },
-        { name: "wheel_fr", mesh: 1, translation: [0.788, 0.2, -0.604] },
-        { name: "wheel_rl", mesh: 1, translation: [-0.742, 0.2, 0.604] },
-        { name: "wheel_rr", mesh: 1, translation: [-0.742, 0.2, -0.604] },
+        // +Z is to the RIGHT, matching carmesh.js, so FL is at negative Z.
+        { name: "wheel_fl", mesh: 1, translation: place([0.788, 0.2, -0.604]) },
+        { name: "wheel_fr", mesh: 1, translation: place([0.788, 0.2, 0.604]) },
+        { name: "wheel_rl", mesh: 1, translation: place([-0.742, 0.2, -0.604]) },
+        { name: "wheel_rr", mesh: 1, translation: place([-0.742, 0.2, 0.604]) },
       ],
       meshes: [
         { name: "b", primitives: [{ attributes: { POSITION: 0, NORMAL: 2 }, indices: 4, material: 0 }] },
@@ -580,8 +586,8 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
         { name: "rubber", pbrMetallicRoughness: { baseColorFactor: [0.06, 0.06, 0.07, 1] } },
       ],
       accessors: [
-        { bufferView: 0, componentType: 5126, count: 3, type: "VEC3", min: [0, 0.3, 0], max: [1, 0.9, 0] },
-        { bufferView: 0, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3", min: [-0.2 + ox, -0.2 + oy, oz], max: [0.2 + ox, 0.2 + oy, oz] },
+        { bufferView: 0, componentType: 5126, count: 3, type: "VEC3" },
+        { bufferView: 0, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3" },
         { bufferView: 1, componentType: 5126, count: 3, type: "VEC3" },
         { bufferView: 1, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3" },
         { bufferView: 2, componentType: 5125, count: 3, type: "SCALAR" },
@@ -631,6 +637,7 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
   // Hub positions come from the file, not from the vehicle parameters.
   const fl = car.hubs.find((h) => h.name === "FL");
   check("front hub x from the file", fl.x, 0.787, 0.789, " m");
+  check("FL is on the -Z side", fl.z, -0.606, -0.602, " m");
   check("front hub flagged front", fl.front ? 1 : 0, 1, 1, "");
   const rl = car.hubs.find((h) => h.name === "RL");
   check("rear hub flagged rear", rl.front ? 0 : 1, 1, 1, "");
@@ -677,12 +684,54 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
     const off2 = Math.max(...lo2.map((v, k) => Math.abs((v + hi2[k]) / 2)));
     check("off-centre wheel is re-centred", off2, 0, 1e-6, " m");
 
-    // And the wheel must still be DRAWN where the model put it: the hub moves
-    // by exactly what was taken out of the geometry.
+    // And the car must not MOVE because of it. The hub takes back what was
+    // removed from the geometry, and the frame solve -- which runs afterwards
+    // and reads the corrected hubs -- absorbs a uniform offset entirely. So the
+    // wheel ends up exactly where it belongs rather than 50 mm forward of it,
+    // which is the outcome that actually matters.
     const fl2 = car2.hubs.find((h) => h.name === "FL");
-    check("hub compensates, so it still sits right", fl2.x, 0.788 + 0.049, 0.788 + 0.051, " m");
+    check("an off-centre wheel does not move the car", fl2.x, 0.786, 0.790, " m");
   }
 
+
+  // An export in ANY frame must come out in the simulator's.
+  //
+  // This is what makes the CAD requirements small enough to be worth meeting.
+  // A SolidWorks assembly has no reason to share this simulator's idea of
+  // forward, up, or where the origin belongs, and the four wheel hubs pin all
+  // of that down exactly -- so the frame is solved from the file rather than
+  // demanded of whoever exported it.
+  {
+    // Z-up, millimetres, facing +Y, origin displaced. About as unlike the
+    // simulator's frame as a real export gets.
+    const MM = 1000;
+    const OFF = [250, -700, 0];
+    // Rotation and scale only, for mesh-local geometry: the assembly origin
+    // offset belongs on the node, not baked into the vertices. Putting it in
+    // both is how this fixture was wrong the first time, and the loader
+    // faithfully reported the resulting nonsense.
+    const rot = (p) => [p[2] * MM, p[0] * MM, p[1] * MM];
+    const place = (p) => rot(p).map((v, i) => v + OFF[i]);
+
+    const glbSw = buildGlb([0, 0, 0], { rot, place });
+    const fitted = buildCarFromGlb(glbSw);
+
+    check("solves a foreign frame", fitted.hubs ? 1 : 0, 1, 1, "");
+    check("detects the unit scale", fitted.frame.scale, 0.00099, 0.00101, "");
+
+    const flf = fitted.hubs.find((h) => h.name === "FL");
+    check("fitted front hub x", flf.x, 0.786, 0.790, " m");
+    check("fitted front hub y", flf.y, 0.198, 0.202, " m");
+    check("fitted FL still on the -Z side", flf.z, -0.606, -0.602, " m");
+    const rrf = fitted.hubs.find((h) => h.name === "RR");
+    check("fitted rear hub x", rrf.x, -0.744, -0.740, " m");
+    check("fitted RR still on the +Z side", rrf.z, 0.602, 0.606, " m");
+
+    // Up must come out up. Getting the cross-product handedness wrong produced
+    // an up vector pointing at the ground, and a mirrored car -- which on a
+    // symmetric model is entirely invisible.
+    check("body sits above the ground", Math.min(...fitted.body.position.filter((_, i) => i % 3 === 1)), -0.01, 2, " m");
+  }
   // A non-glb must be refused with a message, not parsed into nonsense.
   let refused = 0;
   try {
