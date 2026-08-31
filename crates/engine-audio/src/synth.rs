@@ -19,8 +19,8 @@
 //!    between idle and the limiter.
 
 use crate::filters::{
-    ButterworthLowPass, ConvolutionFilter, DerivativeFilter, JitterFilter, LevelingFilter,
-    LowPassFilter, Rng,
+    soft_clip, ButterworthLowPass, ConvolutionFilter, DerivativeFilter, JitterFilter,
+    LevelingFilter, LowPassFilter, Rng,
 };
 
 /// Mixing and shaping controls, named after engine-sim's `AudioParameters`.
@@ -29,19 +29,34 @@ pub struct AudioParameters {
     pub volume: f32,
     /// How much of the convolved signal to use, 0..1.
     pub convolution: f32,
-    /// Blend between the differentiated signal and the raw one. engine-sim
-    /// defaults this very low (0.01) -- a little goes a long way, because the
-    /// derivative is where all the high-frequency edge lives.
+    /// Blend between the differentiated signal and the raw one. Now that the
+    /// derivative is normalised to unity gain at its reference frequency, this
+    /// behaves like the mix fraction it is named after: it adds edge and bite
+    /// without deciding the whole spectral balance.
     pub df_f_mix: f32,
     /// Depth of the turbulent-air modulation, 0..1.
     pub air_noise: f32,
     pub air_noise_cutoff_hz: f32,
     /// Cycle-to-cycle variation, 0..1.
     pub jitter: f32,
-    /// Level the automatic gain aims at.
+    /// Output tone control: a gentle roll-off above this.
+    ///
+    /// Physically justified rather than a sticking plaster. Radiation from an
+    /// open pipe falls away at high frequency, bodywork and a helmet absorb it,
+    /// and air absorption removes more over distance.
+    pub tone_cutoff_hz: f32,
+    /// Target output RMS. The leveller aims the average level here.
     pub leveler_target: f32,
     pub leveler_max_gain: f32,
     pub leveler_min_gain: f32,
+    /// How much quieter the engine gets when it is doing no work.
+    ///
+    /// A real engine at idle is far quieter than one at wide-open throttle, and
+    /// levelling everything to the same loudness is both wrong and unpleasant:
+    /// it takes the weak, ring-dominated output of an overrun and amplifies it
+    /// until the ringing is all you can hear. 0 normalises everything; 1 makes
+    /// idle silent.
+    pub load_level_depth: f32,
 }
 
 impl Default for AudioParameters {
@@ -49,13 +64,15 @@ impl Default for AudioParameters {
         Self {
             volume: 1.0,
             convolution: 1.0,
-            df_f_mix: 0.01,
+            df_f_mix: 0.10,
             air_noise: 0.5,
             air_noise_cutoff_hz: 2_000.0,
             jitter: 0.06,
-            leveler_target: 0.35,
-            leveler_max_gain: 1.9,
+            tone_cutoff_hz: 3_200.0,
+            leveler_target: 0.14,
+            leveler_max_gain: 4.0,
             leveler_min_gain: 1e-5,
+            load_level_depth: 0.72,
         }
     }
 }
@@ -72,6 +89,10 @@ struct ChannelFilters {
 
 pub struct Synthesizer {
     channels: Vec<ChannelFilters>,
+    // Two poles of tone control, cascaded, for a 24 dB/octave roll-off. One
+    // pole was not enough to stop the pipe ring dominating at low rpm.
+    tone1: ButterworthLowPass,
+    tone2: ButterworthLowPass,
     antialias: ButterworthLowPass,
     leveler: LevelingFilter,
     params: AudioParameters,
@@ -98,6 +119,8 @@ impl Synthesizer {
 
         Self {
             channels,
+            tone1: ButterworthLowPass::new(params.tone_cutoff_hz, sample_rate),
+            tone2: ButterworthLowPass::new(params.tone_cutoff_hz, sample_rate),
             // engine-sim antialiases at 45% of the sample rate.
             antialias: ButterworthLowPass::new(sample_rate * 0.45, sample_rate),
             leveler,
@@ -115,6 +138,8 @@ impl Synthesizer {
             c.jitter.set_amount(p.jitter);
             c.air_noise_lp.set_cutoff(p.air_noise_cutoff_hz, self.sample_rate);
         }
+        self.tone1.set_cutoff(p.tone_cutoff_hz, self.sample_rate);
+        self.tone2.set_cutoff(p.tone_cutoff_hz, self.sample_rate);
         self.leveler.target = p.leveler_target;
         self.leveler.max_gain = p.leveler_max_gain;
         self.leveler.min_gain = p.leveler_min_gain;
@@ -134,8 +159,9 @@ impl Synthesizer {
     /// Render one output sample from one pressure sample per channel.
     ///
     /// `load` (0..1) scales the turbulent-air contribution: an engine on the
-    /// overrun does not hiss like one at wide-open throttle.
-    pub fn render(&mut self, inputs: &[f32], load: f32) -> f32 {
+    /// overrun does not hiss like one at wide-open throttle. `level` scales the
+    /// output with how hard the engine is working, so idle stays quiet.
+    pub fn render(&mut self, inputs: &[f32], load: f32, level: f32) -> f32 {
         let p = self.params;
         let mut sum = 0.0f32;
 
@@ -161,9 +187,12 @@ impl Synthesizer {
             sum += v;
         }
 
-        let signal = self.antialias.f(sum);
-        let out = self.leveler.f(signal) * p.volume;
-        out.clamp(-1.0, 1.0)
+        // Tone, then antialias, then level. Rolling off before the leveller
+        // means the gain is set by what will actually be heard rather than by
+        // ringing that is about to be filtered away.
+        let mut signal = self.tone2.f(self.tone1.f(sum));
+        signal = self.antialias.f(signal);
+        soft_clip(self.leveler.f(signal) * level * p.volume)
     }
 }
 
@@ -182,7 +211,7 @@ mod tests {
         // however much noise is dialled in. That is the property that keeps a
         // stopped engine actually silent.
         for _ in 0..10_000 {
-            assert_eq!(s.render(&[0.0], 1.0), 0.0);
+            assert_eq!(s.render(&[0.0], 1.0, 1.0), 0.0);
         }
     }
 
@@ -191,7 +220,7 @@ mod tests {
         let mut s = synth(1);
         let mut rng = Rng::new(11);
         for _ in 0..200_000 {
-            let y = s.render(&[rng.uniform() * 5_000.0], 1.0);
+            let y = s.render(&[rng.uniform() * 5_000.0], 1.0, 1.0);
             assert!((-1.0..=1.0).contains(&y), "escaped the clamp: {y}");
             assert!(y.is_finite());
         }
@@ -209,10 +238,11 @@ mod tests {
         p.leveler_target = 1.0;
         p.leveler_max_gain = 1.0;
         p.leveler_min_gain = 1.0;
+        p.tone_cutoff_hz = 20_000.0;
         s.set_parameters(p);
         let mut last = 1.0;
         for _ in 0..48_000 * 3 {
-            last = s.render(&[1.0], 0.0);
+            last = s.render(&[1.0], 0.0, 1.0);
         }
         assert!(last.abs() < 0.01, "constant input left {last} at the output");
     }
@@ -225,8 +255,8 @@ mod tests {
         let mut peak_l = 0.0f32;
         for i in 0..48_000 {
             let phase = i as f32 * 0.02;
-            peak_q = peak_q.max(quiet.render(&[phase.sin() * 1.0], 1.0).abs());
-            peak_l = peak_l.max(loud.render(&[phase.sin() * 1_000.0], 1.0).abs());
+            peak_q = peak_q.max(quiet.render(&[phase.sin() * 1.0], 1.0, 1.0).abs());
+            peak_l = peak_l.max(loud.render(&[phase.sin() * 1_000.0], 1.0, 1.0).abs());
         }
         // A thousand times the input must not give a thousand times the output.
         assert!(peak_l < peak_q * 20.0, "{peak_q} vs {peak_l}");
@@ -238,8 +268,8 @@ mod tests {
         let mut two = synth(2);
         // Two identical channels should be louder than one before levelling
         // settles. Check the first sample, before the leveller has moved.
-        let a = one.render(&[1.0], 0.0);
-        let b = two.render(&[1.0, 1.0], 0.0);
+        let a = one.render(&[1.0], 0.0, 1.0);
+        let b = two.render(&[1.0, 1.0], 0.0, 1.0);
         assert!(b.abs() >= a.abs());
     }
 }

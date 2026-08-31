@@ -64,14 +64,24 @@ pub struct PipeSpec {
     /// Fraction of a wave's amplitude lost per traverse, to wall friction and
     /// heat transfer. Small, but without it the waveguide rings forever.
     pub loss: f32,
+    /// Cutoff of the per-traverse loss filter, Hz.
+    ///
+    /// Real pipe losses are frequency-dependent -- viscous and thermal losses
+    /// in the boundary layer grow roughly as the square root of frequency, so a
+    /// wave loses its high frequencies fastest. A flat multiplier leaves every
+    /// mode with the same Q, and the consequence is audible: at low rpm the
+    /// combustion pulses are far apart and the lightly damped 1-2 kHz pipe
+    /// modes ring on between them until they are all you can hear.
+    pub damping_hz: f32,
 }
 
 impl PipeSpec {
-    pub fn from_diameter(length_m: f32, diameter_m: f32, loss: f32) -> Self {
+    pub fn from_diameter(length_m: f32, diameter_m: f32, loss: f32, damping_hz: f32) -> Self {
         Self {
             length_m,
             area_m2: core::f32::consts::PI * diameter_m * diameter_m * 0.25,
             loss,
+            damping_hz,
         }
     }
 }
@@ -254,11 +264,17 @@ pub fn cbr600rr_sdm26() -> EngineSpec {
         // the primary resonance and loses the secondary. Worth revisiting if
         // the note is missing its mid-range bark.
         primaries: (0..4)
-            .map(|_| PipeSpec::from_diameter(0.42, 0.032, 0.010))
+            .map(|_| PipeSpec::from_diameter(0.42, 0.032, 0.010, 3200.0))
             .collect(),
         primary_to_collector: vec![0, 0, 0, 0],
-        collectors: vec![PipeSpec::from_diameter(0.28, 0.048, 0.012)],
-        tailpipes: vec![PipeSpec::from_diameter(0.55, 0.045, 0.020)],
+        collectors: vec![PipeSpec::from_diameter(0.28, 0.048, 0.012, 2400.0)],
+        // The tailpipe carries the muffler. FSAE caps noise at 110 dBA, so the
+        // car has one, and a muffler is exactly a device that absorbs the mid
+        // and high frequencies while passing the low-frequency pulse. Modelling
+        // it as heavy damping on this pipe is cruder than modelling its
+        // chambers, and it is the difference between a burble and a whine at
+        // idle.
+        tailpipes: vec![PipeSpec::from_diameter(0.55, 0.045, 0.030, 1100.0)],
         idle_rpm: 1_600.0,
         redline_rpm: 14_500.0,
         gas: GasProperties::default(),
@@ -284,10 +300,10 @@ pub fn single_cylinder_450() -> EngineSpec {
             exhaust_cd: 0.70,
         },
         combustion: CombustionSpec::default(),
-        primaries: vec![PipeSpec::from_diameter(0.55, 0.038, 0.010)],
+        primaries: vec![PipeSpec::from_diameter(0.55, 0.038, 0.010, 3200.0)],
         primary_to_collector: vec![0],
-        collectors: vec![PipeSpec::from_diameter(0.30, 0.042, 0.012)],
-        tailpipes: vec![PipeSpec::from_diameter(0.40, 0.040, 0.020)],
+        collectors: vec![PipeSpec::from_diameter(0.30, 0.042, 0.012, 2400.0)],
+        tailpipes: vec![PipeSpec::from_diameter(0.40, 0.040, 0.030, 1100.0)],
         idle_rpm: 1_500.0,
         redline_rpm: 11_000.0,
         gas: GasProperties::default(),

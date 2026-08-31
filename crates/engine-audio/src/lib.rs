@@ -101,6 +101,8 @@ pub struct EngineAudio {
     /// Scratch, reused every sample so the render loop does not allocate.
     flow: Vec<f32>,
     valve_area: Vec<f32>,
+    /// Output trim for the current operating point; see `set_operating_point`.
+    level: f32,
     inputs: Vec<f32>,
     running: bool,
 }
@@ -147,6 +149,7 @@ impl EngineAudio {
             tables,
             flow: vec![0.0; n_cyl],
             valve_area: vec![0.0; n_cyl],
+            level: 0.3,
             inputs: vec![0.0; n_tail],
             running: true,
         })
@@ -214,6 +217,18 @@ impl EngineAudio {
         if retune {
             self.exhaust.set_gas_state(&gas, exhaust_k);
         }
+
+        // How loud this operating point should be relative to full noise.
+        //
+        // Both terms matter and they are not the same thing. Load covers the
+        // difference between driving and coasting; rpm covers the difference
+        // between idling and the limiter, which is audible even at constant
+        // throttle. An engine on the overrun at 9000 rpm is neither silent nor
+        // as loud as one pulling.
+        let rpm_frac = (rpm / self.spec.redline_rpm).clamp(0.0, 1.0);
+        let effort = 0.65 * load + 0.35 * rpm_frac;
+        let depth = self.synth.parameters().load_level_depth;
+        self.level = 1.0 - depth * (1.0 - effort);
     }
 
     /// Fill `out` with mono samples in [-1, 1].
@@ -248,7 +263,7 @@ impl EngineAudio {
 
             self.exhaust.step(&self.flow, &self.valve_area);
             self.inputs.copy_from_slice(self.exhaust.outputs());
-            *sample = self.synth.render(&self.inputs, load);
+            *sample = self.synth.render(&self.inputs, load, self.level);
 
             self.crank_deg += deg_per_sample;
             if self.crank_deg >= 720.0 {
@@ -265,6 +280,7 @@ impl EngineAudio {
             c.pressure_pa = self.spec.gas.ambient_pa;
             c.temperature_k = self.spec.gas.ambient_k;
             c.exhaust_flow = 0.0;
+            c.port_velocity = 0.0;
         }
     }
 }

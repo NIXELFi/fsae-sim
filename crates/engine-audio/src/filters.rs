@@ -96,31 +96,43 @@ impl ButterworthLowPass {
     }
 }
 
-/// Discrete derivative, scaled by the sample rate.
+/// Discrete derivative, normalised to unit gain at a reference frequency.
 ///
-/// This is the single most important filter in the chain and the reason the
-/// output sounds like an exhaust rather than like a pressure gauge. Sound
-/// radiated from an open pipe is proportional to the *rate of change* of the
-/// volume velocity leaving it, not to the pressure inside it. Feed the raw
-/// manifold pressure to a speaker and you get a muffled thump; differentiate
-/// it first and the sharp edge of each blowdown pulse comes back.
+/// Sound radiated from an open pipe goes as the rate of change of the flow
+/// leaving it, not as the pressure inside it -- feed raw manifold pressure to a
+/// speaker and you get a muffled thump.
+///
+/// The normalisation is the whole point, and getting it wrong is what made the
+/// engine shriek. A plain first-order difference divided by `dt` multiplies by
+/// the sample rate: at 48 kHz the derivative term arrived roughly 2500x larger
+/// than the direct signal it was supposed to be blended into at 1%. Since a
+/// derivative's gain rises linearly with frequency, that put 84% of the output
+/// energy between 1.5 and 4 kHz at 3000 rpm against 2.8% below 500 Hz.
+///
+/// A difference `1 - z^-1` has magnitude `2 sin(pi f / fs)`. Dividing by that
+/// value at `ref_hz` makes the filter unity-gain there, so `df_f_mix` behaves
+/// like the mix fraction it is named after.
 #[derive(Clone, Debug)]
 pub struct DerivativeFilter {
     prev: f32,
-    dt: f32,
+    scale: f32,
 }
 
 impl DerivativeFilter {
     pub fn new(sample_rate: f32) -> Self {
+        Self::with_reference(sample_rate, 300.0)
+    }
+
+    pub fn with_reference(sample_rate: f32, ref_hz: f32) -> Self {
         Self {
             prev: 0.0,
-            dt: 1.0 / sample_rate,
+            scale: 1.0 / (2.0 * (PI * ref_hz / sample_rate).sin()),
         }
     }
 
     #[inline]
     pub fn f(&mut self, x: f32) -> f32 {
-        let d = (x - self.prev) / self.dt;
+        let d = (x - self.prev) * self.scale;
         self.prev = x;
         d
     }
@@ -168,21 +180,27 @@ impl JitterFilter {
     }
 }
 
-/// Automatic gain, targeting a peak level.
+/// Automatic gain toward a target RMS.
 ///
-/// Directly adapted from engine-sim's `LevelingFilter`. Output level otherwise
-/// swings by orders of magnitude between idle and the limiter, because the
-/// blowdown pulse amplitude scales with cylinder pressure and firing rate. The
-/// attack is fast and the release slow, so a single loud transient does not
-/// duck the whole engine note.
+/// Tracks mean square over a long window rather than chasing peaks, and that
+/// choice is the fix for a specific failure. The previous version was a peak
+/// follower with a 1 ms attack. An exhaust blowdown transient is about ten
+/// samples wide at 48 kHz -- far faster than a 1 ms attack can respond -- so
+/// the gain was always set by the quiet stretch between pulses, and every pulse
+/// then arrived into a gain far too high and slammed into the output clamp.
+/// Measured output RMS was 0.99 against a +/-1 clamp at every operating point:
+/// not levelled audio, a square wave.
+///
+/// Averaging over 150 ms sets the *average* level and leaves transients alone.
+/// The peaks that result are handled by [`soft_clip`], which rounds them
+/// instead of shearing them flat.
 #[derive(Clone, Debug)]
 pub struct LevelingFilter {
     pub target: f32,
     pub min_gain: f32,
     pub max_gain: f32,
-    peak: f32,
-    attack: f32,
-    release: f32,
+    mean_square: f32,
+    alpha: f32,
 }
 
 impl LevelingFilter {
@@ -190,29 +208,34 @@ impl LevelingFilter {
         Self {
             target,
             min_gain: 1e-5,
-            max_gain: 1.9,
-            peak: target,
-            // ~1 ms attack, ~250 ms release.
-            attack: 1.0 - (-1.0 / (0.001 * sample_rate)).exp(),
-            release: 1.0 - (-1.0 / (0.250 * sample_rate)).exp(),
+            max_gain: 4.0,
+            mean_square: target * target,
+            // 150 ms: long compared with a firing period even at idle (19 ms at
+            // 1600 rpm), so the gain does not pump once per combustion event.
+            alpha: 1.0 - (-1.0 / (0.15 * sample_rate)).exp(),
         }
     }
 
     #[inline]
     pub fn f(&mut self, x: f32) -> f32 {
-        let a = x.abs();
-        if a > self.peak {
-            self.peak += self.attack * (a - self.peak);
-        } else {
-            self.peak += self.release * (a - self.peak);
-        }
-        let gain = (self.target / self.peak.max(1e-9)).clamp(self.min_gain, self.max_gain);
-        x * gain
+        self.mean_square += self.alpha * (x * x - self.mean_square);
+        x * self.gain()
     }
 
     pub fn gain(&self) -> f32 {
-        (self.target / self.peak.max(1e-9)).clamp(self.min_gain, self.max_gain)
+        (self.target / self.mean_square.max(1e-14).sqrt()).clamp(self.min_gain, self.max_gain)
     }
+}
+
+/// Soft clip.
+///
+/// `tanh` is linear for small signals and compresses smoothly beyond, so a
+/// transient that a hard clamp would shear flat is rounded instead. Hard
+/// clipping generates high-order harmonics right across the spectrum, which was
+/// a large part of what "unbearable" sounded like.
+#[inline]
+pub fn soft_clip(x: f32) -> f32 {
+    x.tanh()
 }
 
 /// Direct-form FIR convolution against a stored impulse response.
@@ -356,12 +379,39 @@ mod tests {
     }
 
     #[test]
-    fn derivative_of_a_ramp_is_its_slope() {
+    fn derivative_has_unit_gain_at_its_reference_frequency() {
+        // The property that makes `df_f_mix` behave as a mix fraction, and the
+        // one whose absence made the engine shriek.
         let fs = 48_000.0;
-        let mut d = DerivativeFilter::new(fs);
-        d.f(0.0);
-        let y = d.f(1.0 / fs); // ramp of 1.0 per second
-        assert!((y - 1.0).abs() < 1e-3, "got {y}");
+        let f_ref = 300.0;
+        let mut d = DerivativeFilter::with_reference(fs, f_ref);
+        let mut peak = 0.0f32;
+        for i in 0..4_000 {
+            let y = d.f((2.0 * PI * f_ref * i as f32 / fs).sin());
+            if i > 200 {
+                peak = peak.max(y.abs());
+            }
+        }
+        assert!((peak - 1.0).abs() < 0.02, "gain at the reference was {peak}");
+    }
+
+    #[test]
+    fn derivative_gain_rises_with_frequency_but_only_proportionally() {
+        let fs = 48_000.0;
+        let gain_at = |f: f32| {
+            let mut d = DerivativeFilter::with_reference(fs, 300.0);
+            let mut peak = 0.0f32;
+            for i in 0..8_000 {
+                let y = d.f((2.0 * PI * f * i as f32 / fs).sin());
+                if i > 400 {
+                    peak = peak.max(y.abs());
+                }
+            }
+            peak
+        };
+        // Ten times the frequency, about ten times the gain -- not 2500 times.
+        let ratio = gain_at(3_000.0) / gain_at(300.0);
+        assert!((8.0..12.0).contains(&ratio), "gain ratio was {ratio}");
     }
 
     #[test]
@@ -380,16 +430,48 @@ mod tests {
     }
 
     #[test]
-    fn leveler_pulls_a_loud_signal_down_to_target() {
-        let mut l = LevelingFilter::new(0.5, 48_000.0);
-        let mut last = 0.0;
-        for i in 0..48_000 {
-            let x = 10.0 * (i as f32 * 0.05).sin();
-            last = l.f(x);
+    fn leveler_brings_output_rms_to_its_target() {
+        let mut l = LevelingFilter::new(0.2, 48_000.0);
+        let mut sum = 0.0f32;
+        let mut n = 0u32;
+        for i in 0..48_000 * 2 {
+            let y = l.f(10.0 * (i as f32 * 0.05).sin());
+            if i > 48_000 {
+                sum += y * y;
+                n += 1;
+            }
         }
-        // After a second of a 10x-too-loud sine the output must be bounded by
-        // the target times the peak of the sine, not by the raw amplitude.
-        assert!(last.abs() < 1.0, "leveler did not pull down: {last}");
+        let rms = (sum / n as f32).sqrt();
+        assert!((rms - 0.2).abs() < 0.03, "settled at rms {rms}, wanted 0.2");
+    }
+
+    #[test]
+    fn leveler_does_not_pump_within_a_firing_period() {
+        // The failure this replaced: a peak follower reacting between pulses
+        // and then clipping the next one. Feed an impulse train at 53 Hz --
+        // idle firing rate -- and the gain must barely move across a period.
+        let fs = 48_000.0;
+        let mut l = LevelingFilter::new(0.2, fs);
+        let period = (fs / 53.0) as usize;
+        for i in 0..fs as usize * 2 {
+            l.f(if i % period == 0 { 5.0 } else { 0.0 });
+        }
+        let before = l.gain();
+        for i in 0..period {
+            l.f(if i == 0 { 5.0 } else { 0.0 });
+        }
+        let after = l.gain();
+        let swing = (after - before).abs() / before;
+        assert!(swing < 0.05, "gain moved {:.1}% across one period", swing * 100.0);
+    }
+
+    #[test]
+    fn soft_clip_is_linear_when_small_and_bounded_when_large() {
+        assert!((soft_clip(0.01) - 0.01).abs() < 1e-4);
+        // tanh saturates to exactly 1.0 in f32 well before 50, which is the
+        // correct behaviour -- bounded, not merely bounded-below-one.
+        assert!(soft_clip(50.0) <= 1.0 && soft_clip(50.0) > 0.99);
+        assert!(soft_clip(-50.0) >= -1.0 && soft_clip(-50.0) < -0.99);
     }
 
     #[test]
