@@ -62,6 +62,16 @@ class Game {
     this.input = new Input();
     this.audio = new EngineAudio();
 
+    // Walkaround camera state. Free rather than a fixed orbit: looking at a
+    // car means choosing the angle, and the interesting ones -- low at a
+    // wheel, down on the floor, level with a wing -- are not on any one circle.
+    this.orbitAngle = Math.PI * 0.75;
+    this.orbitRadius = 3.6;
+    this.orbitHeight = 1.05;
+    this.orbitFocus = 0.42;
+    this.orbitAuto = true;
+    this.wireWalkaround(dom);
+
     // Controls settings. Mounted here rather than in the boot sequence so the
     // panel and the Input instance share a lifetime -- the panel reads live
     // axis values straight off it, which is the only reliable way to find out
@@ -114,6 +124,61 @@ class Game {
       dom.padStatus.textContent = connected ? `Pad: ${shortPadName(id)}` : "Pad: not detected";
       dom.padStatus.classList.toggle("ok", connected);
     };
+  }
+
+  /**
+   * Mouse and wheel control for the walkaround camera.
+   *
+   * Bound to the canvas rather than the window so the HUD panels and the
+   * settings sliders keep working normally, and only while that camera is
+   * selected so a stray drag never moves a driving view.
+   */
+  wireWalkaround(dom) {
+    const canvas = dom.gl.canvas ?? dom.gl;
+    const active = () => CAMERAS[this.cameraIndex]?.orbit;
+
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    canvas.addEventListener("pointerdown", (e) => {
+      if (!active()) return;
+      dragging = true;
+      this.orbitAuto = false;   // taking hold stops the automatic turn
+      lastX = e.clientX;
+      lastY = e.clientY;
+      canvas.setPointerCapture?.(e.pointerId);
+    });
+    canvas.addEventListener("pointerup", (e) => {
+      dragging = false;
+      canvas.releasePointerCapture?.(e.pointerId);
+    });
+    canvas.addEventListener("pointerleave", () => { dragging = false; });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!dragging || !active()) return;
+      this.orbitAngle -= (e.clientX - lastX) * 0.006;
+      // Height, not pitch: the camera always looks at the car, so raising the
+      // eye is what "look down at it" means here.
+      this.orbitHeight = Math.min(3.5, Math.max(0.06,
+        this.orbitHeight + (e.clientY - lastY) * 0.006));
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+
+    canvas.addEventListener("wheel", (e) => {
+      if (!active()) return;
+      e.preventDefault();
+      // Multiplicative, so it zooms at the same apparent rate close up and far
+      // away. Floor at 1.2 m: closer than that and the near plane clips the car.
+      this.orbitRadius = Math.min(14, Math.max(1.2,
+        this.orbitRadius * Math.exp(e.deltaY * 0.0012)));
+    }, { passive: false });
+
+    canvas.addEventListener("dblclick", () => {
+      if (!active()) return;
+      this.orbitAuto = !this.orbitAuto;
+      this.timing.say(this.orbitAuto ? "WALKAROUND: AUTO" : "WALKAROUND: FREE", 1.2);
+    });
   }
 
   async load(trackId) {
@@ -183,10 +248,18 @@ class Game {
       console.warn(this.bodyStatus);
       this.cadBody = null;
     } else if (this.cadBody && !this.cadCar) {
-      this.renderer.useBodyModel(this.cadBody.body);
+      this.renderer.useBodyModel(this.cadBody.body, this.cadBody.axles, {
+        front: SDM26.trackFrontM,
+        rear: SDM26.trackRearM,
+        tireRadius: SDM26.tireRadiusM,
+      });
       const s = this.cadBody.stats;
       this.bodyStatus = `CAD body: ${s.triangles.toLocaleString()} triangles, ` +
-        `${s.lengthM.toFixed(2)} m long`;
+        `${s.lengthM.toFixed(2)} m long` +
+        (s.wheelbaseM
+          ? `, wheel bays ${s.wheelbaseM.toFixed(3)} m apart ` +
+            `(parameters say ${(SDM26.wheelbaseM).toFixed(3)})`
+          : "");
       console.info(this.bodyStatus, s.notes);
       if (s.problems.length) console.warn("body model:", s.problems);
     } else {
@@ -400,9 +473,16 @@ class Game {
     // The walkaround camera turns on its own, and stops while the car is
     // moving -- orbiting a car that is driving away is nauseating.
     if (cam.orbit) {
-      const still = this.car.speed < 0.5;
-      this.orbitAngle = (this.orbitAngle ?? Math.PI * 0.75) +
-                        (still ? 0.22 : 0) * (this.lastDt ?? 1 / 60);
+      const dt = this.lastDt ?? 1 / 60;
+      const w = this.input.walkaround;
+      if (w && (w.turn || w.rise || w.zoom)) {
+        this.orbitAuto = false;
+        this.orbitAngle += w.turn * 1.4 * dt;
+        this.orbitHeight = Math.min(3.5, Math.max(0.06, this.orbitHeight + w.rise * 1.1 * dt));
+        this.orbitRadius = Math.min(14, Math.max(1.2, this.orbitRadius * Math.exp(-w.zoom * 1.2 * dt)));
+      } else if (this.orbitAuto && this.car.speed < 0.5) {
+        this.orbitAngle += 0.22 * dt;
+      }
     }
 
     this.renderer.fovDeg = cam.fov;

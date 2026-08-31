@@ -309,6 +309,15 @@ export class Input {
     if (kEdge("KeyT")) this.edges.traction = true;
     if (kEdge("KeyM")) this.edges.mapEditor = true;
     if (kEdge("KeyH")) this.edges.home = true;
+    // Walkaround camera nudges, live rather than edge-triggered so holding a
+    // key sweeps smoothly.
+    this.walkaround = {
+      // Not Q/E: those are the gearshift. Comma and period sit next to each
+      // other and are otherwise unused.
+      turn: (k.has("Comma") ? 1 : 0) - (k.has("Period") ? 1 : 0),
+      rise: (k.has("KeyR") ? 1 : 0) - (k.has("KeyF") ? 1 : 0),
+      zoom: (k.has("BracketRight") ? 1 : 0) - (k.has("BracketLeft") ? 1 : 0),
+    };
     if (kEdge("Escape") || kEdge("KeyP")) this.edges.pause = true;
 
     // Keyboard stand-in for the d-pad: [ ] pick the setting, - = move it.

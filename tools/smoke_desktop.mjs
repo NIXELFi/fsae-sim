@@ -338,6 +338,13 @@ try {
     const g = window.__sim;
     return JSON.stringify({
       status: g.cadStatus,
+      body: g.bodyStatus,
+      wheel: g.wheelStatus,
+      usingBody: !!g.renderer.bodyModel,
+      usingWheel: !!g.renderer.wheelModel,
+      bodyHubs: g.renderer.bodyHubs?.length ?? 0,
+      bodyTris: g.renderer.car.body.count / 3,
+      wheelTris: (g.renderer.car.tire.count + g.renderer.car.rim.count) / 3,
       usingModel: !!g.renderer.carModel,
       hubs: g.renderer.carModel?.hubs?.length ?? 0,
       bodyVerts: g.renderer.car.body.count,

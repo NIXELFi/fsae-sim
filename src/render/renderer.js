@@ -443,7 +443,7 @@ export class Renderer {
    * The pairing a CFD assembly needs: aero surfaces from one file, wheels from
    * another. Neither file has to know about the other.
    */
-  useBodyModel(body) {
+  useBodyModel(body, axles = null, track = null) {
     const gl = this.gl;
     const mesh = this.car.body;
     if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
@@ -451,7 +451,20 @@ export class Renderer {
     if (body) {
       this.car.body = this.makeMesh(body);
       this.bodyModel = true;
+      // Draw the wheels in the bays the bodywork actually has, rather than at
+      // the stations in the vehicle parameters. When the two disagree the model
+      // is the thing you can see, and wheels floating outside their arches look
+      // broken in a way that a slightly wrong wheelbase does not.
+      this.bodyHubs = axles
+        ? [
+            { name: "FL", x: axles.front, y: track.tireRadius, z: -track.front / 2, front: true },
+            { name: "FR", x: axles.front, y: track.tireRadius, z: track.front / 2, front: true },
+            { name: "RL", x: axles.rear, y: track.tireRadius, z: -track.rear / 2, front: false },
+            { name: "RR", x: axles.rear, y: track.tireRadius, z: track.rear / 2, front: false },
+          ]
+        : null;
     } else {
+      this.bodyHubs = null;
       this.car.body = this.makeMesh(buildCarMeshes(this.carParams ?? null).body);
       this.bodyModel = false;
     }
@@ -844,7 +857,7 @@ export class Renderer {
     // axis (local Z) AFTER the steer, so a steered wheel rolls about its own
     // steered axis rather than the car's.
     const w = s.wheels;
-    for (const hub of (this.carModel?.hubs ?? s.hubs ?? HUBS)) {
+    for (const hub of (this.carModel?.hubs ?? this.bodyHubs ?? s.hubs ?? HUBS)) {
       this.chain(this.model, [
         this.chassis,
         translation(T[0], hub.x, hub.y, hub.z),

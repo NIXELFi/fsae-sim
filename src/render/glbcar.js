@@ -820,9 +820,14 @@ export async function loadWheelModel(url, geo = null) {
  *              thing on a Formula Student car
  *   units      from the overall length, which is 1.5-6 m on any real car
  *
- * What is NOT recoverable is where the axles are along the car. Nothing in
- * bodywork says that, so the fore-aft placement is a choice: the model's
- * mid-length is put at the middle of the wheelbase, and `offsetM` nudges it.
+ * Where the axles sit along the car is not stated anywhere either, but it can
+ * be MEASURED: the bodywork pinches in at each axle to make room for the
+ * wheels, so the two narrowest stations are the wheel bays. On this car they
+ * come out 1.56 m apart against a 1.53 m wheelbase in the parameters, which is
+ * a 2% agreement on a number the model never states -- good enough to place
+ * the body by, and far better than the mid-length guess it replaced.
+ *
+ * `offsetM` still nudges it, for a model whose bays are not found.
  */
 export function buildBodyFromGlb(buffer, geo = null, opts = {}) {
   const g = geo ?? { frontAxle: 0.788, rearAxle: -0.742, tireRadius: 0.2 };
@@ -939,14 +944,67 @@ export function buildBodyFromGlb(buffer, geo = null, opts = {}) {
   notes.push(`${lengthM.toFixed(3)} m long, ${(size[lateral] * scale).toFixed(3)} m wide, ` +
              `${(size[vert] * scale).toFixed(3)} m tall`);
 
-  // ---- place it -----------------------------------------------------------
-  // Laterally on the mirror plane, vertically on the ground, and fore-aft with
-  // the model's mid-length at the middle of the wheelbase -- which is a
-  // choice, not a measurement, because bodywork does not say where the axles
-  // are.
-  const wheelbaseMid = (g.frontAxle + g.rearAxle) / 2;
-  const offset = opts.offsetM ?? 0;
+  // ---- find the wheel bays ------------------------------------------------
+  // Bodywork narrows at each axle to clear the wheels, so the narrowest
+  // station in each half of the car is a wheel bay. Measured only in the band
+  // a wheel actually occupies, because up at wing height the car is wide
+  // everywhere and the signal disappears.
   const groundRaw = upSign > 0 ? lo[vert] : hi[vert];
+  const wheelTop = (g.tireRadius * 2) / scale;
+  const BINS = 48;
+  const reach = new Array(BINS).fill(0);
+  const filled = new Array(BINS).fill(0);
+  for (let i = 0; i < P.length; i += 3) {
+    const h = (P[i + vert] - groundRaw) * upSign;
+    if (h < wheelTop * 0.08 || h > wheelTop * 1.05) continue;
+    const f = (P[i + fore] - lo[fore]) / Math.max(size[fore], 1e-9);
+    const k = Math.min(BINS - 1, Math.max(0, Math.floor(f * BINS)));
+    reach[k] = Math.max(reach[k], Math.abs(P[i + lateral] - mid[lateral]));
+    filled[k]++;
+  }
+  const narrowestIn = (from, to) => {
+    let best = -1;
+    let bestVal = Infinity;
+    for (let k = from; k < to; k++) {
+      if (!filled[k]) continue;
+      if (reach[k] < bestVal) { bestVal = reach[k]; best = k; }
+    }
+    return best;
+  };
+  // Search the outer thirds: the middle of the car is the tub, which is narrow
+  // for its own reasons and would win every time.
+  const third = Math.floor(BINS / 3);
+  const bayA = narrowestIn(third, BINS - 2);
+  const bayB = narrowestIn(2, third);
+  let bays = null;
+  if (bayA >= 0 && bayB >= 0) {
+    const toModel = (k) => lo[fore] + ((k + 0.5) / BINS) * size[fore];
+    // foreSign tells which end is the front.
+    const a = (toModel(bayA) - mid[fore]) * scale * foreSign;
+    const b = (toModel(bayB) - mid[fore]) * scale * foreSign;
+    const front = Math.max(a, b);
+    const rear = Math.min(a, b);
+    const span = front - rear;
+    const expected = g.frontAxle - g.rearAxle;
+    if (span > expected * 0.6 && span < expected * 1.6) {
+      bays = { front, rear, span };
+      notes.push(`wheel bays ${span.toFixed(3)} m apart against a ` +
+                 `${expected.toFixed(3)} m wheelbase in the parameters ` +
+                 `(${(100 * (span / expected - 1)).toFixed(1)}%)`);
+    } else {
+      notes.push(`wheel bays not found (candidates ${span.toFixed(2)} m apart, ` +
+                 `wheelbase is ${expected.toFixed(2)} m) — placing by mid-length`);
+    }
+  }
+
+  // ---- place it -----------------------------------------------------------
+  // Laterally on the mirror plane, vertically on the ground, and fore-aft so
+  // the measured wheel bays straddle the axles. The midpoints are matched
+  // rather than either end, so a wheelbase that disagrees with the parameters
+  // splits the error between the two axles instead of piling it onto one.
+  const wheelbaseMid = (g.frontAxle + g.rearAxle) / 2;
+  const bayMid = bays ? (bays.front + bays.rear) / 2 : 0;
+  const offset = (opts.offsetM ?? 0) - bayMid;
 
   const body = {
     position: new Float32Array(P.length),
@@ -976,11 +1034,18 @@ export function buildBodyFromGlb(buffer, geo = null, opts = {}) {
 
   return {
     body,
+    // Where the model says its axles are, once placed. The wheels are drawn
+    // here rather than at the parameters' stations, so they sit in the bays
+    // the bodywork actually has.
+    axles: bays
+      ? { front: bays.front - bayMid + wheelbaseMid, rear: bays.rear - bayMid + wheelbaseMid }
+      : null,
     stats: {
       triangles: n / 3,
       generator: doc.asset?.generator ?? "(unstated)",
       lengthM,
       scale,
+      wheelbaseM: bays ? bays.span : null,
       notes,
       problems,
     },
