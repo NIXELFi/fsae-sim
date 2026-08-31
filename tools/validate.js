@@ -366,5 +366,100 @@ console.log("\nENGINE AUDIO  (vs golden vectors from the Rust crate)");
   }
 }
 
+// -------------------------------------------- engine audio: tonal balance ---
+// The checks above prove the model is *correct* -- energy on the firing
+// harmonics, no half-order, matching the Rust build. They said nothing about
+// whether it is bearable to listen to, and for a while it was not: the output
+// was clipped flat at every operating point and dominated by a 3 kHz limit
+// cycle below about 5000 rpm.
+//
+// These are the checks that would have caught that. They are deliberately about
+// gross tonal balance rather than fine detail, because that is the level at
+// which "unbearable" lives.
+console.log("\nENGINE AUDIO  (tonal balance)");
+{
+  const FS = 48000;
+
+  const bandEnergy = (buf, lo, hi, n = 24) => {
+    let e = 0;
+    for (let k = 0; k < n; k++) {
+      const f = lo + ((hi - lo) * (k + 0.5)) / n;
+      const w = (2 * Math.PI * f) / FS;
+      let re = 0;
+      let im = 0;
+      for (let i = 0; i < buf.length; i++) {
+        re += buf[i] * Math.cos(w * i);
+        im += buf[i] * Math.sin(w * i);
+      }
+      e += (re * re + im * im) / (buf.length * buf.length);
+    }
+    return e;
+  };
+
+  const measure = (rpm, throttle, torque) => {
+    const e = new EngineAudio(cbr600rrSdm26(), {});
+    e.setOperatingPoint(rpm, throttle, torque);
+    const warm = new Float32Array(48000);
+    e.render(warm);
+    const buf = new Float32Array(8192);
+    e.render(buf);
+
+    let rms = 0;
+    let peak = 0;
+    for (const v of buf) {
+      rms += v * v;
+      peak = Math.max(peak, Math.abs(v));
+    }
+    const low = bandEnergy(buf, 40, 1500);
+    const high = bandEnergy(buf, 1500, 12000);
+    return {
+      rms: Math.sqrt(rms / buf.length),
+      peak,
+      lowFraction: (100 * low) / (low + high || 1e-30),
+    };
+  };
+
+  const points = [
+    ["idle 1600", 1600, 0.08, 3],
+    ["3000 WOT", 3000, 1.0, 45],
+    ["5000 WOT", 5000, 1.0, 52],
+    ["9000 WOT", 9000, 1.0, 62],
+    ["13000 WOT", 13000, 1.0, 55],
+    ["2000 overrun", 2000, 0.0, 0],
+    ["9000 overrun", 9000, 0.0, 0],
+  ];
+
+  const seen = {};
+  for (const [label, rpm, throttle, torque] of points) {
+    const m = measure(rpm, throttle, torque);
+    seen[label] = m;
+
+    // An exhaust note is a bass instrument. When this fell to 3% at 3000 rpm
+    // the result was a shriek, so the floor is set well above anything that
+    // could be mistaken for one.
+    check(`${label}: energy below 1.5 kHz`, m.lowFraction, 70, 100, " %");
+
+    // Clipping. The old peak-following leveller could not react to a blowdown
+    // transient, so every pulse hit the rail and the measured RMS was 0.99
+    // against a +/-1 clamp -- a square wave, not levelled audio.
+    check(`${label}: peak (headroom)`, m.peak, 0, 0.85, "");
+    check(`${label}: rms (not clipped)`, m.rms, 0.01, 0.30, "");
+  }
+
+  // A real engine is quieter when it is doing less. Levelling every operating
+  // point to the same loudness is what turned a quiet overrun into amplified
+  // ringing.
+  check(
+    "idle is quieter than full throttle",
+    seen["13000 WOT"].rms / seen["idle 1600"].rms,
+    1.5, 20, "x",
+  );
+  check(
+    "overrun is quieter than pulling",
+    seen["9000 WOT"].rms / seen["9000 overrun"].rms,
+    1.2, 20, "x",
+  );
+}
+
 console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}\n`);
 process.exit(failures === 0 ? 0 : 1);

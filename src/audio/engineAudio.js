@@ -114,21 +114,32 @@ export class ButterworthLowPass {
 }
 
 /**
- * Discrete derivative, scaled by the sample rate.
+ * Discrete derivative, normalised to unit gain at a reference frequency.
  *
- * The most important filter in the chain. Sound radiated from an open pipe
- * goes as the rate of change of the flow leaving it, not as the pressure
- * inside it -- feed raw manifold pressure to a speaker and you get a muffled
- * thump.
+ * Sound radiated from an open pipe goes as the rate of change of the flow
+ * leaving it, not as the pressure inside it -- feed raw manifold pressure to a
+ * speaker and you get a muffled thump.
+ *
+ * The normalisation is the whole point, and getting it wrong is what made the
+ * engine shriek. A plain first-order difference divided by `dt` multiplies by
+ * the sample rate: at 48 kHz the derivative term arrived roughly 2500x larger
+ * than the direct signal it was supposed to be blended into at 1%. Since a
+ * derivative's gain rises linearly with frequency, that put 84% of the output
+ * energy between 1.5 and 4 kHz at 3000 rpm, against 2.8% below 500 Hz.
+ *
+ * A difference `1 - z^-1` has magnitude `2 sin(pi f / fs)`. Dividing by that
+ * value at `refHz` makes the filter unity-gain there, so `dfFMix` behaves like
+ * the mix fraction it is named after, and the high-frequency lift it adds is
+ * proportional rather than overwhelming.
  */
 export class DerivativeFilter {
-  constructor(sampleRate) {
+  constructor(sampleRate, refHz = 300) {
     this.prev = 0;
-    this.dt = 1 / sampleRate;
+    this.scale = 1 / (2 * Math.sin((Math.PI * refHz) / sampleRate));
   }
 
   f(x) {
-    const d = (x - this.prev) / this.dt;
+    const d = (x - this.prev) * this.scale;
     this.prev = x;
     return d;
   }
@@ -149,27 +160,56 @@ export class JitterFilter {
   }
 }
 
-/** Automatic gain toward a target peak. Fast attack, slow release. */
+/**
+ * Automatic gain toward a target RMS.
+ *
+ * This tracks mean square over a long window rather than chasing peaks, and
+ * that choice is the fix for a specific failure. The previous version was a
+ * peak follower with a 1 ms attack. An exhaust blowdown transient is about ten
+ * samples wide at 48 kHz -- far faster than a 1 ms attack can respond -- so the
+ * gain was always set by the quiet stretch between pulses, and every pulse then
+ * arrived into a gain far too high and slammed into the output clamp. Measured
+ * output RMS was 0.99 against a ±1 clamp at every operating point: not levelled
+ * audio, a square wave.
+ *
+ * Averaging over 150 ms sets the *average* level and leaves transients alone.
+ * The peaks that result are handled by soft clipping downstream, which rounds
+ * them instead of shearing them flat.
+ */
 export class LevelingFilter {
   constructor(target, sampleRate) {
     this.target = target;
     this.minGain = 1e-5;
-    this.maxGain = 1.9;
-    this.peak = target;
-    this.attack = 1 - Math.exp(-1 / (0.001 * sampleRate));
-    this.release = 1 - Math.exp(-1 / (0.25 * sampleRate));
+    this.maxGain = 4;
+    this.meanSquare = target * target;
+    // 150 ms: long compared with a firing period even at idle (19 ms at
+    // 1600 rpm), so the gain does not pump once per combustion event.
+    this.alpha = 1 - Math.exp(-1 / (0.15 * sampleRate));
+  }
+
+  gain() {
+    return Math.min(
+      Math.max(this.target / Math.sqrt(Math.max(this.meanSquare, 1e-14)), this.minGain),
+      this.maxGain,
+    );
   }
 
   f(x) {
-    const a = Math.abs(x);
-    if (a > this.peak) this.peak += this.attack * (a - this.peak);
-    else this.peak += this.release * (a - this.peak);
-    const g = Math.min(
-      Math.max(this.target / Math.max(this.peak, 1e-9), this.minGain),
-      this.maxGain,
-    );
-    return x * g;
+    this.meanSquare += this.alpha * (x * x - this.meanSquare);
+    return x * this.gain();
   }
+}
+
+/**
+ * Soft clip.
+ *
+ * `tanh` is linear for small signals and compresses smoothly beyond, so a
+ * transient that would have been sheared flat by a hard clamp is rounded
+ * instead. Hard clipping generates high-order harmonics across the whole
+ * spectrum, which is a large part of what "unbearable" sounded like.
+ */
+export function softClip(x) {
+  return Math.tanh(x);
 }
 
 /** Direct-form FIR against a stored impulse response. */
@@ -294,8 +334,20 @@ export function gasDensity(gas, pressurePa, temperatureK) {
   return pressurePa / (gas.rSpecific * Math.max(temperatureK, 1));
 }
 
-export function pipeFromDiameter(lengthM, diameterM, loss) {
-  return { lengthM, areaM2: (Math.PI * diameterM * diameterM) / 4, loss };
+/**
+ * @param dampingHz  Cutoff of the per-traverse loss filter.
+ *
+ * Real pipe losses are frequency-dependent -- viscous and thermal losses in the
+ * boundary layer grow roughly as the square root of frequency, so a wave loses
+ * its high frequencies fastest. Modelling the loss as a flat multiplier instead
+ * leaves every mode with the same Q, and the consequence is audible: at low rpm
+ * the combustion pulses are far apart, and the lightly damped 1-2 kHz pipe
+ * modes ring on between them until they are all you can hear. A one-pole
+ * low-pass in the delay path is the standard waveguide treatment and is closer
+ * to the physics than the flat multiplier it replaces.
+ */
+export function pipeFromDiameter(lengthM, diameterM, loss, dampingHz = 3000) {
+  return { lengthM, areaM2: (Math.PI * diameterM * diameterM) / 4, loss, dampingHz };
 }
 
 /**
@@ -327,10 +379,15 @@ export function cbr600rrSdm26() {
     combustion: { startDeg: -20, durationDeg: 52, wiebeA: 5, wiebeM: 2 },
     // 4-2-1 in reality; modelled 4-1, which keeps the primary resonance and
     // loses the secondary.
-    primaries: [0, 1, 2, 3].map(() => pipeFromDiameter(0.42, 0.032, 0.01)),
+    primaries: [0, 1, 2, 3].map(() => pipeFromDiameter(0.42, 0.032, 0.01, 3200)),
     primaryToCollector: [0, 0, 0, 0],
-    collectors: [pipeFromDiameter(0.28, 0.048, 0.012)],
-    tailpipes: [pipeFromDiameter(0.55, 0.045, 0.02)],
+    collectors: [pipeFromDiameter(0.28, 0.048, 0.012, 2400)],
+    // The tailpipe carries the muffler. FSAE caps noise at 110 dBA, so the car
+    // has one, and a muffler is exactly a device that absorbs the mid and high
+    // frequencies while passing the low-frequency pulse. Modelling it as heavy
+    // damping on this pipe is cruder than modelling its chambers, and it is the
+    // difference between a burble and a whine at idle.
+    tailpipes: [pipeFromDiameter(0.55, 0.045, 0.03, 1100)],
     idleRpm: 1600,
     redlineRpm: 14500,
     gas: { ...DEFAULT_GAS },
@@ -355,10 +412,10 @@ export function singleCylinder450() {
       exhaustCd: 0.7,
     },
     combustion: { startDeg: -18, durationDeg: 55, wiebeA: 5, wiebeM: 2 },
-    primaries: [pipeFromDiameter(0.55, 0.038, 0.01)],
+    primaries: [pipeFromDiameter(0.55, 0.038, 0.01, 3200)],
     primaryToCollector: [0],
-    collectors: [pipeFromDiameter(0.3, 0.042, 0.012)],
-    tailpipes: [pipeFromDiameter(0.4, 0.04, 0.02)],
+    collectors: [pipeFromDiameter(0.3, 0.042, 0.012, 2400)],
+    tailpipes: [pipeFromDiameter(0.4, 0.04, 0.03, 1100)],
     idleRpm: 1500,
     redlineRpm: 11000,
     gas: { ...DEFAULT_GAS },
@@ -586,7 +643,31 @@ export function stepCylinder(spec, tables, cyl, crankDeg, dt, cal, op, backPress
   } else if (exhaustOpen) {
     const dpAcross = cyl.pressurePa - backPressurePa;
     const rho = gasDensity(gas, Math.max(cyl.pressurePa, backPressurePa), cyl.temperatureK);
-    let u = Math.sqrt((2 * Math.abs(dpAcross)) / Math.max(rho, 1e-6)) * Math.sign(dpAcross);
+
+    // Orifice flow, regularised near zero pressure difference.
+    //
+    // The plain law u = sign(dp) * sqrt(2|dp|/rho) has INFINITE slope at
+    // dp = 0. That matters because after blowdown the cylinder sits close to
+    // the runner pressure for the whole exhaust stroke, so dp hovers near
+    // zero -- and there the square root turns every small returning wave into
+    // a large swing in flow, which injects back into the runner and changes
+    // the pressure again. The result was a limit cycle: cylinder pressure a
+    // clean 76 Hz at 3000 rpm, while the valve flow oscillated at 3 kHz and
+    // dominated the entire output.
+    //
+    // Below `DP_LAMINAR` the law is linear in dp, matched in value at the
+    // crossover so the curve is continuous and its slope is finite
+    // everywhere. This is also the more physical choice: flow through a
+    // restriction at a small pressure difference is viscosity-dominated and
+    // proportional to dp, not to its square root. The square-root law is the
+    // fully turbulent limit.
+    const DP_LAMINAR = 1500; // Pa
+    const mag = Math.abs(dpAcross);
+    const turbulent = Math.sqrt((2 * DP_LAMINAR) / Math.max(rho, 1e-6));
+    let uTarget =
+      mag >= DP_LAMINAR
+        ? Math.sign(dpAcross) * Math.sqrt((2 * mag) / Math.max(rho, 1e-6))
+        : (dpAcross / DP_LAMINAR) * turbulent;
 
     // Choke it. A port cannot pass gas faster than the local speed of sound
     // however large the pressure ratio, and at blowdown the ratio is enormous.
@@ -594,13 +675,25 @@ export function stepCylinder(spec, tables, cyl, crankDeg, dt, cal, op, backPress
     // which empties the cylinder in a few degrees and slams the waveguide hard
     // enough that the next pulse comes back inverted.
     const cCyl = Math.sqrt(gas.gamma * gas.rSpecific * Math.max(cyl.temperatureK, 1));
-    u = Math.min(Math.max(u, -cCyl), cCyl);
+    uTarget = Math.min(Math.max(uTarget, -cCyl), cCyl);
+
+    // Port inertance: the slug of gas in the port has mass, so its velocity
+    // cannot change instantaneously. A short first-order lag is what that
+    // amounts to, and it removes what the regularisation above leaves behind.
+    // The time constant is kept well below the blowdown edge -- about three
+    // samples at 48 kHz against roughly eight even at the rev limiter -- so it
+    // damps the chatter without softening the pulse that makes the sound.
+    const tau = 6e-5;
+    const k = Math.min(dt / tau, 1);
+    cyl.portVelocity += k * (uTarget - cyl.portVelocity);
+    const u = cyl.portVelocity;
 
     const volumetric = area * u;
     flowOut = volumetric;
     const dpFlow = -gas.gamma * cyl.pressurePa * (volumetric / v) * dt;
     const dpVol = ((-gas.gamma * cyl.pressurePa) / v) * dv;
     cyl.pressurePa = Math.max(cyl.pressurePa + dpFlow + dpVol, 1000);
+    cyl.portVelocity = u;
   } else if (intakeOpen) {
     const tau = (0.35 / Math.max(degPerS, 1)) * 180;
     const k = Math.min(dt / Math.max(tau, 1e-6), 1);
@@ -666,6 +759,19 @@ class Pipe {
     this.lengthM = spec.lengthM;
     this.gain = Math.min(Math.max(1 - spec.loss, 0), 1);
     this.admittance = 1;
+    // Frequency-dependent loss, one filter per direction of travel.
+    const hz = spec.dampingHz ?? 3000;
+    this.dampFwd = new LowPassFilter(hz, sampleRate);
+    this.dampBwd = new LowPassFilter(hz, sampleRate);
+  }
+
+  /** Delay output with this traverse's losses applied. */
+  readFwd() {
+    return this.dampFwd.f(this.fwd.read()) * this.gain;
+  }
+
+  readBwd() {
+    return this.dampBwd.f(this.bwd.read()) * this.gain;
   }
 
   retune(c, rho, sampleRate) {
@@ -754,6 +860,10 @@ export class ExhaustNetwork {
   portPressure(i, ambientPa, valveAreaM2) {
     const p = this.primaries[i];
     const r = portReflection(p.areaM2, valveAreaM2);
+    // Deliberately reads the raw delay line rather than `readBwd()`. The
+    // damping filters are stateful and are advanced exactly once per sample by
+    // `step`; running one here as well would double-filter the primary and
+    // clock its state twice per sample.
     return ambientPa + (1 + r) * p.bwd.read() * p.gain;
   }
 
@@ -765,18 +875,18 @@ export class ExhaustNetwork {
     // turns into a howl.
     for (let i = 0; i < this.primaries.length; i++) {
       const p = this.primaries[i];
-      w.primFwdOut[i] = p.fwd.read() * p.gain;
-      w.primBwdOut[i] = p.bwd.read() * p.gain;
+      w.primFwdOut[i] = p.readFwd();
+      w.primBwdOut[i] = p.readBwd();
     }
     for (let i = 0; i < this.collectors.length; i++) {
       const p = this.collectors[i];
-      w.collFwdOut[i] = p.fwd.read() * p.gain;
-      w.collBwdOut[i] = p.bwd.read() * p.gain;
+      w.collFwdOut[i] = p.readFwd();
+      w.collBwdOut[i] = p.readBwd();
     }
     for (let i = 0; i < this.tailpipes.length; i++) {
       const p = this.tailpipes[i];
-      w.tailFwdOut[i] = p.fwd.read() * p.gain;
-      w.tailBwdOut[i] = p.bwd.read() * p.gain;
+      w.tailFwdOut[i] = p.readFwd();
+      w.tailBwdOut[i] = p.readBwd();
     }
 
     // Cylinder end: a velocity source at a partially reflecting junction.
@@ -844,15 +954,40 @@ export class ExhaustNetwork {
 export const DEFAULT_AUDIO_PARAMETERS = {
   volume: 1,
   convolution: 1,
-  // engine-sim defaults this very low. A little goes a long way, because the
-  // derivative is where all the high-frequency edge lives.
-  dfFMix: 0.01,
+  // How much differentiated signal to blend in. Now that the derivative is
+  // normalised to unity gain at its reference frequency, this behaves like the
+  // mix fraction it is named after: it adds edge and bite without deciding the
+  // whole spectral balance.
+  dfFMix: 0.10,
   airNoise: 0.5,
   airNoiseCutoffHz: 2000,
   jitter: 0.06,
-  levelerTarget: 0.35,
-  levelerMaxGain: 1.9,
+
+  /**
+   * Output tone control: a gentle roll-off above this.
+   *
+   * Physically justified, not a sticking plaster. Radiation from an open pipe
+   * falls away at high frequency, bodywork and a helmet absorb it, and air
+   * absorption removes more over distance. Without it the sharp edge of each
+   * blowdown pulse survives all the way to the speaker with nothing between.
+   */
+  toneCutoffHz: 3200,
+
+  /** Target output RMS. The leveller aims the average level here. */
+  levelerTarget: 0.14,
+  levelerMaxGain: 4,
   levelerMinGain: 1e-5,
+
+  /**
+   * How much quieter the engine gets when it is doing no work.
+   *
+   * A real engine at idle is far quieter than one at wide-open throttle, and
+   * levelling everything to the same loudness is both wrong and unpleasant:
+   * it takes the weak, ring-dominated output of an overrun and amplifies it
+   * until the ringing is all you can hear. 0 would normalise everything; 1
+   * would make idle silent.
+   */
+  loadLevelDepth: 0.72,
 };
 
 export class Synthesizer {
@@ -873,6 +1008,10 @@ export class Synthesizer {
     }
     // engine-sim antialiases at 45% of the sample rate.
     this.antialias = new ButterworthLowPass(sampleRate * 0.45, sampleRate);
+    // Two poles of tone control, cascaded, for a 24 dB/octave roll-off. One
+    // pole was not enough to stop the pipe ring dominating at low rpm.
+    this.tone1 = new ButterworthLowPass(this.params.toneCutoffHz, sampleRate);
+    this.tone2 = new ButterworthLowPass(this.params.toneCutoffHz, sampleRate);
     this.leveler = new LevelingFilter(this.params.levelerTarget, sampleRate);
     this.leveler.maxGain = this.params.levelerMaxGain;
     this.leveler.minGain = this.params.levelerMinGain;
@@ -884,6 +1023,8 @@ export class Synthesizer {
       c.jitter.amount = this.params.jitter;
       c.airNoiseLp.setCutoff(this.params.airNoiseCutoffHz, this.sampleRate);
     }
+    this.tone1.setCutoff(this.params.toneCutoffHz, this.sampleRate);
+    this.tone2.setCutoff(this.params.toneCutoffHz, this.sampleRate);
     this.leveler.target = this.params.levelerTarget;
     this.leveler.maxGain = this.params.levelerMaxGain;
     this.leveler.minGain = this.params.levelerMinGain;
@@ -901,7 +1042,7 @@ export class Synthesizer {
    * *modulates* rather than adds, which is what keeps a stopped engine silent
    * however much noise is dialled in.
    */
-  render(inputs, load) {
+  render(inputs, load, level = 1) {
     const p = this.params;
     let sum = 0;
     const l = Math.min(Math.max(load, 0), 1);
@@ -923,9 +1064,17 @@ export class Synthesizer {
       sum += conv > 0 ? conv * ch.convolution.f(vIn) + (1 - conv) * vIn : vIn;
     }
 
-    const signal = this.antialias.f(sum);
-    const out = this.leveler.f(signal) * p.volume;
-    return Math.min(Math.max(out, -1), 1);
+    // Tone, then antialias, then level. Rolling off before the leveller means
+    // the gain is set by what will actually be heard, rather than by ringing
+    // that is about to be filtered away.
+    let signal = this.tone2.f(this.tone1.f(sum));
+    signal = this.antialias.f(signal);
+
+    // `level` scales with how hard the engine is working, so an idling or
+    // overrunning engine stays quiet instead of being levelled up until its
+    // ringing is the loudest thing in the room.
+    const out = this.leveler.f(signal) * level * p.volume;
+    return softClip(out);
   }
 }
 
@@ -967,10 +1116,15 @@ export class EngineAudio {
       pressurePa: spec.gas.ambientPa,
       temperatureK: spec.gas.ambientK,
       exhaustFlow: 0,
+      // Gas velocity in the exhaust port. State, because the port has
+      // inertance -- see stepCylinder.
+      portVelocity: 0,
     }));
 
     this.crankDeg = 0;
     this.running = true;
+    /** Output trim for the current operating point; see setOperatingPoint. */
+    this.level = 0.3;
     this.op = {
       rpm: spec.idleRpm,
       throttle: 0,
@@ -1012,6 +1166,18 @@ export class EngineAudio {
     this.op = { rpm: Math.max(rpm, 0), throttle: th, targetTorqueNm: torqueNm, exhaustK };
     this.cal = calibrate(this.spec, this.op);
     if (retune) this.exhaust.setGasState(gas, exhaustK);
+
+    // How loud this operating point should be relative to full noise.
+    //
+    // Both terms matter and they are not the same thing. Load covers the
+    // difference between driving and coasting; rpm covers the difference
+    // between idling and the limiter, which is audible even at constant
+    // throttle. An engine on the overrun at 9000 rpm is neither silent nor as
+    // loud as one pulling.
+    const rpmFrac = Math.min(Math.max(rpm / this.spec.redlineRpm, 0), 1);
+    const effort = 0.65 * load + 0.35 * rpmFrac;
+    const depth = this.synth.params.loadLevelDepth;
+    this.level = 1 - depth * (1 - effort);
   }
 
   /** Fill `out` (a Float32Array) with mono samples in [-1, 1]. */
@@ -1037,7 +1203,7 @@ export class EngineAudio {
       }
 
       this.exhaust.step(this.flow, this.valveArea);
-      out[s] = this.synth.render(this.exhaust.outputs, load);
+      out[s] = this.synth.render(this.exhaust.outputs, load, this.level);
 
       this.crankDeg += degPerSample;
       if (this.crankDeg >= 720) this.crankDeg -= 720;
@@ -1051,6 +1217,7 @@ export class EngineAudio {
       c.pressurePa = this.spec.gas.ambientPa;
       c.temperatureK = this.spec.gas.ambientK;
       c.exhaustFlow = 0;
+      c.portVelocity = 0;
     }
   }
 }

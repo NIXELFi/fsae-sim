@@ -9,7 +9,8 @@
 //     node tools/smoke_desktop.mjs
 
 import { spawn, spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -102,6 +103,48 @@ const child = spawn(exe, [], {
   stdio: "ignore",
   detached: false,
 });
+
+// The exe must be newer than everything it embeds.
+//
+// `generate_context!` bakes the frontend in at compile time, so a build that
+// failed leaves a perfectly working *old* binary sitting there, and every check
+// below will pass against yesterday's code. That is not hypothetical: a build
+// that reported `Access is denied (os error 5)` -- a stray WebView2 child still
+// holding the file -- was followed by a full-green smoke run reporting audio
+// levels from the version before the fix. Silent success on stale artefacts is
+// the worst failure mode this harness can have.
+{
+  const exeTime = statSync(exe).mtimeMs;
+  const roots = ["src", "index.html", "data"];
+  let newest = { path: null, time: 0 };
+  const walk = (p) => {
+    const st = statSync(p);
+    if (st.isDirectory()) {
+      for (const entry of readdirSync(p)) walk(join(p, entry));
+    } else if (st.mtimeMs > newest.time) {
+      newest = { path: p, time: st.mtimeMs };
+    }
+  };
+  for (const r of roots) {
+    const abs = join(here, "..", r);
+    if (existsSync(abs)) walk(abs);
+  }
+  if (newest.time > exeTime) {
+    console.error(
+      `
+STALE BINARY: ${newest.path} is newer than the exe.
+` +
+      `Rebuild first -- and check the build actually succeeded, because a
+` +
+      `failed build leaves the previous exe in place and every check below
+` +
+      `would pass against it.
+`,
+    );
+    process.exit(1);
+  }
+  console.log(`exe is current (newest source: ${relative(join(here, ".."), newest.path)})`);
+}
 
 let code = 1;
 try {

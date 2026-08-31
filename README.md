@@ -408,6 +408,23 @@ are kept in lockstep the way `sim-core` is — the Rust side emits golden vector
 and `tools/validate.js` checks this build against them, currently agreeing to
 2e-3 over 512 samples, which is f32-against-f64 rounding and nothing else.
 
+### Tone
+
+An exhaust is a bass instrument, and the model is checked against that: every
+operating point from idle to the limiter puts 99%+ of its energy below 1.5 kHz,
+peaking at the firing frequency or its second harmonic. Level scales with how
+hard the engine is working rather than being normalised flat, so idle is about
+2.7x quieter than full throttle and an overrun about 2x quieter than pulling --
+which is both what a real engine does and what stops a coasting engine's pipe
+ringing becoming the loudest thing you can hear.
+
+Three pieces of that are physics rather than equalisation: pipe losses grow with
+frequency the way boundary-layer losses really do, the tailpipe carries heavy
+damping standing in for the muffler the car must have (FSAE caps noise at
+110 dBA), and the exhaust-port flow law is linear rather than square-root at
+small pressure differences, which is both the correct viscous limit and the
+thing that stops the port chattering against its own returning waves.
+
 The old oscillator bank is still there as a fallback for browsers without
 AudioWorklet. It sounds recognisably like the same engine and obviously
 synthetic next to the real thing.

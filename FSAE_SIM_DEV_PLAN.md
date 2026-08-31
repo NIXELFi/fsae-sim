@@ -351,7 +351,12 @@ cylinder count and crank phasing set the firing pattern; primary length sets the
 resonance; exhaust gas temperature changes the speed of sound, so the tuned
 length shifts with load and the note moves on the overrun.
 
-### Two bugs that measurement caught and review would not have
+### Four bugs that measurement caught and review would not have
+
+The first two stopped the pitch tracking rpm. The last two made it correct and
+unlistenable, which is a distinct failure mode and one that no test asserting
+correctness would ever have caught.
+
 
 1. **The port flow was never choked.** The incompressible orifice equation
    returns about 930 m/s through the exhaust valve at blowdown — supersonic. It
@@ -365,6 +370,56 @@ so the pitch did not track rpm. Fixed (choke at Mach 1; reflection
 `r = (A_pipe − A_valve)/(A_pipe + A_valve)`), the spectrum is a clean harmonic
 series on the firing frequency with off-harmonics **200–500× down** and no
 half-order content, which is exactly right for an even-firing four.
+
+3. **The output was clipped flat at every operating point.** Measured RMS was
+   0.99 against a ±1 clamp -- a square wave, not levelled audio. The leveller
+   was a peak follower with a 1 ms attack, and a blowdown transient is about
+   *ten samples* wide at 48 kHz. It could never respond in time, so the gain was
+   always set by the quiet stretch between pulses and every pulse then arrived
+   into a gain far too high. Replaced with an RMS follower averaging over 150 ms
+   -- longer than a firing period even at idle -- plus `tanh` soft clipping, so
+   transients are rounded rather than sheared.
+
+4. **The derivative was 2500x too large.** `DerivativeFilter` divided by `dt`,
+   which multiplies by the sample rate, so `df_f_mix = 0.01` blended in a term
+   already vastly larger than the signal it was seasoning. Since a derivative's
+   gain rises linearly with frequency, the result was 84% of the output energy
+   between 1.5 and 4 kHz at 3000 rpm against 2.8% below 500 Hz. Now normalised
+   to unity gain at a reference frequency, so the mix fraction means what it
+   says.
+
+Two further changes were needed to make low rpm bearable, and both were missing
+physics rather than tuning:
+
+- **The orifice law is singular at zero pressure difference.**
+  `u = sign(dp) sqrt(2|dp|/rho)` has *infinite* slope at `dp = 0`, and after
+  blowdown the cylinder sits near the runner pressure for the whole exhaust
+  stroke -- so every small returning wave was amplified into a large flow swing
+  that injected straight back into the runner. A limit cycle: cylinder pressure
+  a clean 76 Hz at 3000 rpm while the valve flow oscillated at **3 kHz** and
+  dominated the entire output. Fixed with a linear (viscous) region below
+  1500 Pa, which is also the more physical law there, plus a short port
+  inertance. Both are real: the square-root law is the fully turbulent limit,
+  and the gas in the port has mass.
+
+- **Pipe losses were frequency-independent, and there was no muffler.** A flat
+  multiplier gives every mode the same Q, so at low rpm -- where pulses are far
+  apart -- the 1-2 kHz pipe modes rang on between them until they were all you
+  could hear. Real losses grow with frequency (boundary-layer viscous and
+  thermal), so each pipe now damps through a one-pole low-pass. The tailpipe
+  carries heavy damping standing in for the muffler the car must have anyway:
+  FSAE caps noise at 110 dBA.
+
+**Result:** every operating point from idle to the limiter is now 99%+ energy
+below 1.5 kHz, peaks at 1x or 2x the firing frequency, peak amplitude 0.11-0.28
+with real headroom, and levels that scale with effort -- idle 2.7x quieter than
+full throttle, overrun 2x quieter than pulling. `validate.js` asserts all of it.
+
+**Correctness and listenability are different properties, and only one of them
+had tests.** The spectral checks that proved the model right -- energy on the
+firing harmonics, no half-order -- were all passing throughout. They are
+insensitive to *where else* the energy is, to clipping, and to level. The tonal
+balance suite exists because of that gap.
 
 **Test the spectrum, not the waveform.** The first pitch test used zero-crossing
 counting and measured the 3.9 kHz pipe resonance rather than the 200 Hz firing
