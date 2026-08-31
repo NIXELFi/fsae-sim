@@ -45,18 +45,45 @@ pub struct AudioParameters {
     /// open pipe falls away at high frequency, bodywork and a helmet absorb it,
     /// and air absorption removes more over distance.
     pub tone_cutoff_hz: f32,
-    /// Target output RMS. The leveller aims the average level here.
-    pub leveler_target: f32,
-    pub leveler_max_gain: f32,
-    pub leveler_min_gain: f32,
-    /// How much quieter the engine gets when it is doing no work.
+    /// Pascals that map to full scale.
     ///
-    /// A real engine at idle is far quieter than one at wide-open throttle, and
-    /// levelling everything to the same loudness is both wrong and unpleasant:
-    /// it takes the weak, ring-dominated output of an overrun and amplifies it
-    /// until the ringing is all you can hear. 0 normalises everything; 1 makes
-    /// idle silent.
-    pub load_level_depth: f32,
+    /// A FIXED reference, deliberately, and this replaced an automatic gain
+    /// control. The AGC was doing exactly what it was asked -- driving every
+    /// operating point to the same output RMS -- and that is the wrong goal for
+    /// an engine. It erased the difference between idle and the limiter,
+    /// leaving 3.2 dB of A-weighted range where a real engine spans 25-35 dB,
+    /// while boosting the quiet, ring-dominated idle signal fourfold and
+    /// bringing its high-frequency noise floor up with it.
+    pub pressure_ref_pa: f32,
+
+    /// Range of the resonance compressor, dB.
+    ///
+    /// The waveguide's output swings about 12 dB across the rev range purely
+    /// from which pipe modes the firing harmonics land on. Tuned-length
+    /// resonance is real and worth hearing, but 12 dB of it is far more than a
+    /// real exhaust shows, and it swamped the loudness curve -- 10000 rpm came
+    /// out louder than the limiter. Limiting the range is what distinguishes
+    /// this from the AGC it replaced: at +/-8 dB it cannot flatten a 20 dB
+    /// loudness curve. Set to 0 to hear the pipe resonance raw.
+    pub resonance_compress_db: f32,
+
+    /// Target RMS for the resonance compressor, before the level trim.
+    pub compressor_target: f32,
+
+    /// Loudness floor, as a fraction of full scale, for an engine making no
+    /// power. Not zero: an engine on the overrun still pumps air.
+    pub level_floor: f32,
+
+    /// Exponent mapping combustion power to loudness.
+    ///
+    /// Level tracks the chemical power the engine is releasing -- heat release
+    /// per cycle times firing rate -- because that is what drives an exhaust,
+    /// and it falls away on a closed throttle without any special case. Sound
+    /// pressure goes roughly as the square root of acoustic power and only a
+    /// fraction of combustion power becomes sound, so the exponent is well
+    /// below 1. 0.55 measures out at 20 dB idle to limiter and 26 dB from a
+    /// closed-throttle overrun.
+    pub level_exponent: f32,
 }
 
 impl Default for AudioParameters {
@@ -69,10 +96,11 @@ impl Default for AudioParameters {
             air_noise_cutoff_hz: 2_000.0,
             jitter: 0.06,
             tone_cutoff_hz: 3_200.0,
-            leveler_target: 0.14,
-            leveler_max_gain: 4.0,
-            leveler_min_gain: 1e-5,
-            load_level_depth: 0.72,
+            pressure_ref_pa: 90_000.0,
+            resonance_compress_db: 8.0,
+            compressor_target: 0.09,
+            level_floor: 0.025,
+            level_exponent: 0.55,
         }
     }
 }
@@ -94,7 +122,7 @@ pub struct Synthesizer {
     tone1: ButterworthLowPass,
     tone2: ButterworthLowPass,
     antialias: ButterworthLowPass,
-    leveler: LevelingFilter,
+    compressor: LevelingFilter,
     params: AudioParameters,
     sample_rate: f32,
 }
@@ -113,9 +141,10 @@ impl Synthesizer {
             })
             .collect();
 
-        let mut leveler = LevelingFilter::new(params.leveler_target, sample_rate);
-        leveler.max_gain = params.leveler_max_gain;
-        leveler.min_gain = params.leveler_min_gain;
+        let mut compressor = LevelingFilter::new(params.compressor_target, sample_rate);
+        let span = 10f32.powf(params.resonance_compress_db.max(0.0) / 20.0);
+        compressor.max_gain = span;
+        compressor.min_gain = 1.0 / span;
 
         Self {
             channels,
@@ -123,7 +152,7 @@ impl Synthesizer {
             tone2: ButterworthLowPass::new(params.tone_cutoff_hz, sample_rate),
             // engine-sim antialiases at 45% of the sample rate.
             antialias: ButterworthLowPass::new(sample_rate * 0.45, sample_rate),
-            leveler,
+            compressor,
             params,
             sample_rate,
         }
@@ -140,9 +169,10 @@ impl Synthesizer {
         }
         self.tone1.set_cutoff(p.tone_cutoff_hz, self.sample_rate);
         self.tone2.set_cutoff(p.tone_cutoff_hz, self.sample_rate);
-        self.leveler.target = p.leveler_target;
-        self.leveler.max_gain = p.leveler_max_gain;
-        self.leveler.min_gain = p.leveler_min_gain;
+        let span = 10f32.powf(p.resonance_compress_db.max(0.0) / 20.0);
+        self.compressor.target = p.compressor_target;
+        self.compressor.max_gain = span;
+        self.compressor.min_gain = 1.0 / span;
         self.params = p;
     }
 
@@ -152,8 +182,8 @@ impl Synthesizer {
         }
     }
 
-    pub fn leveler_gain(&self) -> f32 {
-        self.leveler.gain()
+    pub fn compressor_gain(&self) -> f32 {
+        self.compressor.gain()
     }
 
     /// Render one output sample from one pressure sample per channel.
@@ -187,12 +217,15 @@ impl Synthesizer {
             sum += v;
         }
 
-        // Tone, then antialias, then level. Rolling off before the leveller
-        // means the gain is set by what will actually be heard rather than by
-        // ringing that is about to be filtered away.
+        // Tone, then antialias, then a fixed pressure reference, then the
+        // resonance compressor, and only then `level`. The order matters:
+        // compressing after the level trim would undo it.
         let mut signal = self.tone2.f(self.tone1.f(sum));
-        signal = self.antialias.f(signal);
-        soft_clip(self.leveler.f(signal) * level * p.volume)
+        signal = self.antialias.f(signal) / p.pressure_ref_pa;
+        if p.resonance_compress_db > 0.0 {
+            signal = self.compressor.f(signal);
+        }
+        soft_clip(signal * level * p.volume)
     }
 }
 
@@ -235,9 +268,8 @@ mod tests {
         p.jitter = 0.0;
         p.convolution = 0.0;
         p.df_f_mix = 0.0;
-        p.leveler_target = 1.0;
-        p.leveler_max_gain = 1.0;
-        p.leveler_min_gain = 1.0;
+        p.resonance_compress_db = 0.0;
+        p.pressure_ref_pa = 1.0;
         p.tone_cutoff_hz = 20_000.0;
         s.set_parameters(p);
         let mut last = 1.0;
@@ -248,18 +280,71 @@ mod tests {
     }
 
     #[test]
-    fn levelling_pulls_a_loud_source_back() {
-        let mut quiet = synth(1);
-        let mut loud = synth(1);
-        let mut peak_q = 0.0f32;
-        let mut peak_l = 0.0f32;
-        for i in 0..48_000 {
-            let phase = i as f32 * 0.02;
-            peak_q = peak_q.max(quiet.render(&[phase.sin() * 1.0], 1.0, 1.0).abs());
-            peak_l = peak_l.max(loud.render(&[phase.sin() * 1_000.0], 1.0, 1.0).abs());
-        }
-        // A thousand times the input must not give a thousand times the output.
-        assert!(peak_l < peak_q * 20.0, "{peak_q} vs {peak_l}");
+    fn the_compressor_cannot_flatten_the_loudness_curve() {
+        // The property that distinguishes this from the automatic gain control
+        // it replaced. The compressor exists to take out the ~12 dB of swing
+        // the waveguide shows across the rev range purely from which pipe modes
+        // the firing harmonics land on. It must NOT be able to erase the
+        // difference between idle and the limiter -- that was the old AGC's
+        // failure, and it made idle as loud as full throttle.
+        //
+        // Two sources 20 dB apart, each compressed independently: with a range
+        // of +/-8 dB the most it can close is 16 dB, so at least 4 dB has to
+        // survive.
+        let rms_of = |amplitude: f32| {
+            let mut s = synth(1);
+            let mut p = AudioParameters::default();
+            p.pressure_ref_pa = 1.0;
+            p.air_noise = 0.0;
+            p.jitter = 0.0;
+            p.convolution = 0.0;
+            s.set_parameters(p);
+            let mut sum = 0.0f32;
+            let mut n = 0u32;
+            for i in 0..48_000 * 2 {
+                let y = s.render(&[amplitude * (i as f32 * 0.05).sin()], 0.0, 1.0);
+                if i > 48_000 {
+                    sum += y * y;
+                    n += 1;
+                }
+            }
+            (sum / n as f32).sqrt()
+        };
+
+        let quiet = rms_of(0.01);
+        let loud = rms_of(0.1); // 20 dB louder
+        let survived = 20.0 * (loud / quiet.max(1e-12)).log10();
+        assert!(
+            survived > 3.0,
+            "a 20 dB input difference collapsed to {survived:.1} dB"
+        );
+    }
+
+    #[test]
+    fn the_compressor_does_reduce_a_resonance_swing() {
+        // The other half: it has to actually do its job. The same 20 dB
+        // difference must come out smaller than it went in.
+        let rms_of = |amplitude: f32| {
+            let mut s = synth(1);
+            let mut p = AudioParameters::default();
+            p.pressure_ref_pa = 1.0;
+            p.air_noise = 0.0;
+            p.jitter = 0.0;
+            p.convolution = 0.0;
+            s.set_parameters(p);
+            let mut sum = 0.0f32;
+            let mut n = 0u32;
+            for i in 0..48_000 * 2 {
+                let y = s.render(&[amplitude * (i as f32 * 0.05).sin()], 0.0, 1.0);
+                if i > 48_000 {
+                    sum += y * y;
+                    n += 1;
+                }
+            }
+            (sum / n as f32).sqrt()
+        };
+        let survived = 20.0 * (rms_of(0.1) / rms_of(0.01).max(1e-12)).log10();
+        assert!(survived < 20.0, "nothing was compressed: {survived:.1} dB");
     }
 
     #[test]

@@ -249,14 +249,34 @@ impl ExhaustNetwork {
     /// from the collector while the exhaust valve is still open is precisely
     /// the mechanism header tuning works by, so this feedback path is the
     /// point rather than a refinement.
-    pub fn port_pressure(&self, i: usize, ambient_pa: f32, valve_area_m2: f32) -> f32 {
+    /// `port_velocity_ms` is the gas velocity currently going through the
+    /// valve, positive out of the cylinder. It matters, and leaving it out was
+    /// the single biggest error in the model.
+    ///
+    /// A pipe is not an infinite reservoir. Push gas in and the pressure at the
+    /// inlet rises immediately by `rho c u`; pull gas out and it falls. That is
+    /// the pipe's characteristic impedance, and it acts within the sample --
+    /// not after the round trip a wave takes to come back. Without it the
+    /// exhaust valve saw a constant one atmosphere and could draw from it at
+    /// will, which at small throttle openings meant gas rushing backwards into
+    /// the cylinder at sonic velocity and injecting a wave as large as a
+    /// full-power blowdown.
+    pub fn port_pressure(
+        &self,
+        i: usize,
+        ambient_pa: f32,
+        valve_area_m2: f32,
+        port_velocity_ms: f32,
+    ) -> f32 {
         let p = &self.primaries[i];
         let r = port_reflection(p.area_m2, valve_area_m2);
         // Deliberately reads the raw delay line rather than `read_bwd`. The
         // damping filters are stateful and are advanced exactly once per sample
         // by `step`; running one here as well would double-filter the primary
         // and clock its state twice per sample.
-        ambient_pa + (1.0 + r) * p.bwd.read() * p.gain
+        let wave = (1.0 + r) * p.bwd.read() * p.gain;
+        let u_pipe = port_velocity_ms * valve_area_m2 / p.area_m2.max(1e-9);
+        ambient_pa + wave + self.rho_c * u_pipe
     }
 
     /// Advance the network one sample.

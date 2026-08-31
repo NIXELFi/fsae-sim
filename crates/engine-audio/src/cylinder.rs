@@ -362,6 +362,15 @@ pub fn step_cylinder(
         let c_cyl = (gas.gamma * gas.r_specific * cyl.temperature_k.max(1.0)).sqrt();
         u_target = u_target.clamp(-c_cyl, c_cyl);
 
+        // An exhaust port flows worse backwards than forwards. The valve seat
+        // and the port are shaped for gas leaving the cylinder; reversed, the
+        // jet separates and the effective discharge coefficient drops. 0.7 is
+        // the usual ballpark. This only matters on a closed throttle, which is
+        // exactly where reverse flow dominates -- idle and the overrun.
+        if u_target < 0.0 {
+            u_target *= 0.7;
+        }
+
         // Port inertance: the slug of gas in the port has mass, so its velocity
         // cannot change instantaneously. A short first-order lag is what that
         // amounts to, and it removes what the regularisation above leaves
