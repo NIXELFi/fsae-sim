@@ -248,7 +248,24 @@ class Game {
       console.warn(this.bodyStatus);
       this.cadBody = null;
     } else if (this.cadBody && !this.cadCar) {
-      this.renderer.useBodyModel(this.cadBody.body, this.cadBody.axles, {
+      // Trim on the measured wheel bays, set by eye against the model.
+      //
+      // The bay detection finds the narrowest station in each half of the car,
+      // and on this body that lands ahead of the real axle at both ends -- by
+      // 200 mm at the front and 100 mm at the rear. The bays are not symmetric
+      // about the axle: bodywork is cut away further ahead of a wheel than
+      // behind it, to clear the tyre as it steers and to let air out, so the
+      // narrowest point sits forward of the hub. The bias differs front to
+      // rear because only the front wheels steer.
+      //
+      // Kept as a named trim rather than folded into the detector: it is a
+      // correction someone made by looking, and it should stay visible as one.
+      const trim = this.wheelTrimM ?? { front: -0.200, rear: -0.100 };
+      const axles = this.cadBody.axles && {
+        front: this.cadBody.axles.front + trim.front,
+        rear: this.cadBody.axles.rear + trim.rear,
+      };
+      this.renderer.useBodyModel(this.cadBody.body, axles, {
         front: SDM26.trackFrontM,
         rear: SDM26.trackRearM,
         tireRadius: SDM26.tireRadiusM,

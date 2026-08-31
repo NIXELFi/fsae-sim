@@ -11,7 +11,7 @@
 
 import {
   mat4, perspective, lookAlong, multiply, normalize, identity,
-  translation, rotX, rotY, rotZ, transformDir, transformPoint,
+  translation, rotX, rotY, rotZ, scale, transformDir, transformPoint,
 } from "./math.js";
 import { buildCarMeshes, hubsFor, GEO, HUBS } from "./carmesh.js";
 import { buildVenueMesh } from "./venuemesh.js";
@@ -858,11 +858,24 @@ export class Renderer {
     // steered axis rather than the car's.
     const w = s.wheels;
     for (const hub of (this.carModel?.hubs ?? this.bodyHubs ?? s.hubs ?? HUBS)) {
+      // One wheel mesh is drawn at all four corners, so the left-hand pair has
+      // to be mirrored across the plane of the wheel. A wheel is not
+      // symmetric about that plane -- the rim is dished, and the offset puts
+      // the spoke face outboard -- so the same mesh on both sides has the left
+      // pair inside out, with its dish facing the wrong way.
+      //
+      // Mirroring in local Z is safe here: it commutes with the spin, which is
+      // also about Z, so the wheels still turn the right way. The renderer
+      // lights both faces and culls nothing, so the reversed winding does not
+      // matter, and for a +/-1 scale the inverse transpose is the matrix
+      // itself, so the normals come out right too.
+      const mirrored = hub.z < 0;
       this.chain(this.model, [
         this.chassis,
         translation(T[0], hub.x, hub.y, hub.z),
         rotY(T[1], hub.front ? w.steerRad : 0),
         rotZ(T[2], -(hub.front ? w.spinFront : w.spinRear)),
+        ...(mirrored ? [scale(T[3], 1, 1, -1)] : []),
       ]);
       part(this.car.tire, this.model, null);
       // Fade the gold spokes toward the tyre as the wheel speeds up. Five

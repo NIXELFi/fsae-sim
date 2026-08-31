@@ -40,6 +40,14 @@ export function translation(out, x, y, z) {
   return out;
 }
 
+export function scale(out, x, y, z) {
+  identity(out);
+  out[0] = x;
+  out[5] = y;
+  out[10] = z;
+  return out;
+}
+
 export function rotX(out, a) {
   const c = Math.cos(a), s = Math.sin(a);
   out.set([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]);
