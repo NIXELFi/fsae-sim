@@ -28,6 +28,9 @@ pub struct Cylinder {
     /// waveguide integrates -- volumetric rather than mass, because what the
     /// waveguide needs is a particle velocity, and that is flow over area.
     pub exhaust_flow: f32,
+    /// Gas velocity in the exhaust port, m/s. State, because the slug of gas in
+    /// the port has mass and cannot change velocity instantaneously.
+    pub port_velocity: f32,
 }
 
 impl Cylinder {
@@ -37,6 +40,7 @@ impl Cylinder {
             pressure_pa: ambient_pa,
             temperature_k: ambient_k,
             exhaust_flow: 0.0,
+            port_velocity: 0.0,
         }
     }
 
@@ -321,10 +325,32 @@ pub fn step_cylinder(
         // Blowdown, then the exhaust stroke pushing the rest out.
         let dp_across = cyl.pressure_pa - back_pressure_pa;
         let rho = gas.density(cyl.pressure_pa.max(back_pressure_pa), cyl.temperature_k);
-        // Incompressible orifice, signed. Crude near choking, but the choked
-        // phase lasts a few crank degrees and the pulse shape is dominated by
-        // the valve opening ramp anyway.
-        let mut u = (2.0 * dp_across.abs() / rho.max(1e-6)).sqrt() * dp_across.signum();
+
+        // Orifice flow, regularised near zero pressure difference.
+        //
+        // The plain law `u = sign(dp) sqrt(2|dp|/rho)` has INFINITE slope at
+        // dp = 0. That matters because after blowdown the cylinder sits close
+        // to the runner pressure for the whole exhaust stroke, so dp hovers
+        // near zero -- and there the square root turns every small returning
+        // wave into a large swing in flow, which injects back into the runner
+        // and moves the pressure again. The result was a limit cycle: cylinder
+        // pressure a clean 76 Hz at 3000 rpm while the valve flow oscillated at
+        // 3 kHz and dominated the entire output.
+        //
+        // Below DP_LAMINAR the law is linear in dp, matched in value at the
+        // crossover so the curve is continuous with finite slope everywhere.
+        // This is also the more physical choice: flow through a restriction at
+        // a small pressure difference is viscosity-dominated and proportional
+        // to dp, not to its square root. The square-root law is the fully
+        // turbulent limit.
+        const DP_LAMINAR: f32 = 1500.0; // Pa
+        let mag = dp_across.abs();
+        let turbulent = (2.0 * DP_LAMINAR / rho.max(1e-6)).sqrt();
+        let mut u_target = if mag >= DP_LAMINAR {
+            (2.0 * mag / rho.max(1e-6)).sqrt() * dp_across.signum()
+        } else {
+            dp_across / DP_LAMINAR * turbulent
+        };
 
         // Choke it. A converging port cannot pass gas faster than the local
         // speed of sound however large the pressure ratio across it, and at
@@ -332,11 +358,21 @@ pub fn step_cylinder(
         // incompressible orifice equation returns about 930 m/s, which is not
         // merely too big but qualitatively wrong: it empties the cylinder in a
         // few degrees, slams the waveguide with a supersonic particle velocity,
-        // and the reflection that comes back inverts the next pulse. The
-        // symptom is an exhaust note that correlates NEGATIVELY with its own
-        // firing period.
+        // and the reflection that comes back inverts the next pulse.
         let c_cyl = (gas.gamma * gas.r_specific * cyl.temperature_k.max(1.0)).sqrt();
-        u = u.clamp(-c_cyl, c_cyl);
+        u_target = u_target.clamp(-c_cyl, c_cyl);
+
+        // Port inertance: the slug of gas in the port has mass, so its velocity
+        // cannot change instantaneously. A short first-order lag is what that
+        // amounts to, and it removes what the regularisation above leaves
+        // behind. The time constant is kept well below the blowdown edge --
+        // about three samples at 48 kHz against roughly eight even at the
+        // limiter -- so it damps the chatter without softening the pulse that
+        // makes the sound.
+        const PORT_TAU: f32 = 6e-5;
+        let k = (dt / PORT_TAU).min(1.0);
+        cyl.port_velocity += k * (u_target - cyl.port_velocity);
+        let u = cyl.port_velocity;
 
         let volumetric = area * u; // m^3/s
         flow_out = volumetric;

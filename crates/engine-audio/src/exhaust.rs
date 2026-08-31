@@ -13,6 +13,7 @@
 //! are emergent here, not scripted.
 
 use crate::engine::{EngineSpec, GasProperties, PipeSpec};
+use crate::filters::LowPassFilter;
 
 /// A fractional-delay line. One direction of travel in one pipe.
 #[derive(Clone, Debug)]
@@ -73,6 +74,9 @@ struct Pipe {
     gain: f32,
     /// Admittance, A / (rho c). Set whenever the gas state changes.
     admittance: f32,
+    /// Frequency-dependent loss, one filter per direction of travel.
+    damp_fwd: LowPassFilter,
+    damp_bwd: LowPassFilter,
 }
 
 impl Pipe {
@@ -87,7 +91,22 @@ impl Pipe {
             length_m: spec.length_m,
             gain: (1.0 - spec.loss).clamp(0.0, 1.0),
             admittance: 1.0,
+            damp_fwd: LowPassFilter::new(spec.damping_hz, sample_rate),
+            damp_bwd: LowPassFilter::new(spec.damping_hz, sample_rate),
         }
+    }
+
+    /// Delay output with this traverse's losses applied.
+    #[inline]
+    fn read_fwd(&mut self) -> f32 {
+        let v = self.fwd.read();
+        self.damp_fwd.f(v) * self.gain
+    }
+
+    #[inline]
+    fn read_bwd(&mut self) -> f32 {
+        let v = self.bwd.read();
+        self.damp_bwd.f(v) * self.gain
     }
 
     fn retune(&mut self, c: f32, rho: f32, sample_rate: f32) {
@@ -233,6 +252,10 @@ impl ExhaustNetwork {
     pub fn port_pressure(&self, i: usize, ambient_pa: f32, valve_area_m2: f32) -> f32 {
         let p = &self.primaries[i];
         let r = port_reflection(p.area_m2, valve_area_m2);
+        // Deliberately reads the raw delay line rather than `read_bwd`. The
+        // damping filters are stateful and are advanced exactly once per sample
+        // by `step`; running one here as well would double-filter the primary
+        // and clock its state twice per sample.
         ambient_pa + (1.0 + r) * p.bwd.read() * p.gain
     }
 
@@ -251,17 +274,17 @@ impl ExhaustNetwork {
         // ---- read every pipe end before writing anything -------------------
         // Doing this in one pass would let a junction see this sample's own
         // output, which is an algebraic loop and turns into a howl.
-        for (i, p) in self.primaries.iter().enumerate() {
-            w.prim_fwd_out[i] = p.fwd.read() * p.gain;
-            w.prim_bwd_out[i] = p.bwd.read() * p.gain;
+        for (i, p) in self.primaries.iter_mut().enumerate() {
+            w.prim_fwd_out[i] = p.read_fwd();
+            w.prim_bwd_out[i] = p.read_bwd();
         }
-        for (i, p) in self.collectors.iter().enumerate() {
-            w.coll_fwd_out[i] = p.fwd.read() * p.gain;
-            w.coll_bwd_out[i] = p.bwd.read() * p.gain;
+        for (i, p) in self.collectors.iter_mut().enumerate() {
+            w.coll_fwd_out[i] = p.read_fwd();
+            w.coll_bwd_out[i] = p.read_bwd();
         }
-        for (i, p) in self.tailpipes.iter().enumerate() {
-            w.tail_fwd_out[i] = p.fwd.read() * p.gain;
-            w.tail_bwd_out[i] = p.bwd.read() * p.gain;
+        for (i, p) in self.tailpipes.iter_mut().enumerate() {
+            w.tail_fwd_out[i] = p.read_fwd();
+            w.tail_bwd_out[i] = p.read_bwd();
         }
 
         // ---- cylinder end of each primary ----------------------------------
