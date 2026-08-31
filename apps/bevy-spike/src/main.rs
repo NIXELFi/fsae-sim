@@ -15,6 +15,7 @@ mod car;
 mod ground;
 mod track;
 
+use bevy::asset::AssetPlugin;
 use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::GlobalAmbientLight;
@@ -84,14 +85,27 @@ fn main() {
     solver.reset(sx, sy, spsi, 0.0);
 
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "SDM26 Driver-in-Loop — Bevy spike".into(),
-                resolution: WindowResolution::new(1600, 900),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "SDM26 Driver-in-Loop — Bevy spike".into(),
+                        resolution: WindowResolution::new(1600, 900),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                // Point the asset server at the same directory `cadmodel` checks.
+                // Bevy's default is `assets` beside the executable, which for a
+                // cargo build is target/release -- so the CAD file was found on
+                // disk, reported as loaded, and then failed to load from a path
+                // nothing had put it in. Computing the root in one place and
+                // telling both halves about it is what stops that.
+                .set(AssetPlugin {
+                    file_path: cadmodel::asset_root().to_string_lossy().into_owned(),
+                    ..default()
+                }),
+        )
         .insert_resource(ClearColor(Color::srgb(0.42, 0.56, 0.75)))
         // Sky bounce. In 0.19 AmbientLight is a per-camera component and the
         // scene-wide one is GlobalAmbientLight.
@@ -122,7 +136,14 @@ fn main() {
         .add_systems(Startup, (setup, report_audio))
         .add_systems(
             Update,
-            (read_input, drive_visuals, update_hud, update_engine_audio, maybe_screenshot),
+            (
+                read_input,
+                drive_visuals,
+                update_hud,
+                update_engine_audio,
+                wire_cad_model,
+                maybe_screenshot,
+            ),
         )
         .add_systems(FixedUpdate, step_physics)
         .run();
@@ -134,6 +155,8 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     course: Res<Course>,
+    assets: Res<AssetServer>,
+    mut cad: ResMut<cadmodel::CadModel>,
 ) {
     let mats = Materials::new(&mut materials);
     let asphalt = ground::asphalt_image(&mut images);
@@ -191,7 +214,12 @@ fn setup(
     }
 
     // ---- the car ----
-    car::spawn_car(&mut commands, &mut meshes, &mats);
+    let car_root = car::spawn_car(&mut commands, &mut meshes, &mats);
+
+    // Optional CAD bodywork. Spawned as a child of the car root so it inherits
+    // the chassis position and attitude for free; if there is no file, nothing
+    // happens and the procedural body stays.
+    cadmodel::spawn_if_present(&mut commands, &assets, car_root, &mut cad);
 
     // ---- sun ----
     commands.spawn((
@@ -323,6 +351,65 @@ fn report_audio(engine: NonSend<Engine>) {
         Some(_) => info!("engine audio: physical model running on the output device"),
         None => warn!("engine audio: no output device, running silent"),
     }
+}
+
+/// Hook the CAD model's named nodes up to the animation, once it has loaded.
+///
+/// Scene spawning is asynchronous, so this polls until the names appear rather
+/// than assuming they are there the frame after the spawn was requested. It
+/// runs exactly once thereafter.
+///
+/// What it does is attach the SAME marker components the procedural body uses,
+/// so `drive_visuals` animates a CAD wheel without knowing it is one. The
+/// alternative -- a second code path for CAD models -- would mean the two could
+/// drift apart, and the one nobody is looking at would be the broken one.
+fn wire_cad_model(
+    mut commands: Commands,
+    mut cad: ResMut<cadmodel::CadModel>,
+    named: Query<(Entity, &Name)>,
+    car_root: Query<&Children, With<CarRoot>>,
+    cad_bodies: Query<(), With<cadmodel::CadBody>>,
+    mut visibility: Query<&mut Visibility>,
+) {
+    if !cad.loaded || cad.wired {
+        return;
+    }
+
+    let mut found = 0;
+    for (entity, name) in named.iter() {
+        match cadmodel::role_of(name.as_str()) {
+            Some(cadmodel::Role::Wheel { front }) => {
+                commands.entity(entity).insert(RoadWheel { front });
+                found += 1;
+            }
+            Some(cadmodel::Role::SteeringWheel) => {
+                commands.entity(entity).insert(SteeringWheel);
+                found += 1;
+            }
+            None => {}
+        }
+    }
+    if found == 0 {
+        return; // scene has not finished spawning yet
+    }
+
+    // Hide the procedural body, but not the CAD model that now sits beside it.
+    //
+    // Hidden rather than despawned: a half-finished export can be compared
+    // against the known-good procedural geometry by flipping this back, which
+    // is exactly what you want while getting an export right.
+    if let Ok(children) = car_root.single() {
+        for child in children.iter() {
+            if cad_bodies.get(child).is_err() {
+                if let Ok(mut v) = visibility.get_mut(child) {
+                    *v = Visibility::Hidden;
+                }
+            }
+        }
+    }
+
+    cad.wired = true;
+    info!("CAD model wired: {found} named nodes hooked to the animation");
 }
 
 fn step_physics(time: Res<Time<Fixed>>, mut sim: ResMut<Sim>) {

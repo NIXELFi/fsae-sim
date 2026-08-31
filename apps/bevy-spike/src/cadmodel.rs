@@ -27,10 +27,18 @@
 //!    cannot be skipped: the wheels have to be separate nodes with known names
 //!    or they cannot rotate or steer, and the steering wheel has to be separate
 //!    or it cannot turn.
-//! 5. **Orient it**: +X forward, +Y up, +Z to the left, origin at the centre of
-//!    the front axle line projected to the ground. This matches the vehicle
-//!    model's convention, so a correctly oriented export needs no fudge factors
-//!    and a wrongly oriented one is obvious immediately.
+//! 5. **Orient it**: +X forward, +Y up, +Z to the left, and put the origin at
+//!    the **centre of gravity projected onto the ground** -- X = 0 at the CG,
+//!    Y = 0 at the ground plane. For SDM26 that puts the front axle at
+//!    x = +0.788 and the rear at x = -0.742. This matches what both builds
+//!    already use for the car root, so the model rotates about the same point
+//!    the physics yaws about. Building it about the front axle instead is the
+//!    mistake with the least visible symptom: it looks fine standing still and
+//!    pivots about the wrong place the moment the car turns.
+//!
+//!    Run `python ../../fsae-sim/tools/check_car_glb.py your.glb` before
+//!    trusting an export. It checks the frame, the scale, the node names and
+//!    the hub positions against the vehicle parameters, and says what to change.
 //! 6. **Export .glb** (binary glTF, textures embedded) to `assets/car.glb`.
 //!
 //! Scale is metres. A model exported in millimetres arrives a thousand times
@@ -57,7 +65,29 @@ pub const CAR_MODEL: &str = "car.glb";
 
 #[derive(Resource, Default)]
 pub struct CadModel {
+    /// The scene was found on disk and spawning was requested.
     pub loaded: bool,
+    /// Its named nodes have been found and hooked up to the animation.
+    pub wired: bool,
+}
+
+/// Where Bevy is told to look for assets, and where this module checks.
+///
+/// Computed rather than assumed so that the existence check and the asset
+/// server cannot disagree -- the failure mode when they do is that the file is
+/// found, the scene silently never loads, and nothing says why. Next to the
+/// executable first, which is how a shipped build finds it; then the crate's
+/// own assets directory, which is how `cargo run` does.
+pub fn asset_root() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("assets");
+            if p.is_dir() {
+                return p;
+            }
+        }
+    }
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
 /// Marker for anything spawned from the CAD model.
@@ -76,7 +106,7 @@ pub fn spawn_if_present(
     parent: Entity,
     state: &mut CadModel,
 ) {
-    let path = std::path::Path::new("assets").join(CAR_MODEL);
+    let path = asset_root().join(CAR_MODEL);
     if !path.exists() {
         info!(
             "no {} — using the procedural body. See cadmodel.rs for the \
@@ -102,13 +132,34 @@ pub fn spawn_if_present(
     info!("loaded CAD bodywork from {}", path.display());
 }
 
-/// Hide the procedural body once CAD bodywork is in place.
-///
-/// Hidden rather than despawned so that a failed or half-finished export can be
-/// compared against the known-good procedural geometry by toggling one flag,
-/// which is exactly what you want while getting an export right.
-pub fn hide_procedural(visibility: &mut Visibility) {
-    *visibility = Visibility::Hidden;
+/// Which simulator part a glTF node name corresponds to.
+pub fn role_of(name: &str) -> Option<Role> {
+    match name {
+        "wheel_fl" | "wheel_fr" => Some(Role::Wheel { front: true }),
+        "wheel_rl" | "wheel_rr" => Some(Role::Wheel { front: false }),
+        "steering_wheel" => Some(Role::SteeringWheel),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Wheel { front: bool },
+    SteeringWheel,
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_names_map_to_the_right_axle() {
+        assert_eq!(role_of("wheel_fl"), Some(Role::Wheel { front: true }));
+        assert_eq!(role_of("wheel_rr"), Some(Role::Wheel { front: false }));
+        assert_eq!(role_of("steering_wheel"), Some(Role::SteeringWheel));
+        assert_eq!(role_of("body"), None);
+        assert_eq!(role_of("Wheel_FL"), None, "matching is case sensitive");
+    }
 }
 
 #[cfg(test)]
