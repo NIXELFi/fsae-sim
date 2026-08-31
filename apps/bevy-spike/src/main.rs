@@ -9,6 +9,8 @@
 //!   cargo run -p bevy-spike --release
 //!   cargo run -p bevy-spike --release -- --screenshot shot.png
 
+mod audio;
+mod cadmodel;
 mod car;
 mod ground;
 mod track;
@@ -22,6 +24,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::WindowResolution;
 
+use audio::EngineSound;
 use car::{CarRoot, Materials, RoadWheel, SteeringWheel, EYE};
 use sim_core::prelude::*;
 use track::{to_world, TrackData};
@@ -38,6 +41,13 @@ struct Sim {
 
 #[derive(Resource)]
 struct Course(TrackData);
+
+/// The engine synthesiser and its output stream.
+///
+/// A non-send resource because `cpal::Stream` is not `Sync` -- on some hosts it
+/// is bound to the thread that created it. Bevy keeps non-send resources on the
+/// main thread, which is exactly the guarantee cpal wants.
+struct Engine(Option<EngineSound>);
 
 #[derive(Resource)]
 struct ShotRequest {
@@ -104,8 +114,16 @@ fn main() {
         .insert_resource(ShotRequest { path: shot, frames: 0 })
         .insert_resource(view)
         .insert_resource(Time::<Fixed>::from_hz(120.0))
-        .add_systems(Startup, setup)
-        .add_systems(Update, (read_input, drive_visuals, update_hud, maybe_screenshot))
+        // Non-send: cpal's stream is not Sync and on some hosts is bound to the
+        // thread that made it. Bevy keeps non-send resources on the main
+        // thread, which is the guarantee cpal wants.
+        .insert_non_send(Engine(EngineSound::start()))
+        .init_resource::<cadmodel::CadModel>()
+        .add_systems(Startup, (setup, report_audio))
+        .add_systems(
+            Update,
+            (read_input, drive_visuals, update_hud, update_engine_audio, maybe_screenshot),
+        )
         .add_systems(FixedUpdate, step_physics)
         .run();
 }
@@ -272,6 +290,38 @@ fn read_input(
     }
     if down {
         sim.solver.powertrain_mut().shift_down();
+    }
+}
+
+/// Push the solver's operating point at the synthesiser.
+///
+/// Once a frame, not per physics tick: re-solving the heat release and
+/// retuning the waveguide is not free, and neither the rpm nor the exhaust gas
+/// temperature changes meaningfully in 2 ms.
+fn update_engine_audio(mut sim: ResMut<Sim>, mut engine: NonSendMut<Engine>) {
+    let Some(sound) = engine.0.as_mut() else {
+        return;
+    };
+    let tel = sim.solver.telemetry();
+    let rpm = tel.engine_rpm as f32;
+    let throttle = sim.controls.throttle as f32;
+
+    // The torque the engine is actually making. The synthesiser solves its
+    // combustion to produce this much work, so the note and the acceleration
+    // answer to the same number rather than drifting apart.
+    let torque = sim.solver.powertrain_mut().wot_torque_nm(tel.engine_rpm) as f32 * throttle;
+    sound.set_operating_point(rpm, throttle, torque);
+}
+
+/// Say whether the engine synthesiser got an output device.
+///
+/// Worth a line of log: a silent run is otherwise indistinguishable from a
+/// working one with the volume down, and the failure is silent by design --
+/// the simulator starts without audio rather than refusing to start.
+fn report_audio(engine: NonSend<Engine>) {
+    match &engine.0 {
+        Some(_) => info!("engine audio: physical model running on the output device"),
+        None => warn!("engine audio: no output device, running silent"),
     }
 }
 
