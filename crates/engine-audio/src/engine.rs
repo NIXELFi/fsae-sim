@@ -275,7 +275,7 @@ pub fn cbr600rr_sdm26() -> EngineSpec {
         // chambers, and it is the difference between a burble and a whine at
         // idle.
         tailpipes: vec![PipeSpec::from_diameter(0.55, 0.045, 0.030, 1100.0)],
-        idle_rpm: 1_600.0,
+        idle_rpm: 2_000.0,
         redline_rpm: 14_500.0,
         gas: GasProperties::default(),
     }
