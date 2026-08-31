@@ -1,0 +1,23 @@
+[package]
+name = "fsae-sim"
+version = "0.1.0"
+edition = "2021"
+description = "SDM26 Driver-in-Loop — first-person FSAE simulator"
+authors = ["Sun Devil Motorsports"]
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+opt-level = "s"
+# Thin LTO, not fat. Because generate_context! embeds the frontend at compile
+# time, editing any .js file forces this crate to recompile and relink -- with
+# fat LTO plus codegen-units=1 that was 2m24s for a one-line change, which is
+# not a loop anyone will actually use. Thin LTO gives nearly the same binary
+# for a fraction of the link.
+lto = "thin"
+strip = true

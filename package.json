@@ -1,0 +1,18 @@
+{
+  "name": "fsae-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "First-person SDM26 driving simulator on the 2026 FSAE Michigan courses",
+  "scripts": {
+    "app": "cargo run --release --manifest-path src-tauri/Cargo.toml",
+    "app:debug": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "installer": "cargo tauri build",
+    "serve": "python tools/serve.py 5273",
+    "data": "python tools/prepare_data.py",
+    "icons": "python tools/make_icons.py",
+    "validate": "node tools/validate.js",
+    "smoke": "node tools/smoke_desktop.mjs"
+  }
+}
