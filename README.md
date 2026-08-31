@@ -517,6 +517,67 @@ measured. Suspension and aero are registered but still embedded in the solver,
 and the picker says so rather than offering a choice that silently does nothing.
 
 
+
+## CAD bodywork
+
+Drop a glTF binary at **`data/car.glb`** and both the browser and the desktop
+build draw it instead of the procedural body. Nothing else to configure. With no
+file, the procedural SDM26 is drawn, which is the default and is deliberately
+not shipped over.
+
+The Bevy build reads the same model from `apps/bevy-spike/assets/car.glb`.
+
+```bash
+python tools/make_reference_car.py reference-car.glb   # a model in the right frame
+python tools/check_car_glb.py your-export.glb          # check yours before driving it
+```
+
+### The frame
+
+| | |
+|---|---|
+| **Origin** | the centre of gravity, projected onto the ground |
+| **Axes** | +X forward, +Y up, +Z to the left |
+| **Units** | metres |
+| **Front axle** | x = +0.788 |
+| **Rear axle** | x = −0.742 |
+| **Wheel centres** | y = +0.200 |
+
+Building the model about the **front axle** instead of the CG is the mistake
+with the least visible symptom: it looks fine standing still and pivots about
+the wrong point the moment the car yaws. `check_car_glb.py` detects it by name.
+
+### Node names
+
+`body`, `wheel_fl`, `wheel_fr`, `wheel_rl`, `wheel_rr`, `steering_wheel`.
+
+The wheels and the steering wheel must be **separate nodes**, each with its
+geometry centred on its own origin. The simulator animates them by setting the
+node's rotation, so a wheel merged into the body cannot turn, and one left at
+its world position orbits the car instead of spinning. Everything not named is
+treated as bodywork and drawn fixed to the chassis.
+
+**Hub positions come from the file**, not from the vehicle parameters. If the
+two disagree the fix is the model, and seeing the wheels in the wrong place is
+how you find out.
+
+### SolidWorks to glTF
+
+1. **SolidWorks → STEP AP214.** Not STL — STL is triangles with no part names,
+   no materials and no hierarchy, so there is no way to find the front wheels
+   afterwards in order to steer them.
+2. **STEP → Blender** (the free `STEPper` add-on) or **FreeCAD** (import STEP,
+   export glTF). Tessellate at 1–2 mm; 0.1 mm is CAD-accurate and produces a
+   model far too heavy to render.
+3. **Decimate to ~150k triangles** for the visible body, and *delete* internal
+   parts rather than decimating them — most of an assembly is inside the car.
+4. **Name the nodes** as above, apply any node scale (Ctrl+A in Blender), and
+   orient to the frame in the table.
+5. **Export .glb** with normals and materials, to `data/car.glb`.
+6. **Run the checker.** It reports scale, orientation, ground plane, node names,
+   hub positions against the vehicle parameters, node transforms, triangle count
+   and missing normals — and says what to change, not just what is wrong.
+
 ## Validation
 
 `node tools/validate.js` runs the same model headless against the three events
@@ -582,6 +643,9 @@ tools/
   serve.py          no-cache dev server for browser iteration
   make_icons.py     regenerates the app icons
   make_mis.py       generates the Michigan International Speedway venue
+  glb.py            minimal glTF binary reader/writer, no dependencies
+  make_reference_car.py  a car.glb in the frame the simulator expects
+  check_car_glb.py  validates a CAD export before you try to drive it
   plan_view.py      draws the venue plan + cross-section for review
   validate.js       headless physics + ETC-map checks
   smoke_desktop.mjs launches the built exe and interrogates it over DevTools
@@ -590,7 +654,8 @@ src/
                 ETC map, live setup adjustments, modules + library
   audio/        the engine model, and the worklet that runs it
   track/        course geometry, progress, cone strikes; venue.js for MIS
-  render/       WebGL2 renderer, procedural SDM26 car geometry, venue mesh
+  render/       WebGL2 renderer, procedural SDM26 car geometry, venue mesh,
+                glbcar (CAD import)
   game/         input, control profiles + panel, HUD, timing, audio,
                 ETC editor, spec sheet, desktop shell
   main.js       bootstrap and loop

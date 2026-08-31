@@ -338,6 +338,13 @@ export class Renderer {
     this.post = this.makeInstanced(boxMesh(0.12, 2.1, 0.12, [0.85, 0.85, 0.88]), 8);
     this.pole = this.makeInstanced(boxMesh(0.35, 9.0, 0.35, [0.32, 0.33, 0.36]), 64);
 
+    /**
+     * A CAD model, once one is loaded. Held separately from the procedural
+     * meshes so that editing a vehicle parameter -- which rebuilds the
+     * procedural car -- does not silently throw the imported model away.
+     */
+    this.carModel = null;
+
     const carMeshes = buildCarMeshes(null);
     this.car = {
       body: this.makeMesh(carMeshes.body),
@@ -365,7 +372,49 @@ export class Renderer {
    * as the car you drive. Only the body needs it -- the wheels are placed by
    * their own transforms, which already read the live hub positions.
    */
+  /**
+   * Draw a CAD-imported car instead of the procedural one.
+   *
+   * The hub positions come from the file rather than from the vehicle
+   * parameters, so the wheels are drawn where the model puts them. That is the
+   * right way round: if the two disagree, the fix is the model, and seeing it
+   * in the wrong place is how you find out.
+   *
+   * Pass null to go back to the procedural body, which is worth being able to
+   * do -- comparing a half-finished export against known-good geometry is
+   * exactly what you want while getting an export right.
+   */
+  useCarModel(car) {
+    const gl = this.gl;
+    for (const mesh of Object.values(this.car)) {
+      if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
+      for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
+    }
+    if (car) {
+      this.car = {
+        body: this.makeMesh(car.body),
+        tire: this.makeMesh(car.tire),
+        rim: this.makeMesh(car.rim),
+        steeringWheel: this.makeMesh(car.steeringWheel),
+      };
+      this.carModel = { hubs: car.hubs, steerCentre: car.steerCentre };
+    } else {
+      const meshes = buildCarMeshes(this.carParams ?? null);
+      this.car = {
+        body: this.makeMesh(meshes.body),
+        tire: this.makeMesh(meshes.tire),
+        rim: this.makeMesh(meshes.rim),
+        steeringWheel: this.makeMesh(meshes.steeringWheel),
+      };
+      this.carModel = null;
+    }
+  }
+
   rebuildCar(params) {
+    this.carParams = params;
+    // A CAD model is not built from the vehicle parameters, so stretching the
+    // wheelbase must not quietly replace it with procedural geometry.
+    if (this.carModel) return;
     const gl = this.gl;
     const body = buildCarMeshes(params).body;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.car.body.buffers.position);
@@ -692,7 +741,7 @@ export class Renderer {
     // axis (local Z) AFTER the steer, so a steered wheel rolls about its own
     // steered axis rather than the car's.
     const w = s.wheels;
-    for (const hub of (s.hubs ?? HUBS)) {
+    for (const hub of (this.carModel?.hubs ?? s.hubs ?? HUBS)) {
       this.chain(this.model, [
         this.chassis,
         translation(T[0], hub.x, hub.y, hub.z),
@@ -718,7 +767,7 @@ export class Renderer {
     ]);
     this.chain(this.model, [
       this.chassis,
-      translation(T[0], GEO.steerCentre[0], GEO.steerCentre[1], GEO.steerCentre[2]),
+      translation(T[0], ...(this.carModel?.steerCentre ?? GEO.steerCentre)),
       basis,
       rotZ(T[1], -w.steerRad * (w.steerRatio ?? GEO.steeringRatio)),
     ]);

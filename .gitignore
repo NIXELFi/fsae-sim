@@ -2,3 +2,9 @@
 /dist
 /src-tauri/target
 *.log
+
+# A CAD-exported car, if you have one. Drop it here and both the browser and
+# the desktop build pick it up; without it the procedural SDM26 body is drawn.
+# Not committed: it is your model, it is large, and it is not the default.
+/data/car.glb
+/reference-car.glb

@@ -330,6 +330,22 @@ try {
   })()`, 6);
   console.log("controls:", controls);
 
+  // CAD bodywork, if a model is embedded in this build. The desktop asset
+  // server behaves differently from the dev server for a MISSING file -- it
+  // answers with the index page rather than a 404 -- so this path is worth
+  // checking here specifically and not only in the browser.
+  const cad = await evaluate(ws, `(() => {
+    const g = window.__sim;
+    return JSON.stringify({
+      status: g.cadStatus,
+      usingModel: !!g.renderer.carModel,
+      hubs: g.renderer.carModel?.hubs?.length ?? 0,
+      bodyVerts: g.renderer.car.body.count,
+      glError: g.renderer.gl.getError(),
+    });
+  })()`, 8);
+  console.log("cad:", cad);
+
   console.log("game:", report);
 
   const errors = await evaluate(ws, `JSON.stringify(window.__errors || [])`, 7);

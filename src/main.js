@@ -2,6 +2,7 @@
 
 import { SDM26 } from "./vehicle/params.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
+import { loadCarModel } from "./render/glbcar.js";
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
@@ -103,15 +104,40 @@ class Game {
 
   async load(trackId) {
     const spec = TRACKS.find((t) => t.id === trackId) ?? TRACKS[0];
-    const [curve, track] = await Promise.all([
+    const [curve, track, cadCar] = await Promise.all([
       loadTorqueCurve(),
       spec.kind === "venue" ? loadVenue(spec.url) : loadTrack(spec.url),
+      // Optional CAD bodywork. Absent is the normal case, not an error, so
+      // this resolves to null rather than rejecting and taking the load with
+      // it.
+      this.cadCar !== undefined ? Promise.resolve(this.cadCar) : loadCarModel("./data/car.glb"),
     ]);
     this.powertrain = new Powertrain(SDM26, curve);
     this.car = new BicycleModel(SDM26, this.powertrain);
     this.track = track;
     this.timing = new Timing(track);
     this.renderer.setTrack(track);
+
+    // Remembered across track changes so the file is fetched once.
+    this.cadCar = cadCar ?? null;
+    if (this.cadCar?.error) {
+      this.cadStatus = `data/car.glb could not be read: ${this.cadCar.error}`;
+      console.warn(this.cadStatus);
+      this.cadCar = null;
+    } else if (this.cadCar) {
+      this.renderer.useCarModel(this.cadCar);
+      const st = this.cadCar.stats;
+      this.cadStatus = st.problems.length
+        ? `CAD model loaded with problems: ${st.problems.join("; ")}`
+        : `CAD model: ${st.triangles.toLocaleString()} triangles, ` +
+          `${st.materials} materials (${st.generator})`;
+      console.info(this.cadStatus);
+    } else {
+      this.cadStatus = "No data/car.glb — drawing the procedural body.";
+    }
+    const cadNote = document.getElementById("cadNote");
+    if (cadNote) cadNote.textContent = this.cadStatus;
+
     this.restart();
     return { track, curve };
   }

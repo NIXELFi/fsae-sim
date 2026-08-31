@@ -598,22 +598,70 @@ silently does nothing. **Extracting them is the next real step.**
 
 ## 13. CAD bodywork
 
-`apps/bevy-spike/src/cadmodel.rs`, on the `bevy-frontend` branch. Drop
-`assets/car.glb` in and it replaces the procedural body; leave it out and
-nothing happens.
+**Working in both builds.** Drop a `.glb` at `fsae-sim/data/car.glb` or
+`fsae-sim-rs/apps/bevy-spike/assets/car.glb` and it replaces the procedural
+body. Absent is the normal case and draws the procedural SDM26.
 
-**SolidWorks → STEP AP214 → Blender or FreeCAD → glTF 2.0 (.glb).** Not STL —
-STL is triangles with no part names, no materials and no hierarchy, so there is
-no way to find the front wheels afterwards in order to steer them. Tessellate at
-1–2 mm (0.1 mm is CAD-accurate and far too heavy), decimate to ~150k triangles
-for the visible body, delete internal parts rather than decimating them.
+Neither model is committed: the reference car is a crude box assembly and
+shipping it would replace a good procedural body with a worse one.
 
-Node names must be `body`, `wheel_fl/fr/rl/rr`, `steering_wheel`. Orientation is
-+X forward, +Y up, +Z left, origin at the front axle line projected to the
-ground. **Scale is metres** — a millimetre export arrives a thousand times too
-big, which is the most common mistake and the easiest to spot.
+```
+tools/glb.py               dependency-free glTF binary reader/writer
+tools/make_reference_car.py  a model in the expected frame -- fixture and template
+tools/check_car_glb.py     validates an export, and says what to change
+src/render/glbcar.js       the loader for the WebGL2 build
+apps/bevy-spike/src/cadmodel.rs  the Bevy side (glTF is native there)
+```
 
-The WebGL build has no glTF loader yet; that is a separate piece of work.
+**Frame:** origin at the CG projected to the ground, +X forward, +Y up, +Z left,
+metres. Front axle x = +0.788, rear x = −0.742, hubs y = +0.200. Nodes:
+`body`, `wheel_fl/fr/rl/rr`, `steering_wheel`.
+
+**The division of labour: the file supplies geometry, the simulator supplies
+motion.** Wheel geometry is re-centred on its own hub as it is read, and the hub
+position is taken from the node. A wheel merged into the body cannot turn; one
+left at its world position orbits the car.
+
+### What was wrong with the first attempt
+
+The module existed, compiled, had tests, and **was never called**. Worth
+recording because everything looked finished:
+
+- `spawn_if_present` was defined and no code invoked it.
+- Its existence check looked in `assets/` relative to the working directory
+  while Bevy looked next to the executable. Fixed by computing the root once
+  and configuring `AssetPlugin` with it -- the failure mode when those disagree
+  is "found the file, then reported Path not found", which is maximally
+  confusing.
+- The `NODES` table was documentation nothing read, so even once loaded the
+  wheels would not have steered.
+- The documented origin was the **front axle**, which is wrong -- both builds
+  put the car root at the CG. A model built to that doc would have sat 0.788 m
+  out.
+
+### Bugs the work turned up
+
+- **`mesh_bounds` read node-local bounds**, so a correctly built car -- wheels
+  centred on their own nodes, as required -- was reported as buried 200 mm
+  underground. A checker giving confident wrong answers is worse than none.
+- **glTF indices are per-accessor, not per-buffer.** The first in-memory test
+  fixture indexed 3,4,5 into a 3-vertex accessor and produced NaN geometry,
+  which renders as nothing with no error anywhere. The loader now detects
+  out-of-range indices and reports them.
+- **An optional file could stop the simulator starting.** The desktop asset
+  server answers a request for a MISSING file with the index page rather than a
+  404, so an absent `car.glb` arrived as HTML, failed to parse, rejected the
+  load, and the game never booted -- in the desktop build only. `loadCarModel`
+  now checks the magic bytes and never throws. Caught by the smoke test, which
+  is the whole reason it exists.
+
+### Not done
+
+The WebGL2 loader reads positions, normals, indices and one base colour per
+material. It ignores textures, node rotation and scale, skinning and animation.
+Rotation and scale on a node are *reported* by the checker rather than applied,
+because an export carrying them usually means the model was not baked into the
+right frame -- but a model that legitimately needs them will come in wrong.
 
 ## 14. The idle point, and what it pinned down
 

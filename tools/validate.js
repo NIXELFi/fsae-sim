@@ -16,6 +16,7 @@ import { Powertrain } from "../src/vehicle/powertrain.js";
 import { BicycleModel } from "../src/vehicle/bicycle.js";
 import { TIRE_INFO } from "../src/vehicle/tire.js";
 import { EngineAudio, cbr600rrSdm26, Rng } from "../src/audio/engineAudio.js";
+import { buildCarFromGlb, parseGlb } from "../src/render/glbcar.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const curve = JSON.parse(readFileSync(join(here, "..", "data", "sdm26-torque.json"), "utf8"));
@@ -515,6 +516,148 @@ console.log("\nIDLE  (measured: ~2000 rpm at ~14% throttle plate)");
   // which is the whole reason the sound model takes indicated, not net.
   check("indicated torque at idle", pt.indicatedTorque(rpm, 0), 3, 9, " N.m");
   check("net torque at idle", Math.abs(pt.engineTorque(rpm, 0)), 0, 0.5, " N.m");
+}
+
+// ------------------------------------------------------------ CAD import ---
+// The glTF loader is exercised against a .glb built here in memory rather than
+// against a file on disk. A fixture file would have to be committed, and the
+// one thing it must NOT be is present in `data/` -- that is where a real CAD
+// export goes, and a stray fixture there would silently replace a good
+// procedural car with a box.
+//
+// What is checked is the part that is easy to get wrong and invisible when it
+// is: a wheel's geometry has to come out centred on its own origin, because
+// the renderer spins it about that origin. Left at its world position, a wheel
+// orbits the car instead of rotating.
+console.log("\nCAD IMPORT  (glTF binary loader)");
+{
+  // A minimal but complete .glb: one body triangle and one wheel triangle,
+  // each on its own named node, with a material apiece.
+  const buildGlb = () => {
+    const positions = new Float32Array([
+      // body triangle, around the origin
+      0, 0.3, 0, 1, 0.3, 0, 0, 0.9, 0,
+      // wheel triangle, centred on ITS OWN origin
+      -0.2, -0.2, 0, 0.2, -0.2, 0, 0, 0.2, 0,
+    ]);
+    const normals = new Float32Array([
+      0, 0, 1, 0, 0, 1, 0, 0, 1,
+      0, 0, 1, 0, 0, 1, 0, 0, 1,
+    ]);
+    // Both triples are 0,1,2: glTF indices are relative to the accessor they
+    // are used with, not to the buffer. Writing 3,4,5 for the second mesh
+    // indexes past the end of its own position accessor and produces NaN
+    // geometry -- which is how this fixture was wrong the first time.
+    const indices = new Uint32Array([0, 1, 2, 0, 1, 2]);
+
+    const bin = new Uint8Array(
+      positions.byteLength + normals.byteLength + indices.byteLength,
+    );
+    bin.set(new Uint8Array(positions.buffer), 0);
+    bin.set(new Uint8Array(normals.buffer), positions.byteLength);
+    bin.set(new Uint8Array(indices.buffer), positions.byteLength + normals.byteLength);
+
+    const doc = {
+      asset: { version: "2.0", generator: "validate.js" },
+      scene: 0,
+      scenes: [{ nodes: [0, 1] }],
+      nodes: [
+        { name: "body", mesh: 0 },
+        // The hub is well away from the origin: if the loader fails to
+        // re-centre the geometry, the wheel's bounding box gives it away.
+        { name: "wheel_fl", mesh: 1, translation: [0.788, 0.2, 0.604] },
+        { name: "wheel_fr", mesh: 1, translation: [0.788, 0.2, -0.604] },
+        { name: "wheel_rl", mesh: 1, translation: [-0.742, 0.2, 0.604] },
+        { name: "wheel_rr", mesh: 1, translation: [-0.742, 0.2, -0.604] },
+      ],
+      meshes: [
+        { name: "b", primitives: [{ attributes: { POSITION: 0, NORMAL: 2 }, indices: 4, material: 0 }] },
+        { name: "w", primitives: [{ attributes: { POSITION: 1, NORMAL: 3 }, indices: 5, material: 1 }] },
+      ],
+      materials: [
+        { name: "carbon", pbrMetallicRoughness: { baseColorFactor: [0.1, 0.11, 0.13, 1] } },
+        { name: "rubber", pbrMetallicRoughness: { baseColorFactor: [0.06, 0.06, 0.07, 1] } },
+      ],
+      accessors: [
+        { bufferView: 0, componentType: 5126, count: 3, type: "VEC3", min: [0, 0.3, 0], max: [1, 0.9, 0] },
+        { bufferView: 0, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3", min: [-0.2, -0.2, 0], max: [0.2, 0.2, 0] },
+        { bufferView: 1, componentType: 5126, count: 3, type: "VEC3" },
+        { bufferView: 1, byteOffset: 36, componentType: 5126, count: 3, type: "VEC3" },
+        { bufferView: 2, componentType: 5125, count: 3, type: "SCALAR" },
+        { bufferView: 2, byteOffset: 12, componentType: 5125, count: 3, type: "SCALAR" },
+      ],
+      bufferViews: [
+        { buffer: 0, byteOffset: 0, byteLength: positions.byteLength },
+        { buffer: 0, byteOffset: positions.byteLength, byteLength: normals.byteLength },
+        { buffer: 0, byteOffset: positions.byteLength + normals.byteLength, byteLength: indices.byteLength },
+      ],
+      buffers: [{ byteLength: bin.byteLength }],
+    };
+
+    const enc = new TextEncoder();
+    let json = enc.encode(JSON.stringify(doc));
+    const jsonPad = (4 - (json.length % 4)) % 4;
+    const jsonChunk = new Uint8Array(json.length + jsonPad).fill(0x20);
+    jsonChunk.set(json, 0);
+    const binPad = (4 - (bin.length % 4)) % 4;
+    const binChunk = new Uint8Array(bin.length + binPad);
+    binChunk.set(bin, 0);
+
+    const total = 12 + 8 + jsonChunk.length + 8 + binChunk.length;
+    const out = new Uint8Array(total);
+    const dv = new DataView(out.buffer);
+    dv.setUint32(0, 0x46546c67, true);
+    dv.setUint32(4, 2, true);
+    dv.setUint32(8, total, true);
+    dv.setUint32(12, jsonChunk.length, true);
+    dv.setUint32(16, 0x4e4f534a, true);
+    out.set(jsonChunk, 20);
+    dv.setUint32(20 + jsonChunk.length, binChunk.length, true);
+    dv.setUint32(24 + jsonChunk.length, 0x004e4942, true);
+    out.set(binChunk, 28 + jsonChunk.length);
+    return out.buffer;
+  };
+
+  const glb = buildGlb();
+  const { doc } = parseGlb(glb);
+  check("parses the container", doc.asset.version === "2.0" ? 1 : 0, 1, 1, "");
+
+  const car = buildCarFromGlb(glb);
+  check("no import problems", car.stats.problems.length, 0, 0, "");
+  check("body geometry present", car.body.count, 3, 3, " verts");
+  check("all four hubs found", car.hubs ? car.hubs.length : 0, 4, 4, "");
+
+  // Hub positions come from the file, not from the vehicle parameters.
+  const fl = car.hubs.find((h) => h.name === "FL");
+  check("front hub x from the file", fl.x, 0.787, 0.789, " m");
+  check("front hub flagged front", fl.front ? 1 : 0, 1, 1, "");
+  const rl = car.hubs.find((h) => h.name === "RL");
+  check("rear hub flagged rear", rl.front ? 0 : 1, 1, 1, "");
+
+  // The check that matters: wheel geometry centred on its own origin.
+  let lo = [1e9, 1e9, 1e9];
+  let hi = [-1e9, -1e9, -1e9];
+  for (let i = 0; i < car.tire.position.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k], car.tire.position[i + k]);
+      hi[k] = Math.max(hi[k], car.tire.position[i + k]);
+    }
+  }
+  const offCentre = Math.max(...lo.map((v, k) => Math.abs((v + hi[k]) / 2)));
+  check("wheel centred on its own origin", offCentre, 0, 1e-6, " m");
+
+  // Material colours reach the vertices, or everything renders default grey.
+  check("wheel takes its material colour", car.tire.color[0], 0.059, 0.061, "");
+  check("body takes its material colour", car.body.color[1], 0.109, 0.111, "");
+
+  // A non-glb must be refused with a message, not parsed into nonsense.
+  let refused = 0;
+  try {
+    parseGlb(new TextEncoder().encode('{"asset":{"version":"2.0"}}').buffer);
+  } catch {
+    refused = 1;
+  }
+  check("a .gltf (JSON) file is refused", refused, 1, 1, "");
 }
 console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}\n`);
 process.exit(failures === 0 ? 0 : 1);
