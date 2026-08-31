@@ -794,3 +794,214 @@ export async function loadWheelModel(url, geo = null) {
     return { error: String(err?.message ?? err) };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Body-only models
+// ---------------------------------------------------------------------------
+
+/**
+ * Load bodywork on its own, with no wheels in the file.
+ *
+ * This is what a CFD assembly usually is: the aero surfaces, with the wheels
+ * modelled separately or as rotating walls. It is also what you get from an
+ * STL round trip, which throws away part names and hierarchy and leaves one
+ * merged mesh -- so there are no `wheel_fl` nodes to solve the frame from and
+ * the whole-car path cannot be used.
+ *
+ * Almost everything is still recoverable from the geometry, because a car is
+ * a strongly constrained shape:
+ *
+ *   lateral    the one axis a car is mirror-symmetric about
+ *   fore-aft   the longer of the remaining two
+ *   vertical   the shorter
+ *   up sign    away from the mass -- a car is bottom-heavy, since the floor,
+ *              tub and sidepods are low and only the wings are high
+ *   forward    away from the taller end, because the rear wing is the tallest
+ *              thing on a Formula Student car
+ *   units      from the overall length, which is 1.5-6 m on any real car
+ *
+ * What is NOT recoverable is where the axles are along the car. Nothing in
+ * bodywork says that, so the fore-aft placement is a choice: the model's
+ * mid-length is put at the middle of the wheelbase, and `offsetM` nudges it.
+ */
+export function buildBodyFromGlb(buffer, geo = null, opts = {}) {
+  const g = geo ?? { frontAxle: 0.788, rearAxle: -0.742, tireRadius: 0.2 };
+  const { doc, bin } = parseGlb(buffer);
+  const places = nodeTranslations(doc);
+  const problems = [];
+  const notes = [];
+
+  const acc = empty();
+  for (let i = 0; i < (doc.nodes ?? []).length; i++) {
+    const node = doc.nodes[i];
+    if (node.mesh === undefined) continue;
+    const at = places.get(node.name ?? `node${i}`) ?? [0, 0, 0];
+    for (const prim of doc.meshes[node.mesh].primitives ?? []) {
+      expandPrimitive(doc, bin, prim, at, acc, problems);
+    }
+  }
+  if (!acc.position.length) return { error: "no geometry in the file" };
+
+  const P = acc.position;
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  const sum = [0, 0, 0];
+  for (let i = 0; i < P.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      lo[k] = Math.min(lo[k], P[i + k]);
+      hi[k] = Math.max(hi[k], P[i + k]);
+      sum[k] += P[i + k];
+    }
+  }
+  const n = P.length / 3;
+  const centroid = sum.map((v) => v / n);
+  const size = hi.map((v, k) => v - lo[k]);
+  const mid = hi.map((v, k) => (v + lo[k]) / 2);
+
+  // ---- lateral axis: the one the car mirrors about ------------------------
+  // Measured on a voxel set rather than raw vertices, because a mesh has no
+  // reason to have matching vertices either side even when the shape is
+  // perfectly symmetric.
+  const cell = Math.max(...size) / 160;
+  const occupied = new Set();
+  const key = (a, b, c) => `${a},${b},${c}`;
+  for (let i = 0; i < P.length; i += 3) {
+    occupied.add(key(Math.round(P[i] / cell), Math.round(P[i + 1] / cell),
+                     Math.round(P[i + 2] / cell)));
+  }
+  const symmetry = [0, 1, 2].map((axis) => {
+    let hit = 0;
+    let total = 0;
+    for (const k of occupied) {
+      const c = k.split(",").map(Number);
+      const m = c.slice();
+      m[axis] = Math.round((2 * mid[axis]) / cell) - c[axis];
+      total++;
+      if (occupied.has(key(m[0], m[1], m[2]))) hit++;
+    }
+    return total ? hit / total : 0;
+  });
+  let lateral = 0;
+  for (let a = 1; a < 3; a++) if (symmetry[a] > symmetry[lateral]) lateral = a;
+  notes.push(`lateral axis ${"XYZ"[lateral]} ` +
+             `(${(symmetry[lateral] * 100).toFixed(0)}% mirror symmetric; ` +
+             `others ${symmetry.filter((_, i) => i !== lateral)
+               .map((v) => (v * 100).toFixed(0) + "%").join(", ")})`);
+  if (symmetry[lateral] < 0.35) {
+    problems.push(
+      `no axis is clearly a mirror plane (best ${(symmetry[lateral] * 100).toFixed(0)}%), ` +
+      `so the car's orientation cannot be worked out from its shape.`,
+    );
+  }
+
+  // ---- fore-aft and vertical ---------------------------------------------
+  const rest = [0, 1, 2].filter((a) => a !== lateral);
+  const fore = size[rest[0]] >= size[rest[1]] ? rest[0] : rest[1];
+  const vert = fore === rest[0] ? rest[1] : rest[0];
+
+  // Up points AWAY from the mass: a car's floor, tub and sidepods are low and
+  // only the wings are high, so the vertex centroid sits below mid-height.
+  const upSign = centroid[vert] < mid[vert] ? 1 : -1;
+
+  // Forward points away from the taller end -- the rear wing is the tallest
+  // thing on the car.
+  const heightOf = (front) => {
+    let best = 0;
+    for (let i = 0; i < P.length; i += 3) {
+      const f = (P[i + fore] - mid[fore]) * (front ? 1 : -1);
+      if (f > 0) best = Math.max(best, (P[i + vert] - mid[vert]) * upSign);
+    }
+    return best;
+  };
+  const foreSign = heightOf(true) < heightOf(false) ? 1 : -1;
+  notes.push(`forward +${foreSign > 0 ? "" : "-"}${"XYZ"[fore]}, ` +
+             `up ${upSign > 0 ? "+" : "-"}${"XYZ"[vert]}`);
+
+  // ---- units --------------------------------------------------------------
+  const lengthRaw = size[fore];
+  let scale = 1;
+  for (const [factor, name] of [[1, "metres"], [0.001, "millimetres"],
+                                [0.01, "centimetres"], [0.0254, "inches"]]) {
+    const m = lengthRaw * factor;
+    if (m >= 1.5 && m <= 6.0) {
+      scale = factor;
+      if (factor !== 1) notes.push(`read as ${name}`);
+      break;
+    }
+  }
+  const lengthM = lengthRaw * scale;
+  if (lengthM < 1.5 || lengthM > 6.0) {
+    problems.push(
+      `the model is ${lengthM.toFixed(2)} m long, which is not a Formula ` +
+      `Student car at any sensible unit scale.`,
+    );
+  }
+  notes.push(`${lengthM.toFixed(3)} m long, ${(size[lateral] * scale).toFixed(3)} m wide, ` +
+             `${(size[vert] * scale).toFixed(3)} m tall`);
+
+  // ---- place it -----------------------------------------------------------
+  // Laterally on the mirror plane, vertically on the ground, and fore-aft with
+  // the model's mid-length at the middle of the wheelbase -- which is a
+  // choice, not a measurement, because bodywork does not say where the axles
+  // are.
+  const wheelbaseMid = (g.frontAxle + g.rearAxle) / 2;
+  const offset = opts.offsetM ?? 0;
+  const groundRaw = upSign > 0 ? lo[vert] : hi[vert];
+
+  const body = {
+    position: new Float32Array(P.length),
+    normal: new Float32Array(P.length),
+    color: Float32Array.from(acc.color),
+    count: n,
+  };
+  for (let i = 0; i < P.length; i += 3) {
+    const f = (P[i + fore] - mid[fore]) * scale * foreSign;
+    const u = (P[i + vert] - groundRaw) * scale * upSign;
+    const r = (P[i + lateral] - mid[lateral]) * scale * foreSign;
+    body.position[i] = f + wheelbaseMid + offset;
+    body.position[i + 1] = u;
+    body.position[i + 2] = r;
+
+    const nf = acc.normal[i + fore] * foreSign;
+    const nu = acc.normal[i + vert] * upSign;
+    const nr = acc.normal[i + lateral] * foreSign;
+    body.normal[i] = nf;
+    body.normal[i + 1] = nu;
+    body.normal[i + 2] = nr;
+  }
+
+  if ((doc.materials ?? []).length <= 1) {
+    notes.push("one material or none — the whole car renders in a single shade");
+  }
+
+  return {
+    body,
+    stats: {
+      triangles: n / 3,
+      generator: doc.asset?.generator ?? "(unstated)",
+      lengthM,
+      scale,
+      notes,
+      problems,
+    },
+  };
+}
+
+/** Fetch and build bodywork. Never throws; null means there is no model. */
+export async function loadBodyModel(url, geo = null, opts = {}) {
+  let buffer;
+  try {
+    const res = await fetch(url, { cache: "no-cache" });
+    if (!res.ok) return null;
+    buffer = await res.arrayBuffer();
+  } catch {
+    return null;
+  }
+  if (buffer.byteLength < 12) return null;
+  if (new DataView(buffer).getUint32(0, true) !== MAGIC) return null;
+  try {
+    return buildBodyFromGlb(buffer, geo, opts);
+  } catch (err) {
+    return { error: String(err?.message ?? err) };
+  }
+}

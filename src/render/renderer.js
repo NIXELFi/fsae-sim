@@ -437,11 +437,49 @@ export class Renderer {
     }
   }
 
+  /**
+   * Replace only the bodywork, keeping the wheels.
+   *
+   * The pairing a CFD assembly needs: aero surfaces from one file, wheels from
+   * another. Neither file has to know about the other.
+   */
+  useBodyModel(body) {
+    const gl = this.gl;
+    const mesh = this.car.body;
+    if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
+    for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
+    if (body) {
+      this.car.body = this.makeMesh(body);
+      this.bodyModel = true;
+    } else {
+      this.car.body = this.makeMesh(buildCarMeshes(this.carParams ?? null).body);
+      this.bodyModel = false;
+    }
+  }
+
   rebuildCar(params) {
     this.carParams = params;
     // A CAD model is not built from the vehicle parameters, so stretching the
     // wheelbase must not quietly replace it with procedural geometry.
     if (this.carModel) return;
+    if (this.bodyModel) {
+      // An imported body is not built from the vehicle parameters either.
+      const meshes = buildCarMeshes(params);
+      const gl = this.gl;
+      const sw = this.car.steeringWheel;
+      if (sw?.vao) gl.deleteVertexArray(sw.vao);
+      for (const b of Object.values(sw?.buffers ?? {})) gl.deleteBuffer(b);
+      this.car.steeringWheel = this.makeMesh(meshes.steeringWheel);
+      if (!this.wheelModel) {
+        for (const key of ["tire", "rim"]) {
+          const m = this.car[key];
+          if (m?.vao) gl.deleteVertexArray(m.vao);
+          for (const b of Object.values(m?.buffers ?? {})) gl.deleteBuffer(b);
+          this.car[key] = this.makeMesh(meshes[key]);
+        }
+      }
+      return;
+    }
     if (this.wheelModel) {
       // Same for an imported wheel: rebuild the body, keep the wheel.
       const meshes = buildCarMeshes(params);

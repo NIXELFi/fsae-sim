@@ -2,7 +2,7 @@
 
 import { SDM26 } from "./vehicle/params.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
-import { loadCarModel, loadWheelModel } from "./render/glbcar.js";
+import { loadCarModel, loadWheelModel, loadBodyModel } from "./render/glbcar.js";
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
@@ -34,6 +34,11 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
 // deliberately not rigid.
 // What an imported wheel is scaled to match.
 const GEO_FOR_WHEEL = { tireRadius: SDM26.tireRadiusM, rimRadius: 0.127 };
+// What an imported body is placed against. The axle stations come from the
+// vehicle parameters; bodywork alone cannot say where they are.
+const GEO_FOR_BODY = {
+  frontAxle: 0.788, rearAxle: -0.742, tireRadius: SDM26.tireRadiusM,
+};
 
 const CAMERAS = [
   // `live` means the eye point is read from the parameters every frame rather
@@ -113,7 +118,7 @@ class Game {
 
   async load(trackId) {
     const spec = TRACKS.find((t) => t.id === trackId) ?? TRACKS[0];
-    const [curve, track, cadCar, cadWheel] = await Promise.all([
+    const [curve, track, cadCar, cadWheel, cadBody] = await Promise.all([
       loadTorqueCurve(),
       spec.kind === "venue" ? loadVenue(spec.url) : loadTrack(spec.url),
       // Optional CAD bodywork. Absent is the normal case, not an error, so
@@ -125,6 +130,12 @@ class Game {
       this.cadWheel !== undefined
         ? Promise.resolve(this.cadWheel)
         : loadWheelModel("./data/wheel.glb", GEO_FOR_WHEEL),
+      // Bodywork on its own -- what a CFD assembly usually is, and what an STL
+      // round trip leaves you with.
+      this.cadBody !== undefined
+        ? Promise.resolve(this.cadBody)
+        : loadBodyModel("./data/body.glb", GEO_FOR_BODY,
+                        { offsetM: this.bodyOffsetM ?? 0 }),
     ]);
     this.powertrain = new Powertrain(SDM26, curve);
     this.car = new BicycleModel(SDM26, this.powertrain);
@@ -166,9 +177,26 @@ class Game {
       this.wheelStatus = "";
     }
 
+    this.cadBody = cadBody ?? null;
+    if (this.cadBody?.error) {
+      this.bodyStatus = `data/body.glb could not be read: ${this.cadBody.error}`;
+      console.warn(this.bodyStatus);
+      this.cadBody = null;
+    } else if (this.cadBody && !this.cadCar) {
+      this.renderer.useBodyModel(this.cadBody.body);
+      const s = this.cadBody.stats;
+      this.bodyStatus = `CAD body: ${s.triangles.toLocaleString()} triangles, ` +
+        `${s.lengthM.toFixed(2)} m long`;
+      console.info(this.bodyStatus, s.notes);
+      if (s.problems.length) console.warn("body model:", s.problems);
+    } else {
+      this.bodyStatus = "";
+    }
+
     const cadNote = document.getElementById("cadNote");
     if (cadNote) {
-      cadNote.textContent = [this.cadStatus, this.wheelStatus].filter(Boolean).join("  ·  ");
+      cadNote.textContent = [this.cadStatus, this.bodyStatus, this.wheelStatus]
+        .filter(Boolean).join("  ·  ");
     }
 
     this.restart();

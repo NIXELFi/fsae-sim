@@ -11,3 +11,6 @@
 
 # A CAD wheel, same story as car.glb. 23 MB of Hoosier and OZ magnesium.
 /data/wheel.glb
+
+# Bodywork-only CAD (a CFD assembly). Also large.
+/data/body.glb
