@@ -369,6 +369,119 @@ python tools/make_mis.py     # -> data/venue-mis.json
 python tools/plan_view.py    # -> mis-plan.png, plan + true-angle cross-section
 ```
 
+## Engine sound
+
+**Generated, not sampled.** There are no recordings in this repository.
+
+Adapted from [`ange-yaghi/engine-sim`](https://github.com/ange-yaghi/engine-sim)
+(MIT). The repository usually linked for this — `engine-sim-community-edition` —
+ships the built application and contains no source; the algorithms follow the
+original open codebase.
+
+```text
+crank angle
+  -> per-cylinder pressure (single-zone, Wiebe heat release)
+  -> flow through the exhaust valve
+  -> exhaust waveguide (primaries -> collector -> tailpipe -> open end)
+  -> synthesiser (jitter, DC removal, derivative, noise, convolution)
+  -> samples
+```
+
+It runs in an **AudioWorklet**, on the audio thread. Rendering it on the main
+thread would put every garbage collection, layout and WebGL draw between the
+engine and the speaker, and the result crackles whenever the frame time moves —
+which in a driving game is exactly when the engine is doing something
+interesting.
+
+**The torque curve is an input.** The heat release is solved so the modelled
+cycle does the work the Helios CFD sweep says the engine is making, so the note
+and the acceleration answer to the same number rather than drifting apart.
+
+Because every stage is physical, the things that change an engine's voice in
+reality change it here. Cylinder count and crank phasing set the firing pattern.
+Primary length sets the resonance. Exhaust gas temperature changes the speed of
+sound, so the tuned length of the header shifts with load and the note moves on
+the overrun. None of that is scripted.
+
+The same model exists as the `engine-audio` Rust crate in `fsae-sim-rs`. They
+are kept in lockstep the way `sim-core` is — the Rust side emits golden vectors
+and `tools/validate.js` checks this build against them, currently agreeing to
+2e-3 over 512 samples, which is f32-against-f64 rounding and nothing else.
+
+The old oscillator bank is still there as a fallback for browsers without
+AudioWorklet. It sounds recognisably like the same engine and obviously
+synthetic next to the real thing.
+
+## Control devices
+
+Four profiles: **keyboard & mouse**, **Xbox**, **PlayStation**, **wheel &
+pedals**. Pick one on the home screen; a connected device selects its own unless
+you have chosen by hand. Settings persist as a diff from the shipped defaults.
+
+They are not variations on a theme — they differ in what the driver can
+physically command, so each gets its own steering dynamics:
+
+| | max steering speed | acceleration | deadzone | curve |
+|---|---|---|---|---|
+| keyboard | 180 °/s | 700 °/s² | 0 | linear |
+| gamepad | 300 °/s | 2200 °/s² | 0.10 | 1.7 expo |
+| wheel | 720 °/s | 12000 °/s² | **0** | **1.00** |
+
+All at the road wheel. Divide by the 4.0 steering ratio for rim figures.
+
+**Steering is a rate- and acceleration-limited servo**, and both limits are
+adjustable per device. The acceleration limit matters most on a keyboard, where
+every input is a step: without a bound on how fast the steering *speed* can
+change, a step in position becomes a step in velocity, which no hand and no
+steering motor can produce.
+
+### Wheels
+
+The mapping from rim angle to road wheel is the setting that matters most:
+
+- **Match the car** — the rim turns through SDM26's real 4.0 ratio, so its 28°
+  of lock is **112° at the rim, lock to lock**. Set your wheel's driver software
+  to 112° and hand position *is* front-wheel angle. Leaving a 900° wheel at 900
+  makes this mapping use only the first 12% of its travel: correct, and it feels
+  wrong, because the wheel is configured wrong.
+- **Scale to lock** — whatever rotation the wheel is set to becomes full lock.
+  Nothing to reconfigure, but the ratio is then a fiction and the steering is
+  eight times slower than the real car's.
+
+Deadzone 0 and curve 1.00 are correct on a wheel and not defaults to tune away:
+the device measures hand position directly, so smoothing it discards real
+information.
+
+Pedals calibrate against the travel your set actually produces — a G29 brake
+rests near −1 and tops out near +1, a load cell may never reach +1 at any force
+a person can apply. The panel shows a **live axis monitor**, because wheels do
+not use the Gamepad API's standard mapping and every vendor assigns axes
+differently, so watching which number moves is the only reliable way to find a
+pedal.
+
+**Force feedback is not implemented.** The settings are declared and documented
+so the shape does not have to change later, but nothing drives them. It needs
+the tyre model to return self-aligning torque (it returns lateral force only)
+and a kingpin/caster geometry block in the parameters — otherwise the force
+would be invented rather than derived, which is the one thing worth not doing.
+
+## Vehicles as data
+
+A vehicle is a JSON definition naming which model to use for each subsystem —
+tyre, powertrain, suspension, aero, engine sound — plus its parameters. That is
+what makes it savable, exportable and readable by both builds.
+
+Duplicate a vehicle, edit it, swap a subsystem, export it, import it. Saved
+vehicles store a **sparse diff against their ancestor**, so improving a shipped
+default still reaches everything derived from it instead of each copy being
+pinned to whatever shipped the day it was made.
+
+Only the SDM26 is defined. The framework is the deliverable; inventing a
+plausible-looking second car would put numbers in the repository that nobody has
+measured. Suspension and aero are registered but still embedded in the solver,
+and the picker says so rather than offering a choice that silently does nothing.
+
+
 ## Validation
 
 `node tools/validate.js` runs the same model headless against the three events
@@ -439,10 +552,12 @@ tools/
   smoke_desktop.mjs launches the built exe and interrogates it over DevTools
 src/
   vehicle/      params, paramMeta (provenance), tyre, powertrain, bicycle,
-                ETC map, live setup adjustments
+                ETC map, live setup adjustments, modules + library
+  audio/        the engine model, and the worklet that runs it
   track/        course geometry, progress, cone strikes; venue.js for MIS
   render/       WebGL2 renderer, procedural SDM26 car geometry, venue mesh
-  game/         input, HUD, timing, audio, ETC editor, spec sheet, desktop shell
+  game/         input, control profiles + panel, HUD, timing, audio,
+                ETC editor, spec sheet, desktop shell
   main.js       bootstrap and loop
 src-tauri/
   build.rs      stages the frontend into dist/ on every cargo build

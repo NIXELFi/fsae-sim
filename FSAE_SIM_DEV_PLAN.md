@@ -3,9 +3,10 @@
 Sister doc to `helios-dev/HELIOS_DEV_PLAN.md` and `ORACLE_DEV_PLAN.md`. Read this
 first; update it at the end of each session.
 
-**Status: working and shipped.** Both codebases build, run and pass their tests.
-Nothing is half-finished — the open items below are decisions and follow-ups,
-not broken work.
+**Status: working and shipped.** Both codebases build, run and pass their tests
+(52 + 22 + 8 in Rust, the full harness in JS). Nothing is half-finished — the
+open items below are decisions, follow-ups, and one thing that genuinely needs
+hardware plugged in.
 
 ---
 
@@ -13,6 +14,11 @@ not broken work.
 
 Two sibling folders under `Documents/Claude Code/`. They are deliberately
 separate.
+
+**Both are now git repositories.** They were initialised partway through the
+session that added the engine audio, so neither has an honest "before" commit
+and both baselines say so in their message. `fsae-sim-rs` has two branches:
+`main` carries the shared crates, `bevy-frontend` carries the Bevy app on top.
 
 ### `fsae-sim/` — the app
 
@@ -22,7 +28,7 @@ plain ES modules + WebGL2 with **zero dependencies and no build step**.
 ```bash
 cargo build --release --manifest-path fsae-sim/src-tauri/Cargo.toml   # -> 6.3 MB exe
 python fsae-sim/tools/serve.py                                        # browser, port 5273
-node fsae-sim/tools/validate.js                                       # physics + ETC map
+node fsae-sim/tools/validate.js                                       # physics + ETC map + engine audio
 node fsae-sim/tools/smoke_desktop.mjs                                 # does the EXE boot the game
 python fsae-sim/tools/prepare_data.py                                 # regenerate data/ from helios-dev
 ```
@@ -36,14 +42,23 @@ at compile time, so any `.js` edit forces a recompile and relink (~60-75 s).
 ### `fsae-sim-rs/` — Rust solver + Bevy spike
 
 ```bash
-cargo test -p sim-core --release      # 21 tests, under a second
-cargo run  -p bevy-spike              # WASD, Q/E shift
+cargo test -p sim-core --release        # 22 tests
+cargo test -p engine-audio --release    # 52 tests, about a second
+cargo run  -p bevy-spike                # WASD, Q/E shift  (bevy-frontend branch)
 cargo run  -p bevy-spike -- --chase --screenshot shot.png
+
+# Regenerate the reference the JS engine-audio port checks itself against:
+cargo run -p engine-audio --release --example golden_vectors \
+  > ../fsae-sim/data/engine-audio-golden.json
 ```
 
 - `crates/sim-core` — dependency-free solver. Pluggable tyre / powertrain /
-  solver, three fidelity levels. **Valuable on its own; not tied to Bevy.**
-- `apps/bevy-spike` — throwaway visual spike. One line of UI, on purpose.
+  suspension / aero / solver, three fidelity levels. **Valuable on its own; not
+  tied to Bevy.**
+- `crates/engine-audio` — physically-modelled internal-combustion sound. Shared
+  by both packages; the reference implementation the JS port is checked against.
+- `apps/bevy-spike` — the Bevy build, on the `bevy-frontend` branch. Still one
+  line of UI; it now has real engine sound and a glTF bodywork hook.
 
 ---
 
@@ -163,27 +178,47 @@ restretch the drawn body and the cone hitbox.
 
 ## 7. Open items
 
-1. **Gamepad in WebView2 is still unverified with a physical pad.** It is
-   Chromium so it should behave as Edge does, but it has never been confirmed.
-   `bevy_gilrs` detected three pads instantly, so a native reader is the known
-   fallback. Thirty seconds of Daniel's time to settle.
-2. **The Bevy decision is open.** The spike answers "does it look better" — yes,
-   but modestly, and the win came mostly from shadows and PBR. The real bill is
-   ~2,500 lines of HUD / ETC editor / spec sheet rebuilt in `bevy_ui`, plus
-   replacing the WebAudio engine synth. Recommendation on file: adopt
-   `sim-core` under the existing app via WASM and treat Bevy as optional.
+1. **No physical device has ever been tested.** This is now the largest gap and
+   it needs Daniel, not more code. The gamepad path in WebView2 is unverified
+   (it is Chromium, so it should behave as Edge does; `bevy_gilrs` detected
+   three pads instantly, so a native reader is the known fallback). The wheel
+   profile is worse than unverified — **its axis assignments are a guess**.
+   Wheels do not use the Gamepad API's standard mapping and every vendor
+   differs, which is exactly why the panel has a live axis monitor and a
+   calibration capture. Plug a wheel in, read which axis each pedal moves, and
+   the defaults can stop being a guess.
+2. **The Bevy decision is still open, but the bill went down.** The spike
+   answers "does it look better" — yes, modestly, mostly from shadows and PBR.
+   The estimate used to include "replacing the WebAudio engine synth"; that is
+   now done and shared, so the remaining cost is the ~2,500 lines of HUD / ETC
+   editor / spec sheet in `bevy_ui`. Recommendation unchanged: the WebGL build
+   is the product, Bevy is where the renderer question gets answered.
 3. **`sim-core` is not wired into `fsae-sim`.** The WASM path is designed for
-   but not built. Note that it costs the zero-build-step frontend.
-4. **The endurance centreline has one curvature spike** at s ~ 607 m with
+   but not built, and it costs the zero-build-step frontend. The engine audio
+   faced the same choice and answered it the other way — ported by hand, kept
+   honest by golden vectors — which is now a worked precedent for doing the
+   same with the solver if the duplication is ever judged worth it.
+
+4. **Suspension and aero are registered but not extracted.** Both are still
+   embedded in `bicycle.js` and in the Rust solvers; the registry marks them
+   `extracted: false` and the picker says so rather than offering a choice that
+   does nothing. Extracting them is what makes the modular framework real
+   rather than shaped-correctly.
+
+5. **Force feedback needs Mz before it needs an API.** The tyre model returns Fy
+   only, and there is no kingpin or caster geometry in the parameters, so there
+   is nothing to compute self-aligning torque from. Doing the API first would
+   mean inventing the force, which is the one thing worth not doing.
+6. **The endurance centreline has one curvature spike** at s ~ 607 m with
    R = 2.83 m, below SDM26's 2.88 m minimum turning circle. A tracing artifact
    — fix it upstream in the Helios track data, not here.
-5. **MIS next steps (Daniel's, this session):** explore and refine the venue,
+7. **MIS next steps (Daniel's):** explore and refine the venue,
    then make copies with the autocross and endurance layouts laid out inside the
    infield. The plumbing for that already exists — `Venue` and `Track` are
    interchangeable — but a combined venue-plus-course object does not, so
    whichever way it goes will need one new decision: either a `Venue` that
    carries a course, or a `Track` that carries scenery.
-6. **Bevy spike rough edges** (only matter if it is promoted): the asphalt
+8. **Bevy spike rough edges** (only matter if it is promoted): the asphalt
    texture has no mipmaps and sparkles at grazing angles; no cone strikes,
    timing, audio or real UI.
 
@@ -194,18 +229,23 @@ restretch the drawn body and the cone hitbox.
 ```
 fsae-sim/
   src/vehicle/   params, paramMeta (provenance + edit ranges), tyre,
-                 powertrain, bicycle, etcMap, setupAdjust
+                 powertrain, bicycle, etcMap, setupAdjust,
+                 modules + library (vehicles as data)
+  src/audio/     engineAudio (the model), engineWorklet (the audio thread)
   src/track/     course geometry, progress, cone strikes; venue.js (MIS)
   src/render/    WebGL2 renderer, procedural SDM26 geometry, venuemesh, mat4
-  src/game/      input, HUD, timing, audio, ETC editor, spec sheet, desktop
+  src/game/      input, controlProfiles, controlsPanel, HUD, timing, audio,
+                 ETC editor, spec sheet, desktop
   tools/         prepare_data.py, serve.py, make_icons.py, make_mis.py,
                  plan_view.py, validate.js, smoke_desktop.mjs
   src-tauri/     build.rs stages dist/ on every cargo build
 
-fsae-sim-rs/
-  crates/sim-core/   vehicle, tyre, powertrain,
-                     solver/{point_mass, bicycle, double_track}
-  apps/bevy-spike/   main, car, track, ground
+fsae-sim-rs/                       (main | bevy-frontend)
+  crates/sim-core/     vehicle, tyre, powertrain, modular (suspension, aero,
+                       VehicleDefinition), solver/{point_mass, bicycle,
+                       double_track}
+  crates/engine-audio/ engine, cylinder, exhaust, synth, filters, ir
+  apps/bevy-spike/     main, car, track, ground, audio, cadmodel
 ```
 
 `window.__sim` is exposed in the browser console — `__sim.car.telemetry`,
@@ -274,3 +314,187 @@ LEFT of travel - the outward normal is `(sin h, -cos h)`, not the left normal.
 Every cross-section measurement still checked out because the rings were
 self-consistent, just collectively inside out. It survived a numeric review and
 was only caught by drawing the plan. **Draw geometry before trusting it.**
+
+## 10. Engine audio
+
+**Sound is generated, not sampled. There are no recordings anywhere.**
+
+Adapted from [`ange-yaghi/engine-sim`](https://github.com/ange-yaghi/engine-sim),
+**MIT**. Note that the repository usually linked —
+`Engine-Simulator/engine-sim-community-edition` — ships the built application
+and contains **no source at all** ("You'll notice that there is no application
+code here"). The algorithms here follow the original open codebase.
+
+```text
+crank angle
+  -> per-cylinder pressure (single-zone, Wiebe heat release)
+  -> flow through the exhaust valve
+  -> exhaust waveguide (primaries -> collector -> tailpipe -> open end)
+  -> synthesiser (jitter, DC removal, derivative, noise, convolution)
+  -> samples
+```
+
+Implemented twice: `fsae-sim-rs/crates/engine-audio` (reference) and
+`fsae-sim/src/audio/engineAudio.js` (port). WASM was the alternative and was
+declined for the same reason as before — it costs the zero-build-step frontend.
+They are kept in lockstep the way `sim-core` is: the Rust side emits golden
+vectors, `tools/validate.js` checks the JS against them. Measured agreement is
+2e-3 over 512 samples, which is f32-against-f64 rounding and nothing else.
+
+**The torque curve is an input.** `set_operating_point(rpm, throttle, torque)`
+solves the Wiebe heat release so the modelled cycle does that much indicated
+work. Feed it the Helios CFD sweep — which is what both builds do — and the note
+is generated from a cylinder trace doing the same work the car is doing.
+
+**Things that are emergent rather than scripted**, because the model is physical:
+cylinder count and crank phasing set the firing pattern; primary length sets the
+resonance; exhaust gas temperature changes the speed of sound, so the tuned
+length shifts with load and the note moves on the overrun.
+
+### Two bugs that measurement caught and review would not have
+
+1. **The port flow was never choked.** The incompressible orifice equation
+   returns about 930 m/s through the exhaust valve at blowdown — supersonic. It
+   emptied the cylinder in a few crank degrees and slammed the waveguide.
+2. **The cylinder end of each primary reflected rigidly** regardless of valve
+   position. A wide-open exhaust valve is a hole into a large volume, not a
+   mirror.
+
+Together these made **consecutive firing pulses correlate at −0.35** — inverted,
+so the pitch did not track rpm. Fixed (choke at Mach 1; reflection
+`r = (A_pipe − A_valve)/(A_pipe + A_valve)`), the spectrum is a clean harmonic
+series on the firing frequency with off-harmonics **200–500× down** and no
+half-order content, which is exactly right for an even-firing four.
+
+**Test the spectrum, not the waveform.** The first pitch test used zero-crossing
+counting and measured the 3.9 kHz pipe resonance rather than the 200 Hz firing
+rate, reporting roughly the same answer at every rpm. Autocorrelation fixed that
+but needed an octave guard restricted to *local maxima* — a smooth signal's
+autocorrelation rises gradually, so "first lag above a threshold" lands on the
+slope. The assertion that actually earns its keep is the spectral one.
+
+### Performance
+
+Rust 24× real time, JS 12.5× at 48 kHz with four cylinders and a 256-tap
+impulse response. The dominant cost was **not** the transcendental functions —
+tabulating those barely moved it. It was twelve `Vec` allocations per sample in
+the waveguide, half a million a second. Preallocating doubled throughput.
+
+**The RNG is `xorshift32`, deliberately.** A better 64-bit generator cannot be
+reproduced in JavaScript without `BigInt`, and since jitter and air noise both
+reach the output, different noise would make the two waveforms diverge from the
+first sample — leaving nothing to compare.
+
+---
+
+## 11. Control profiles
+
+`src/game/controlProfiles.js` defines what each device *is*; `input.js` reads
+whatever the active profile says. Adding a device means adding a profile.
+
+Four shipped: keyboard/mouse, Xbox, PlayStation, wheel-and-pedals. They are not
+variations on a theme — they differ in what the driver can physically command:
+
+| | steering rate | accel | deadzone | curve |
+|---|---|---|---|---|
+| keyboard | 180 °/s | 700 °/s² | 0 | linear |
+| gamepad | 300 °/s | 2200 °/s² | 0.10 | 1.7 expo |
+| wheel | 720 °/s | 12000 °/s² | **0** | **1.0** |
+
+All at the **road wheel**, matching `BicycleModel.delta`. Divide by
+`steeringRatio` for rim figures.
+
+**Steering is now a rate- *and* acceleration-limited servo.** The acceleration
+limit is new. Without it a step input produces a step in steering *velocity*,
+which no hand and no steering motor can do — and on a keyboard, where every
+input is a step, it is the difference between the car darting and the car being
+steered. `steeringServo` on the model is **configuration, not state**: it is
+deliberately not reset by `reset()`, or a respawn would silently drop the
+driver's profile. `steerRateDegPerS` *is* state and is reset — same shape as the
+clutch-mismatch bug in §4.
+
+With no profile attached the servo uses an effectively infinite acceleration and
+reduces exactly to the previous behaviour, so **the validated numbers do not
+move.**
+
+**Wheels get the accuracy work**, because they are the device where software
+smoothing is a defect rather than a feature:
+
+- **Rim-to-road-wheel mapping.** `match-car` turns the rim through the car's real
+  ratio: SDM26's 28° lock through 4.0 is **112° at the rim, lock to lock**. Set
+  the driver software to 112 and hand position *is* front-wheel angle.
+  `scale-to-lock` spreads whatever rotation the wheel is set to across full lock
+  — forgiving, but the ratio becomes a fiction and the steering is eight times
+  slower than the real car's.
+- **Pedal calibration against real axis travel.** A G29 brake rests near −1 and
+  tops out near +1; a load cell may never reach +1 at any force a person can
+  apply. Without per-axis min/max the same code reads full brake at rest on one
+  device and half brake at the stop on another.
+- **A live axis monitor.** Wheels do not use the Gamepad API's standard mapping
+  and every vendor differs, so there is no table that is right for all of them.
+  Watching the numbers move while you press a pedal is the only reliable way.
+
+**Force feedback is declared and documented but not implemented.**
+`forceFeedback.enabled` is false everywhere. What it needs: the tyre model to
+return **Mz** (it returns Fy only) and a kingpin/caster geometry block in the
+parameters, so self-aligning torque can come out of the physics rather than
+being invented. The web platform has no force-feedback API beyond dual-rumble,
+so the desktop build will need a native path.
+
+---
+
+## 12. Modular vehicles
+
+A vehicle is **data**, not a class: JSON naming which model to use for each
+subsystem, plus the parameters. That is what makes it savable, exportable,
+diffable and readable by both builds.
+
+```
+tyre · powertrain · suspension · aero · engineAudio
+```
+
+- `src/vehicle/modules.js` — the registry, and the SDM26 reference definition.
+  Its `params` block **references** the live `SDM26` object rather than copying
+  it, so there is still exactly one source of truth and `paramMeta.js` still
+  describes it.
+- `src/vehicle/library.js` — duplicate, edit, swap a module, export, import.
+- `sim-core/src/modular.rs` — the same shape in Rust, plus `SuspensionModel` and
+  `AeroModel` traits with `rigid` and `none` alternatives (useful references:
+  they isolate how much of a result comes from load transfer or downforce).
+
+**Saved vehicles store a sparse diff against their ancestor**, not a full copy —
+the same rule the parameter and control overrides use. Improving a shipped
+default then reaches every car derived from it, instead of each being silently
+pinned to whatever shipped the day it was created.
+
+**Module ids are strings, not an enum**, including in Rust. An enum would be
+tidier and would immediately stop matching a JSON file written by the other
+build.
+
+**No second vehicle exists, on purpose.** The framework is the deliverable;
+inventing a plausible-looking car would put numbers in the repository nobody has
+measured. Two subsystems are also still *embedded in the solver* rather than
+extracted — suspension and aero are registered and described but marked
+`extracted: false`, and the picker says so instead of offering a choice that
+silently does nothing. **Extracting them is the next real step.**
+
+---
+
+## 13. CAD bodywork
+
+`apps/bevy-spike/src/cadmodel.rs`, on the `bevy-frontend` branch. Drop
+`assets/car.glb` in and it replaces the procedural body; leave it out and
+nothing happens.
+
+**SolidWorks → STEP AP214 → Blender or FreeCAD → glTF 2.0 (.glb).** Not STL —
+STL is triangles with no part names, no materials and no hierarchy, so there is
+no way to find the front wheels afterwards in order to steer them. Tessellate at
+1–2 mm (0.1 mm is CAD-accurate and far too heavy), decimate to ~150k triangles
+for the visible body, delete internal parts rather than decimating them.
+
+Node names must be `body`, `wheel_fl/fr/rl/rr`, `steering_wheel`. Orientation is
++X forward, +Y up, +Z left, origin at the front axle line projected to the
+ground. **Scale is metres** — a millimetre export arrives a thousand times too
+big, which is the most common mistake and the easiest to spot.
+
+The WebGL build has no glTF loader yet; that is a separate piece of work.

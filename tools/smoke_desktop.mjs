@@ -185,17 +185,123 @@ try {
   })()`, 3);
   console.log("venue:", venue);
 
+  // The engine synthesiser runs in an AudioWorklet, and AudioWorklet in
+  // WebView2 is exactly the kind of thing that can be missing or refuse to load
+  // without saying so -- the game falls back to the oscillator bank and sounds
+  // merely worse, which no automated check would otherwise notice. So: start
+  // audio, wait for the worklet, and measure the spectrum coming out of it.
+  const sound = await evaluate(ws, `(async () => {
+    const g = window.__sim;
+    g.audio.start();
+    for (let i = 0; i < 80 && !g.audio.usingModel && !g.audio.modelError; i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!g.audio.usingModel) {
+      return JSON.stringify({ usingModel: false, modelError: g.audio.modelError });
+    }
+
+    const ctx = g.audio.ctx;
+    const an = ctx.createAnalyser();
+    an.fftSize = 8192;
+    an.smoothingTimeConstant = 0;   // or the reading carries history
+    g.audio.modelGain.connect(an);
+
+    const probe = async (rpm) => {
+      g.audio.modelNode.port.postMessage({
+        type: 'operating-point', rpm, throttle: 1, torqueNm: 60,
+      });
+      await new Promise(r => setTimeout(r, 700));
+      const bins = new Float32Array(an.frequencyBinCount);
+      an.getFloatFrequencyData(bins);
+      const hzPer = ctx.sampleRate / an.fftSize;
+      let best = { hz: 0, db: -Infinity };
+      for (let i = 1; i < bins.length && i * hzPer < 3000; i++) {
+        if (bins[i] > best.db) best = { hz: i * hzPer, db: bins[i] };
+      }
+      return { rpm, expectedHz: rpm / 30, peakHz: +best.hz.toFixed(0), peakDb: +best.db.toFixed(1) };
+    };
+
+    const a = await probe(9000);
+    const b = await probe(13000);
+
+    // And silence when it is not running.
+    g.audio.modelNode.port.postMessage({ type: 'running', running: false });
+    await new Promise(r => setTimeout(r, 900));
+    const bins = new Float32Array(an.frequencyBinCount);
+    an.getFloatFrequencyData(bins);
+    let stopped = -Infinity;
+    for (const v of bins) stopped = Math.max(stopped, v);
+
+    return JSON.stringify({
+      usingModel: true,
+      contextRate: ctx.sampleRate,
+      probes: [a, b],
+      // The loudest component must be an integer multiple of the firing
+      // frequency at BOTH operating points.
+      //
+      // Not "the loudest component IS the firing frequency" -- that is false,
+      // and the model is right to make it false. A tuned exhaust can have a
+      // harmonic louder than its fundamental depending on where the pipe
+      // resonance falls, and at 9000 rpm this one does: the peak sits at
+      // 598 Hz, the second harmonic of 300. What must hold is that the peak is
+      // locked to the firing rate, and an integer ratio at two different rpms
+      // is what a fixed resonance could not fake.
+      tracksFiringFrequency: [a, b].every((p) => {
+        const ratio = p.peakHz / p.expectedHz;
+        const n = Math.round(ratio);
+        return n >= 1 && Math.abs(ratio - n) < 0.08;
+      }),
+      stoppedPeakDb: +stopped.toFixed(1),
+    });
+  })()`, 5);
+  console.log("audio:", sound);
+
+  // The controls panel is generated from a description rather than hand-built,
+  // so a mistake shows up as an empty panel rather than an exception.
+  const controls = await evaluate(ws, `(() => {
+    const g = window.__sim;
+    const root = document.getElementById('controls');
+    const sel = document.getElementById('controlProfile');
+    if (!root || !sel) return JSON.stringify({ mounted: false });
+    sel.value = 'wheel';
+    sel.dispatchEvent(new Event('change'));
+    const after = document.getElementById('controls');
+    const rows = [...after.querySelectorAll('.ctl-row')];
+    const rateRow = rows.find(r => r.querySelector('label')?.textContent === 'Max steering speed');
+    let reached = null;
+    if (rateRow) {
+      const slider = rateRow.querySelector('input[type=range]');
+      slider.value = '500';
+      slider.dispatchEvent(new Event('input'));
+      g.update(1 / 60);
+      reached = g.car.steeringServo.maxRateDegPerS;
+    }
+    sel.value = 'keyboard';
+    sel.dispatchEvent(new Event('change'));
+    return JSON.stringify({
+      mounted: true,
+      profiles: [...sel.options].map(o => o.value),
+      wheelRows: rows.length,
+      editReachedTheCar: reached === 500,
+    });
+  })()`, 6);
+  console.log("controls:", controls);
+
   console.log("game:", report);
 
-  const errors = await evaluate(ws, `JSON.stringify(window.__errors || [])`, 4);
+  const errors = await evaluate(ws, `JSON.stringify(window.__errors || [])`, 7);
   console.log("page errors:", errors);
 
   const parsed = JSON.parse(report);
   const v = JSON.parse(venue);
+  const a = JSON.parse(sound);
+  const c = JSON.parse(controls);
   code = parsed.booted && parsed.webgl2 && parsed.glError === 0 &&
          parsed.specRows > 0 && parsed.specDof > 0 &&
          v.kind === 'venue' && v.venueTriangles > 1000 && v.ribbonDisabled &&
-         v.heldByBarrier && v.glError === 0 ? 0 : 1;
+         v.heldByBarrier && v.glError === 0 &&
+         a.usingModel && a.tracksFiringFrequency && a.stoppedPeakDb < -60 &&
+         c.mounted && c.editReachedTheCar ? 0 : 1;
   ws.close();
 } catch (err) {
   console.error("FAILED:", err.message);
