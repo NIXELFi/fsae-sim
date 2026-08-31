@@ -103,6 +103,8 @@ pub struct EngineAudio {
     valve_area: Vec<f32>,
     /// Output trim for the current operating point; see `set_operating_point`.
     level: f32,
+    /// Combustion power at the limiter, the reference for `level`.
+    reference_power_w: f32,
     inputs: Vec<f32>,
     running: bool,
 }
@@ -124,6 +126,8 @@ impl EngineAudio {
             .iter()
             .map(|&phase| Cylinder::new(phase, spec.gas.ambient_pa, spec.gas.ambient_k))
             .collect::<Vec<_>>();
+
+        let spec_for_ref = spec.clone();
 
         let op = OperatingPoint {
             rpm: spec.idle_rpm,
@@ -150,6 +154,7 @@ impl EngineAudio {
             flow: vec![0.0; n_cyl],
             valve_area: vec![0.0; n_cyl],
             level: 0.3,
+            reference_power_w: Self::reference_power(&spec_for_ref),
             inputs: vec![0.0; n_tail],
             running: true,
         })
@@ -218,17 +223,38 @@ impl EngineAudio {
             self.exhaust.set_gas_state(&gas, exhaust_k);
         }
 
-        // How loud this operating point should be relative to full noise.
+        // How loud this operating point should be, from the chemical power the
+        // engine is actually releasing.
         //
-        // Both terms matter and they are not the same thing. Load covers the
-        // difference between driving and coasting; rpm covers the difference
-        // between idling and the limiter, which is audible even at constant
-        // throttle. An engine on the overrun at 9000 rpm is neither silent nor
-        // as loud as one pulling.
-        let rpm_frac = (rpm / self.spec.redline_rpm).clamp(0.0, 1.0);
-        let effort = 0.65 * load + 0.35 * rpm_frac;
-        let depth = self.synth.parameters().load_level_depth;
-        self.level = 1.0 - depth * (1.0 - effort);
+        // Heat release per cylinder per cycle times the firing rate is the fuel
+        // power going in, and that is what drives the exhaust. Using it rather
+        // than a hand-blended mix of throttle and rpm means the overrun falls
+        // away on its own -- no combustion, no power, no noise beyond the floor
+        // -- and every intermediate point lands where the physics puts it.
+        let p = *self.synth.parameters();
+        let firing_per_second = (self.op.rpm / 120.0) * self.cylinders.len() as f32;
+        let chemical_power_w = self.cal.heat_release_j * firing_per_second;
+        let rel = (chemical_power_w / self.reference_power_w).clamp(0.0, 1.0);
+        self.level = p.level_floor + (1.0 - p.level_floor) * rel.powf(p.level_exponent);
+    }
+
+    /// Combustion power at the limiter on full throttle, W.
+    ///
+    /// The reference the level curve is measured against. Computed from the
+    /// engine's own spec rather than hard-coded, so a different engine scales
+    /// itself instead of coming out silent or clipped.
+    fn reference_power(spec: &EngineSpec) -> f32 {
+        let op = OperatingPoint {
+            rpm: spec.redline_rpm,
+            throttle: 1.0,
+            // Peak torque is not in the spec, so use an indicated mean
+            // effective pressure of 10 bar -- normal for a naturally aspirated
+            // engine at full load, and only a scale factor here.
+            target_torque_nm: 10e5 * spec.displacement_m3() / (4.0 * core::f32::consts::PI),
+            exhaust_k: spec.gas.exhaust_k_max,
+        };
+        let cal = calibrate(spec, op);
+        cal.heat_release_j * ((spec.redline_rpm / 120.0) * spec.cylinders() as f32)
     }
 
     /// Fill `out` with mono samples in [-1, 1].
@@ -243,7 +269,13 @@ impl EngineAudio {
             for (i, cyl) in self.cylinders.iter_mut().enumerate() {
                 let area = self.tables.valve_area(cyl.theta(self.crank_deg));
                 self.valve_area[i] = area;
-                let back = self.exhaust.port_pressure(i, ambient, area);
+                // The port velocity from the previous sample closes the
+                // impedance loop. Strictly implicit -- the pressure depends on
+                // the flow and the flow on the pressure -- so this is one
+                // Gauss-Seidel step. The port inertance already limits how fast
+                // the velocity can move, so the lag is shorter than the
+                // physical time constant and the loop is stable.
+                let back = self.exhaust.port_pressure(i, ambient, area, cyl.port_velocity);
                 let q = if self.running {
                     step_cylinder(
                         &self.spec,
