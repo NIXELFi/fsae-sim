@@ -1,0 +1,10 @@
+[package]
+name = "sim-core"
+version.workspace = true
+edition.workspace = true
+description = "Vehicle dynamics solver core — pluggable tyre, powertrain and solver models"
+
+# Deliberately dependency-free. This crate is the physics and nothing else, so
+# it stays cargo-testable in milliseconds and can be compiled to WASM, linked
+# into Bevy, or called from a Tauri command without dragging anything along.
+[dependencies]

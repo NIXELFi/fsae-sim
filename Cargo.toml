@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/sim-core", "crates/engine-audio", "apps/bevy-spike"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# Bevy's recommended dev profile: our own code compiles fast, dependencies are
+# optimised so the spike still runs at a sensible frame rate in a debug build.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
