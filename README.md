@@ -408,15 +408,24 @@ are kept in lockstep the way `sim-core` is — the Rust side emits golden vector
 and `tools/validate.js` checks this build against them, currently agreeing to
 2e-3 over 512 samples, which is f32-against-f64 rounding and nothing else.
 
-### Tone
+### Tone and loudness
 
 An exhaust is a bass instrument, and the model is checked against that: every
 operating point from idle to the limiter puts 99%+ of its energy below 1.5 kHz,
-peaking at the firing frequency or its second harmonic. Level scales with how
-hard the engine is working rather than being normalised flat, so idle is about
-2.7x quieter than full throttle and an overrun about 2x quieter than pulling --
-which is both what a real engine does and what stops a coasting engine's pipe
-ringing becoming the loudest thing you can hear.
+peaking at the firing frequency.
+
+**Loudness tracks combustion power** -- heat release per cycle times firing rate
+-- rather than being normalised flat. Measured A-weighted through the running
+synthesiser, relative to the limiter:
+
+| idle | 2500 part | 4000 | 7000 | 10000 | 13000 | 3000 overrun |
+|---|---|---|---|---|---|---|
+| −37 dB | −29 dB | −14 dB | −8.6 dB | −3.6 dB | 0 dB | −42 dB |
+
+Loudness is checked A-weighted, not by raw energy, and the distinction is not
+academic: an earlier version was already quieter at idle by RMS while sounding
+louder, because 30% of its A-weighted energy sat above 1.5 kHz against 1% of its
+raw energy. The ear weights 2 kHz roughly 30 dB above 50 Hz.
 
 Three pieces of that are physics rather than equalisation: pipe losses grow with
 frequency the way boundary-layer losses really do, the tailpipe carries heavy
@@ -426,7 +435,16 @@ small pressure differences, which is both the correct viscous limit and the
 thing that stops the port chattering against its own returning waves.
 
 The old oscillator bank is still there as a fallback for browsers without
-AudioWorklet. It sounds recognisably like the same engine and obviously
+AudioWorklet.
+
+### Levels
+
+Per-source sliders on the home screen -- master, engine, tyres, wind, cone
+strikes -- because the sources are not interchangeable. The engine is continuous
+and sets the mood, tyre scrub is information about how much grip is left, and a
+cone strike is a discrete event telling you that you have just taken a two-second
+penalty. Which you want louder depends on whether you are learning the car or
+chasing a time. Levels persist. It sounds recognisably like the same engine and obviously
 synthetic next to the real thing.
 
 ## Control devices

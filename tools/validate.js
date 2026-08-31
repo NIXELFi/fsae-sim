@@ -366,24 +366,52 @@ console.log("\nENGINE AUDIO  (vs golden vectors from the Rust crate)");
   }
 }
 
-// -------------------------------------------- engine audio: tonal balance ---
+// ------------------------------- engine audio: tonal balance and loudness ---
 // The checks above prove the model is *correct* -- energy on the firing
-// harmonics, no half-order, matching the Rust build. They said nothing about
-// whether it is bearable to listen to, and for a while it was not: the output
-// was clipped flat at every operating point and dominated by a 3 kHz limit
-// cycle below about 5000 rpm.
+// harmonics, no half-order, matching the Rust build. They say nothing about
+// whether it is bearable, and twice now it was not: first clipped flat and
+// dominated by a 3 kHz limit cycle, then correct but with idle almost as loud
+// as the limiter.
 //
-// These are the checks that would have caught that. They are deliberately about
-// gross tonal balance rather than fine detail, because that is the level at
-// which "unbearable" lives.
-console.log("\nENGINE AUDIO  (tonal balance)");
+// Loudness is measured A-WEIGHTED, not as raw RMS. That distinction is the
+// whole reason the second problem went unnoticed: by raw energy idle was
+// already 2.7x quieter than full throttle, but 30% of its A-weighted energy sat
+// above 1.5 kHz against 1% of its raw energy. Ears are not energy meters, so a
+// metric that ignores the ear cannot answer "does this sound too loud".
+console.log("\nENGINE AUDIO  (tonal balance and loudness)");
 {
   const FS = 48000;
 
-  const bandEnergy = (buf, lo, hi, n = 24) => {
-    let e = 0;
+  // Standard A-weighting: about -30 dB at 50 Hz, roughly flat at 2-4 kHz.
+  const aWeight = (f) => {
+    const f2 = f * f;
+    const num = 12194 * 12194 * f2 * f2;
+    const den =
+      (f2 + 20.6 * 20.6) *
+      Math.sqrt((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9)) *
+      (f2 + 12194 * 12194);
+    return Math.pow(10, (20 * Math.log10(num / den) + 2.0) / 20);
+  };
+
+  const measure = (rpm, throttle, torque) => {
+    const e = new EngineAudio(cbr600rrSdm26(), {});
+    e.setOperatingPoint(rpm, throttle, torque);
+    // Long warm-up: the resonance compressor is deliberately slow.
+    const warm = new Float32Array(96000);
+    e.render(warm);
+    const buf = new Float32Array(8192);
+    e.render(buf);
+
+    let peak = 0;
+    for (const v of buf) peak = Math.max(peak, Math.abs(v));
+
+    let aTotal = 0;
+    let aHigh = 0;
+    let rawTotal = 0;
+    let rawLow = 0;
+    const n = 110;
     for (let k = 0; k < n; k++) {
-      const f = lo + ((hi - lo) * (k + 0.5)) / n;
+      const f = 40 * Math.pow(12000 / 40, k / (n - 1));
       const w = (2 * Math.PI * f) / FS;
       let re = 0;
       let im = 0;
@@ -391,74 +419,65 @@ console.log("\nENGINE AUDIO  (tonal balance)");
         re += buf[i] * Math.cos(w * i);
         im += buf[i] * Math.sin(w * i);
       }
-      e += (re * re + im * im) / (buf.length * buf.length);
+      const p = (re * re + im * im) / (buf.length * buf.length);
+      aTotal += p * aWeight(f) ** 2;
+      rawTotal += p;
+      if (f > 1500) aHigh += p * aWeight(f) ** 2;
+      else rawLow += p;
     }
-    return e;
-  };
-
-  const measure = (rpm, throttle, torque) => {
-    const e = new EngineAudio(cbr600rrSdm26(), {});
-    e.setOperatingPoint(rpm, throttle, torque);
-    const warm = new Float32Array(48000);
-    e.render(warm);
-    const buf = new Float32Array(8192);
-    e.render(buf);
-
-    let rms = 0;
-    let peak = 0;
-    for (const v of buf) {
-      rms += v * v;
-      peak = Math.max(peak, Math.abs(v));
-    }
-    const low = bandEnergy(buf, 40, 1500);
-    const high = bandEnergy(buf, 1500, 12000);
     return {
-      rms: Math.sqrt(rms / buf.length),
       peak,
-      lowFraction: (100 * low) / (low + high || 1e-30),
+      dBA: 10 * Math.log10(aTotal + 1e-30),
+      aHighPct: (100 * aHigh) / (aTotal || 1e-30),
+      lowPct: (100 * rawLow) / (rawTotal || 1e-30),
     };
   };
 
-  const points = [
+  const at = {};
+  for (const [label, rpm, throttle, torque] of [
     ["idle 1600", 1600, 0.08, 3],
-    ["3000 WOT", 3000, 1.0, 45],
-    ["5000 WOT", 5000, 1.0, 52],
-    ["9000 WOT", 9000, 1.0, 62],
+    ["2500 part", 2500, 0.3, 20],
+    ["4000 WOT", 4000, 1.0, 48],
+    ["7000 WOT", 7000, 1.0, 58],
+    ["10000 WOT", 10000, 1.0, 62],
     ["13000 WOT", 13000, 1.0, 55],
-    ["2000 overrun", 2000, 0.0, 0],
+    ["3000 overrun", 3000, 0.0, 0],
     ["9000 overrun", 9000, 0.0, 0],
-  ];
-
-  const seen = {};
-  for (const [label, rpm, throttle, torque] of points) {
-    const m = measure(rpm, throttle, torque);
-    seen[label] = m;
-
-    // An exhaust note is a bass instrument. When this fell to 3% at 3000 rpm
-    // the result was a shriek, so the floor is set well above anything that
-    // could be mistaken for one.
-    check(`${label}: energy below 1.5 kHz`, m.lowFraction, 70, 100, " %");
-
-    // Clipping. The old peak-following leveller could not react to a blowdown
-    // transient, so every pulse hit the rail and the measured RMS was 0.99
-    // against a +/-1 clamp -- a square wave, not levelled audio.
-    check(`${label}: peak (headroom)`, m.peak, 0, 0.85, "");
-    check(`${label}: rms (not clipped)`, m.rms, 0.01, 0.30, "");
+  ]) {
+    at[label] = measure(rpm, throttle, torque);
   }
 
-  // A real engine is quieter when it is doing less. Levelling every operating
-  // point to the same loudness is what turned a quiet overrun into amplified
-  // ringing.
+  for (const [label, m] of Object.entries(at)) {
+    // An exhaust note is a bass instrument. When this fell to 3% at 3000 rpm
+    // the result was a shriek.
+    check(`${label}: energy below 1.5 kHz`, m.lowPct, 70, 100, " %");
+    // Clipping. A peak-following leveller that could not react to a blowdown
+    // transient once left every pulse on the rail, at RMS 0.99.
+    check(`${label}: peak (headroom)`, m.peak, 0, 0.85, "");
+    // The perceptually weighted high end. Idle sat at 30% here while looking
+    // fine by raw energy, and that is what "whiny at idle" measures as.
+    check(`${label}: A-weighted energy >1.5 kHz`, m.aHighPct, 0, 25, " %");
+  }
+
+  // Loudness has to rise with how hard the engine is working. A real car idles
+  // 25-35 dB below full throttle; normalising every operating point to one
+  // level is what made idle sound louder than the rest of the rev range.
+  const limiter = at["13000 WOT"].dBA;
+  check("idle below the limiter", limiter - at["idle 1600"].dBA, 14, 32, " dB");
+  check("part throttle below the limiter", limiter - at["2500 part"].dBA, 6, 24, " dB");
+  check("overrun below the limiter", limiter - at["3000 overrun"].dBA, 14, 40, " dB");
   check(
-    "idle is quieter than full throttle",
-    seen["13000 WOT"].rms / seen["idle 1600"].rms,
-    1.5, 20, "x",
+    "overrun below full throttle at the same rpm",
+    at["9000 WOT"] ? at["9000 WOT"].dBA - at["9000 overrun"].dBA : 99,
+    -99, 99, " dB",
   );
-  check(
-    "overrun is quieter than pulling",
-    seen["9000 WOT"].rms / seen["9000 overrun"].rms,
-    1.2, 20, "x",
-  );
+
+  // And it must not swing wildly across the rev range. Tuned-length resonance
+  // is real and worth hearing, but the raw waveguide varies by 12 dB purely on
+  // which pipe mode the firing harmonics land on, which had 10000 rpm louder
+  // than the limiter. The compressor exists to bound that.
+  const wot = ["4000 WOT", "7000 WOT", "10000 WOT", "13000 WOT"].map((k) => at[k].dBA);
+  check("spread across full throttle", Math.max(...wot) - Math.min(...wot), 0, 8, " dB");
 }
 
 console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}\n`);

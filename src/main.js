@@ -2,6 +2,7 @@
 
 import { SDM26 } from "./vehicle/params.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
+import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
 import { loadTrack, TRACKS } from "./track/track.js";
@@ -58,6 +59,9 @@ class Game {
       // Re-render when plugging a device in changes the detected profile.
       this.input.onProfileChange = () => this.controlsPanel.render();
     }
+
+    const audioRoot = document.getElementById("audioLevels");
+    if (audioRoot) this.audioPanel = new AudioPanel(audioRoot, this.audio);
 
     this.powertrain = null;
     this.car = null;

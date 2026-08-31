@@ -39,7 +39,13 @@ shortcut (**SDM26 Driver-in-Loop**) pointing at it.
 **Iterate in the browser, not the exe.** `generate_context!` embeds the frontend
 at compile time, so any `.js` edit forces a recompile and relink (~60-75 s).
 
-### `fsae-sim-rs/` — Rust solver + Bevy spike
+### `fsae-sim-rs/` — Rust solver + Bevy build
+
+**The Bevy build is not inside the desktop exe and cannot be.** They are two
+separate programs with two different renderers: `fsae-sim.exe` is the Tauri app
+with the WebGL2 frontend embedded at compile time, and `bevy-spike.exe` is a
+native binary that draws with Bevy. Only the `engine-audio` and `sim-core`
+crates are shared.
 
 ```bash
 cargo test -p sim-core --release        # 22 tests
@@ -193,32 +199,37 @@ restretch the drawn body and the cone hitbox.
    now done and shared, so the remaining cost is the ~2,500 lines of HUD / ETC
    editor / spec sheet in `bevy_ui`. Recommendation unchanged: the WebGL build
    is the product, Bevy is where the renderer question gets answered.
-3. **`sim-core` is not wired into `fsae-sim`.** The WASM path is designed for
+3. **Per-source audio levels** (master, engine, tyres, wind, cone strikes) are
+   on the home screen and persist. The engine slider sits on top of a level
+   that already tracks combustion power, so it is a preference rather than a
+   correction.
+
+4. **`sim-core` is not wired into `fsae-sim`.** The WASM path is designed for
    but not built, and it costs the zero-build-step frontend. The engine audio
    faced the same choice and answered it the other way — ported by hand, kept
    honest by golden vectors — which is now a worked precedent for doing the
    same with the solver if the duplication is ever judged worth it.
 
-4. **Suspension and aero are registered but not extracted.** Both are still
+5. **Suspension and aero are registered but not extracted.** Both are still
    embedded in `bicycle.js` and in the Rust solvers; the registry marks them
    `extracted: false` and the picker says so rather than offering a choice that
    does nothing. Extracting them is what makes the modular framework real
    rather than shaped-correctly.
 
-5. **Force feedback needs Mz before it needs an API.** The tyre model returns Fy
+6. **Force feedback needs Mz before it needs an API.** The tyre model returns Fy
    only, and there is no kingpin or caster geometry in the parameters, so there
    is nothing to compute self-aligning torque from. Doing the API first would
    mean inventing the force, which is the one thing worth not doing.
-6. **The endurance centreline has one curvature spike** at s ~ 607 m with
+7. **The endurance centreline has one curvature spike** at s ~ 607 m with
    R = 2.83 m, below SDM26's 2.88 m minimum turning circle. A tracing artifact
    — fix it upstream in the Helios track data, not here.
-7. **MIS next steps (Daniel's):** explore and refine the venue,
+8. **MIS next steps (Daniel's):** explore and refine the venue,
    then make copies with the autocross and endurance layouts laid out inside the
    infield. The plumbing for that already exists — `Venue` and `Track` are
    interchangeable — but a combined venue-plus-course object does not, so
    whichever way it goes will need one new decision: either a `Venue` that
    carries a course, or a `Track` that carries scenery.
-8. **Bevy spike rough edges** (only matter if it is promoted): the asphalt
+9. **Bevy spike rough edges** (only matter if it is promoted): the asphalt
    texture has no mipmaps and sparkles at grazing angles; no cone strikes,
    timing, audio or real UI.
 
@@ -414,6 +425,56 @@ physics rather than tuning:
 below 1.5 kHz, peaks at 1x or 2x the firing frequency, peak amplitude 0.11-0.28
 with real headroom, and levels that scale with effort -- idle 2.7x quieter than
 full throttle, overrun 2x quieter than pulling. `validate.js` asserts all of it.
+
+### And then it was correct, and idle was still too loud
+
+A second round, reported the same way -- idle louder than the rest of the rev
+range. The measurement that had passed said idle was already 2.7x quieter than
+full throttle by RMS. The measurement that mattered said something else:
+
+**A-weighted, the limiter was 3.2 dB above idle**, where a real engine spans
+25-35 dB, and 10000 rpm was 6.8 dB *louder* than the limiter. Idle also had 30%
+of its A-WEIGHTED energy above 1.5 kHz against 1% of its raw energy -- the ear
+weights 2 kHz about 30 dB above 50 Hz, so a metric that ignores that cannot
+answer "is this too loud". **Loudness checks are A-weighted now.**
+
+Three causes, in order of size:
+
+1. **The automatic gain control was the problem, not the solution.** It was
+   doing exactly what it was asked -- driving every operating point to the same
+   output RMS -- which for an engine is the wrong goal. It erased the loudness
+   curve, and it boosted the quiet, ring-dominated idle signal fourfold,
+   bringing its high-frequency noise floor up with it. Replaced by a **fixed
+   pressure reference**: 90 kPa maps to full scale, and loudness is then
+   whatever the physics produced.
+
+2. **Level now tracks combustion power** -- heat release per cycle times firing
+   rate -- rather than a hand-blended mix of throttle and rpm. That is the
+   quantity that actually drives an exhaust, and it falls to nothing on a closed
+   throttle with no special case, so the overrun goes quiet on its own.
+
+3. **The port could draw from an infinite reservoir.** `port_pressure` returned
+   ambient plus the returning wave, with no term for the flow going through it.
+   A pipe is not a reservoir: push gas in and the inlet pressure rises by
+   `rho c u` immediately, not after the wave's round trip. At idle the cylinder
+   is at ~0.2 atm when the valve opens, so gas rushed backwards into it at sonic
+   velocity and injected a **52 kPa** wave -- against 58 kPa for a full-power
+   blowdown. Idle was as loud as the limiter *in the physics*, before any
+   processing. Now the flow throttles itself against the pipe's characteristic
+   impedance, and reverse flow additionally carries the lower discharge
+   coefficient a port really has backwards (0.7).
+
+A fourth piece was needed because the waveguide swings ~12 dB across the rev
+range purely on which pipe mode the firing harmonics land on. Tuned-length
+resonance is real, but 12 dB of it swamped the loudness curve. A **range-limited
+compressor** (+/-8 dB, slow) removes that swing; being range-limited is exactly
+what stops it becoming the AGC again -- it cannot flatten a 20 dB curve.
+
+**Measured through the running worklet**, monotonic with load:
+
+| | idle | 2500 part | 4000 | 7000 | 10000 | 13000 | 3000 ovr | 9000 ovr |
+|---|---|---|---|---|---|---|---|---|
+| dBA vs limiter | −37 | −29 | −14 | −8.6 | −3.6 | 0 | −42 | −29 |
 
 **Correctness and listenability are different properties, and only one of them
 had tests.** The spectral checks that proved the model right -- energy on the

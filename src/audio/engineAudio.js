@@ -434,6 +434,11 @@ export function displacementPerCylinderM3(spec) {
   return pistonAreaM2(spec) * spec.strokeM;
 }
 
+/** Total swept volume, m^3. */
+export function displacementM3(spec) {
+  return displacementPerCylinderM3(spec) * cylinderCount(spec);
+}
+
 export function clearanceVolumeM3(spec) {
   return displacementPerCylinderM3(spec) / Math.max(spec.compressionRatio - 1, 1e-6);
 }
@@ -669,6 +674,13 @@ export function stepCylinder(spec, tables, cyl, crankDeg, dt, cal, op, backPress
         ? Math.sign(dpAcross) * Math.sqrt((2 * mag) / Math.max(rho, 1e-6))
         : (dpAcross / DP_LAMINAR) * turbulent;
 
+    // An exhaust port flows worse backwards than forwards. The valve seat and
+    // the port are shaped for gas leaving the cylinder; reversed, the jet
+    // separates and the effective discharge coefficient drops. 0.7 is the usual
+    // ballpark. This only matters on a closed throttle, which is exactly where
+    // reverse flow dominates -- idle and the overrun.
+    if (uTarget < 0) uTarget *= 0.7;
+
     // Choke it. A port cannot pass gas faster than the local speed of sound
     // however large the pressure ratio, and at blowdown the ratio is enormous.
     // Unchoked, the incompressible orifice equation returns about 930 m/s,
@@ -856,15 +868,39 @@ export class ExhaustNetwork {
     this.outputs.fill(0);
   }
 
-  /** Pressure the runner presents at cylinder `i`'s exhaust port. */
-  portPressure(i, ambientPa, valveAreaM2) {
+  /**
+   * Pressure the runner presents at cylinder `i`'s exhaust port.
+   *
+   * `portVelocityMs` is the gas velocity currently going through the valve,
+   * positive out of the cylinder. It matters, and leaving it out was the single
+   * biggest error in the model.
+   *
+   * A pipe is not an infinite reservoir. Push gas into it and the pressure at
+   * the inlet rises immediately by `rho c u`; pull gas out and it falls. That
+   * is the pipe's characteristic impedance, and it acts within the sample --
+   * not after the round trip it takes a wave to come back. Without it the
+   * exhaust valve saw a constant one atmosphere and could draw from it at will.
+   *
+   * The consequence was severe at small throttle openings. At idle the cylinder
+   * is at about 0.2 atm when the valve opens, so gas rushed backwards into it
+   * at sonic velocity through the full valve area and injected a 52 kPa wave --
+   * against 58 kPa for a full-power blowdown at the limiter. Idle was as loud
+   * as the limiter, and the model's entire dynamic range was 9 dB.
+   *
+   * With the impedance term the flow throttles itself: the harder it pulls, the
+   * lower the pressure it is pulling against.
+   */
+  portPressure(i, ambientPa, valveAreaM2, portVelocityMs = 0) {
     const p = this.primaries[i];
     const r = portReflection(p.areaM2, valveAreaM2);
     // Deliberately reads the raw delay line rather than `readBwd()`. The
     // damping filters are stateful and are advanced exactly once per sample by
     // `step`; running one here as well would double-filter the primary and
     // clock its state twice per sample.
-    return ambientPa + (1 + r) * p.bwd.read() * p.gain;
+    const wave = (1 + r) * p.bwd.read() * p.gain;
+    // Volume flow through the valve becomes a particle velocity in the pipe.
+    const uPipe = (portVelocityMs * valveAreaM2) / Math.max(p.areaM2, 1e-9);
+    return ambientPa + wave + this.rhoC * uPipe;
   }
 
   step(sourceFlow, valveArea) {
@@ -973,21 +1009,65 @@ export const DEFAULT_AUDIO_PARAMETERS = {
    */
   toneCutoffHz: 3200,
 
-  /** Target output RMS. The leveller aims the average level here. */
-  levelerTarget: 0.14,
-  levelerMaxGain: 4,
-  levelerMinGain: 1e-5,
+  /**
+   * Pascals that map to full scale.
+   *
+   * A FIXED reference, deliberately, and this replaced an automatic gain
+   * control. The AGC was doing exactly what it was asked -- driving every
+   * operating point to the same output RMS -- and that is the wrong goal for an
+   * engine. It erased the difference between idle and the limiter, leaving a
+   * measured 3.2 dB of A-weighted range where a real engine spans 25-35 dB, and
+   * it did it while boosting the quiet, ring-dominated idle signal by four
+   * times, which brought the high-frequency noise floor up with it.
+   *
+   * With a fixed reference, loudness is whatever the physics produced, times
+   * the level trim below. Roughly one atmosphere is a natural scale for
+   * exhaust pressure and keeps a healthy peak around 0.2-0.3.
+   */
+  pressureRefPa: 90000,
 
   /**
-   * How much quieter the engine gets when it is doing no work.
+   * Range of the resonance compressor, dB.
    *
-   * A real engine at idle is far quieter than one at wide-open throttle, and
-   * levelling everything to the same loudness is both wrong and unpleasant:
-   * it takes the weak, ring-dominated output of an overrun and amplifies it
-   * until the ringing is all you can hear. 0 would normalise everything; 1
-   * would make idle silent.
+   * The waveguide's output swings about 12 dB across the rev range purely from
+   * which pipe modes the firing harmonics happen to land on. Tuned-length
+   * resonance is real and worth hearing, but 12 dB of it is far more than a
+   * real exhaust shows and it swamped the intended loudness curve -- 10000 rpm
+   * came out louder than the limiter.
+   *
+   * This is a slow, hard-limited automatic gain that removes that variation and
+   * nothing else. Limiting the range is what distinguishes it from the AGC it
+   * replaced: at +/-8 dB it cannot flatten a 25 dB loudness curve, so the level
+   * trim still decides how loud each operating point is. Set to 0 to hear the
+   * pipe resonance raw.
    */
-  loadLevelDepth: 0.72,
+  resonanceCompressDb: 8,
+
+  /** Target RMS for the resonance compressor, before the level trim. */
+  compressorTarget: 0.09,
+
+  /**
+   * Loudness floor, as a fraction of full scale, for an engine making no power.
+   *
+   * Not zero: an engine on the overrun still pumps air and is audible. It is
+   * just much quieter than one pulling.
+   */
+  levelFloor: 0.025,
+
+  /**
+   * Exponent mapping combustion power to loudness.
+   *
+   * Level tracks the chemical power the engine is actually releasing -- heat
+   * release per cycle times firing rate -- because that is what sets how hard
+   * an exhaust is driven, and it falls to nothing on a closed throttle without
+   * any special case. Sound pressure goes roughly as the square root of
+   * acoustic power, and only a fraction of combustion power becomes sound, so
+   * the exponent is well below 1. 0.55 measures out at 20 dB from idle to the
+   * limiter and 26 dB from a closed-throttle overrun, which is the right
+   * ballpark for a car you can stand beside at idle and cannot at full
+   * throttle.
+   */
+  levelExponent: 0.55,
 };
 
 export class Synthesizer {
@@ -1012,9 +1092,16 @@ export class Synthesizer {
     // pole was not enough to stop the pipe ring dominating at low rpm.
     this.tone1 = new ButterworthLowPass(this.params.toneCutoffHz, sampleRate);
     this.tone2 = new ButterworthLowPass(this.params.toneCutoffHz, sampleRate);
-    this.leveler = new LevelingFilter(this.params.levelerTarget, sampleRate);
-    this.leveler.maxGain = this.params.levelerMaxGain;
-    this.leveler.minGain = this.params.levelerMinGain;
+    this.compressor = new LevelingFilter(this.params.compressorTarget, sampleRate);
+    this.applyCompressorRange();
+  }
+
+  applyCompressorRange() {
+    const db = Math.max(this.params.resonanceCompressDb, 0);
+    const span = Math.pow(10, db / 20);
+    this.compressor.target = this.params.compressorTarget;
+    this.compressor.maxGain = span;
+    this.compressor.minGain = 1 / span;
   }
 
   setParameters(p) {
@@ -1025,9 +1112,7 @@ export class Synthesizer {
     }
     this.tone1.setCutoff(this.params.toneCutoffHz, this.sampleRate);
     this.tone2.setCutoff(this.params.toneCutoffHz, this.sampleRate);
-    this.leveler.target = this.params.levelerTarget;
-    this.leveler.maxGain = this.params.levelerMaxGain;
-    this.leveler.minGain = this.params.levelerMinGain;
+    this.applyCompressorRange();
   }
 
   setImpulseResponse(ir) {
@@ -1064,17 +1149,16 @@ export class Synthesizer {
       sum += conv > 0 ? conv * ch.convolution.f(vIn) + (1 - conv) * vIn : vIn;
     }
 
-    // Tone, then antialias, then level. Rolling off before the leveller means
-    // the gain is set by what will actually be heard, rather than by ringing
-    // that is about to be filtered away.
     let signal = this.tone2.f(this.tone1.f(sum));
     signal = this.antialias.f(signal);
 
-    // `level` scales with how hard the engine is working, so an idling or
-    // overrunning engine stays quiet instead of being levelled up until its
-    // ringing is the loudest thing in the room.
-    const out = this.leveler.f(signal) * level * p.volume;
-    return softClip(out);
+    // Pascals to full scale by a fixed reference, then the resonance
+    // compressor takes out the pipe-mode swing, and only then does `level`
+    // decide how loud this operating point should be. The order matters:
+    // compressing after the level trim would undo it.
+    let out = signal / p.pressureRefPa;
+    if (p.resonanceCompressDb > 0) out = this.compressor.f(out);
+    return softClip(out * level * p.volume);
   }
 }
 
@@ -1135,6 +1219,7 @@ export class EngineAudio {
 
     this.flow = new Float32Array(this.cylinders.length);
     this.valveArea = new Float32Array(this.cylinders.length);
+    this.referencePowerW = this.computeReferencePower();
   }
 
   setParameters(p) {
@@ -1167,17 +1252,40 @@ export class EngineAudio {
     this.cal = calibrate(this.spec, this.op);
     if (retune) this.exhaust.setGasState(gas, exhaustK);
 
-    // How loud this operating point should be relative to full noise.
+    // How loud this operating point should be, from the chemical power the
+    // engine is actually releasing.
     //
-    // Both terms matter and they are not the same thing. Load covers the
-    // difference between driving and coasting; rpm covers the difference
-    // between idling and the limiter, which is audible even at constant
-    // throttle. An engine on the overrun at 9000 rpm is neither silent nor as
-    // loud as one pulling.
-    const rpmFrac = Math.min(Math.max(rpm / this.spec.redlineRpm, 0), 1);
-    const effort = 0.65 * load + 0.35 * rpmFrac;
-    const depth = this.synth.params.loadLevelDepth;
-    this.level = 1 - depth * (1 - effort);
+    // Heat release per cylinder per cycle times the firing rate is the fuel
+    // power going in, and that is what drives the exhaust. Using it rather than
+    // a hand-blended mix of throttle and rpm means the overrun falls away on
+    // its own -- no combustion, no power, no noise beyond the floor -- and
+    // every intermediate point lands where the physics puts it.
+    const p = this.synth.params;
+    const firingPerSecond = (this.op.rpm / 120) * this.cylinders.length;
+    const chemicalPowerW = this.cal.heatReleaseJ * firingPerSecond;
+    const rel = Math.min(chemicalPowerW / this.referencePowerW, 1);
+    this.level = p.levelFloor + (1 - p.levelFloor) * Math.pow(rel, p.levelExponent);
+  }
+
+  /**
+   * Combustion power at the limiter on full throttle, W.
+   *
+   * The reference the level curve is measured against. Computed once from the
+   * engine's own spec rather than hard-coded, so a different engine scales
+   * itself instead of coming out silent or clipped.
+   */
+  computeReferencePower() {
+    const op = {
+      rpm: this.spec.redlineRpm,
+      throttle: 1,
+      // Peak torque is not in the spec, so use an indicated mean effective
+      // pressure of 10 bar -- a normal figure for a naturally aspirated engine
+      // at full load, and only a scale factor here.
+      targetTorqueNm: (10e5 * displacementM3(this.spec)) / (4 * Math.PI),
+      exhaustK: this.spec.gas.exhaustKMax,
+    };
+    const cal = calibrate(this.spec, op);
+    return cal.heatReleaseJ * ((this.spec.redlineRpm / 120) * this.cylinders.length);
   }
 
   /** Fill `out` (a Float32Array) with mono samples in [-1, 1]. */
@@ -1196,7 +1304,13 @@ export class EngineAudio {
 
         const area = this.tables.valveAreaAt(theta);
         this.valveArea[i] = area;
-        const back = this.exhaust.portPressure(i, ambient, area);
+        // The port velocity from the previous sample closes the impedance loop.
+        // Strictly this is implicit -- the pressure depends on the flow and the
+        // flow on the pressure -- and using the previous value is one Gauss-
+        // Seidel step. The port inertance already limits how fast the velocity
+        // can move, so the lag is smaller than the physical time constant and
+        // the loop is stable.
+        const back = this.exhaust.portPressure(i, ambient, area, cyl.portVelocity);
         this.flow[i] = this.running
           ? stepCylinder(this.spec, this.tables, cyl, this.crankDeg, dt, this.cal, this.op, back)
           : 0;
