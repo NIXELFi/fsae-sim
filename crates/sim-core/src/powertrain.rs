@@ -225,6 +225,8 @@ pub struct GearedEngine {
     pub efficiency: f64,
     pub rev_limit_rpm: f64,
     pub idle_rpm: f64,
+    /// Throttle plate position the ETC holds at idle, 0..1.
+    pub idle_throttle_frac: f64,
     pub shift_time_s: f64,
     pub crank_inertia_kg_m2: f64,
     pub gearbox_inertia_kg_m2: f64,
@@ -248,7 +250,8 @@ impl GearedEngine {
             final_drive: 3.0,
             efficiency: 0.85,
             rev_limit_rpm: 14_500.0,
-            idle_rpm: 1600.0,
+            idle_rpm: 2000.0,
+            idle_throttle_frac: 0.14,
             shift_time_s: 0.1,
             // Split at the primary, because that is where the clutch sits on a
             // CBR600RR: the crank turns primary×gear×final, everything
@@ -280,8 +283,16 @@ impl GearedEngine {
         if rpm <= first.rpm {
             // Below the sweep, fall away toward a plausible idle torque rather
             // than holding 61 N·m down to zero rpm.
+            // The 0.56 floor is pinned by the measured idle point, not
+            // guessed: the engine idles at 2000 rpm with the throttle plate at
+            // 14%, so at 2000 rpm a 14% opening must exactly balance friction.
+            // Solving `drag / (wot + drag) = 0.14` with drag = 5.54 N.m gives
+            // wot(2000) = 34 N.m, which is 0.56 of the 61 N.m peak -- and lands
+            // squarely in the 55-70% of peak a naturally aspirated four
+            // normally makes at 2000 rpm. The previous 0.35 was invented and
+            // could not sustain an idle at any plate opening.
             let f = ((rpm - self.idle_rpm) / (first.rpm - self.idle_rpm)).max(0.0).min(1.0);
-            return first.torque_nm * (0.35 + 0.65 * f);
+            return first.torque_nm * (0.56 + 0.44 * f);
         }
         let last = p[p.len() - 1];
         if rpm >= last.rpm {
@@ -322,6 +333,52 @@ impl GearedEngine {
         self.fmep_bar(rpm) * 1e5 * self.displacement_m3 / (4.0 * core::f64::consts::PI)
     }
 
+    /// Throttle plate position, 0..1, for a driver demand.
+    ///
+    /// The plate does not fully close at idle: the ETC holds it open a little
+    /// to keep the engine alive, and on SDM26 that idle position is 14%. The
+    /// floor fades out as revs rise, because a real ETC *does* close on the
+    /// overrun -- that is what engine braking is, and holding 14% all the way
+    /// up the range would delete most of it.
+    pub fn plate_position(&self, rpm: f64, demand: f64) -> f64 {
+        let nominal = self.idle_throttle_frac;
+        if nominal <= 0.0 {
+            return demand;
+        }
+
+        // Proportional idle-speed control, which is what an ETC idle circuit
+        // actually is. A fixed opening is not enough: below idle speed the
+        // wide-open torque curve is flat and so is friction, so a fixed plate
+        // makes net torque very nearly zero at EVERY sub-idle rpm -- a neutral
+        // equilibrium rather than a stable one, and the engine settles wherever
+        // it happens to be. The error term supplies the restoring force, and at
+        // the target the commanded opening is exactly the measured 14%.
+        let err = (self.idle_rpm - rpm) / self.idle_rpm;
+        let commanded = (nominal * (1.0 + 3.0 * err)).max(0.0);
+
+        // Above idle the control backs out entirely: a real ETC closes on the
+        // overrun, and that is what engine braking is.
+        let fade_top = self.idle_rpm * 1.6;
+        let scale = if rpm <= self.idle_rpm {
+            1.0
+        } else {
+            ((fade_top - rpm) / (fade_top - self.idle_rpm)).max(0.0)
+        };
+
+        demand.max(commanded.min(nominal * 3.0) * scale)
+    }
+
+    /// Indicated crankshaft torque, N.m -- the work combustion does, before
+    /// friction is subtracted.
+    ///
+    /// This is what the engine sound model wants: it solves its heat release to
+    /// reproduce this much work per cycle. Net torque is the wrong input, since
+    /// an engine idling at zero net torque is still burning fuel and still
+    /// making noise.
+    pub fn indicated_torque(&self, rpm: f64, demand: f64) -> f64 {
+        self.plate_position(rpm, demand) * (self.wot_torque(rpm) + self.motoring_torque(rpm))
+    }
+
     fn engine_torque(&mut self, rpm: f64, throttle: f64) -> f64 {
         if self.shift_timer > 0.0 {
             return -self.motoring_torque(rpm) * 0.5; // ignition cut
@@ -337,10 +394,13 @@ impl GearedEngine {
         }
         let wot = self.wot_torque(rpm);
         let drag = self.motoring_torque(rpm);
-        let mut t = throttle * (wot + drag) - drag;
-        if rpm < self.idle_rpm {
-            t += (self.idle_rpm - rpm) * 0.02; // idle air control
-        }
+        // The idle plate floor replaces what used to be an ad-hoc torque added
+        // below idle speed. Modelling it as a plate position is both closer to
+        // what the ETC does and self-correcting: the engine settles wherever
+        // that opening balances friction, which for SDM26 measures out at
+        // 2005 rpm against a real idle of about 2000.
+        let plate = self.plate_position(rpm, throttle);
+        let t = plate * (wot + drag) - drag;
         t
     }
 
@@ -351,8 +411,12 @@ impl GearedEngine {
         if speed > 4.0 {
             return self.clutch_capacity_nm;
         }
-        let launch = 0.12 + 0.88 * (throttle * 1.15).min(1.0);
-        self.clutch_capacity_nm * launch.max(0.1)
+        // Below walking pace the clutch is being managed, and with the driver
+        // off the pedal it is fully in. A floor of 0.1 meant it always carried
+        // about 26 N.m -- several times what the engine makes at idle -- so a
+        // stationary car dragged its own engine down and could never idle. A
+        // real FSAE car does not creep; you slip the clutch.
+        self.clutch_capacity_nm * (throttle * 1.15).min(1.0)
     }
 
     /// Lowest rpm above which the next gear already makes more wheel force.
@@ -414,10 +478,17 @@ impl PowertrainModel for GearedEngine {
         let slip = omega_e - clutch_side;
         let te = self.engine_torque(self.engine_rpm, throttle);
 
-        let lockable = cap > 0.0 && slip.abs() < 8.0;
+        // A clutch cannot be locked below idle speed. That is not a detail -- it
+        // is the reason you slip a clutch pulling away, and without it the
+        // model locked at a standstill and pinned the engine to a stall-guard
+        // floor instead of letting it idle.
+        let lockable =
+            cap > 0.0 && slip.abs() < 8.0 && clutch_side * RADS_TO_RPM >= self.idle_rpm * 0.95;
         if lockable && te.abs() <= cap {
             self.slipping = false;
-            self.engine_rpm = (clutch_side * RADS_TO_RPM).max(self.idle_rpm * 0.6);
+            // Floor at idle, not below it: a running engine cannot be dragged
+            // under its governed idle speed -- the clutch gives up first.
+            self.engine_rpm = (clutch_side * RADS_TO_RPM).max(self.idle_rpm);
             let n_gbox = n / self.primary;
             return DriveOutput {
                 wheel_torque_nm: te * n * self.efficiency,
