@@ -27,7 +27,7 @@
 //!    cannot be skipped: the wheels have to be separate nodes with known names
 //!    or they cannot rotate or steer, and the steering wheel has to be separate
 //!    or it cannot turn.
-//! 5. **Orient it**: +X forward, +Y up, +Z to the left, and put the origin at
+//! 5. **Orient it**: +X forward, +Y up, **+Z to the RIGHT**, and put the origin at
 //!    the **centre of gravity projected onto the ground** -- X = 0 at the CG,
 //!    Y = 0 at the ground plane. For SDM26 that puts the front axle at
 //!    x = +0.788 and the rear at x = -0.742. This matches what both builds
@@ -36,9 +36,18 @@
 //!    mistake with the least visible symptom: it looks fine standing still and
 //!    pivots about the wrong place the moment the car turns.
 //!
-//!    Run `python ../../fsae-sim/tools/check_car_glb.py your.glb` before
-//!    trusting an export. It checks the frame, the scale, the node names and
-//!    the hub positions against the vehicle parameters, and says what to change.
+//!    +Z right is what `carmesh.js` uses -- it puts FL at z = -track/2 -- and it
+//!    is the only choice that makes the triad right-handed, since
+//!    forward x up = right. Backwards mirrors the car, which on a symmetric
+//!    model is invisible.
+//!
+//!    Run `node ../../fsae-sim/tools/check_car_glb.mjs your.glb` before trusting
+//!    an export.
+//!
+//!    NOTE: unlike the WebGL build, this one does NOT solve the frame from the
+//!    wheel hubs -- it uses the glTF node transforms as they are, so a model for
+//!    Bevy has to be in the frame described above. Porting the fit from
+//!    `glbcar.js` is worthwhile and has not been done.
 //! 6. **Export .glb** (binary glTF, textures embedded) to `assets/car.glb`.
 //!
 //! Scale is metres. A model exported in millimetres arrives a thousand times
