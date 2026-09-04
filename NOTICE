@@ -1,0 +1,17 @@
+fsae-sim
+Copyright (c) 2026 Daniel Germaine
+
+This product includes software adapted from engine-sim.
+
+  ange-yaghi/engine-sim
+  https://github.com/ange-yaghi/engine-sim
+  Copyright (c) Ange Yaghi
+  MIT License
+
+The engine sound model in native/crates/engine-audio (the reference
+implementation) and sim/src/audio/engineAudio.js (a port of it) follows the
+approach of that project: cylinder pressure from a Wiebe heat-release law
+driving a digital waveguide exhaust, through a synthesiser chain of jitter, DC
+removal, differentiation, noise, convolution and levelling.
+
+No audio recordings are used or distributed. All sound is generated.
