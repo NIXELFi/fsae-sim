@@ -1,0 +1,318 @@
+// Transient bicycle model.
+//
+// Twelve integrated states, semi-implicit at a fixed 500 Hz:
+//
+//   u, v      body-frame longitudinal / lateral velocity   (m/s)      2
+//   r         yaw rate                                     (rad/s)    1
+//   wF, wR    front / rear axle wheel speed                (rad/s)    2
+//   aF, aR    relaxation-lagged slip angles                (rad)      2
+//   delta     road-wheel steer angle                       (rad)      1
+//   X, Y, psi global pose                                  (m, m, rad) 3
+//   plus the crankshaft speed carried by Powertrain                   1
+//
+// Mechanically that is 3 chassis degrees of freedom (surge, sway, yaw), 2 wheel
+// rotational DOF, and 1 driveline DOF that only exists while the clutch slips.
+// Heave, pitch and roll are NOT degrees of freedom here -- they are applied as
+// deg/g gradients, so there is no ride model.
+//
+// "Transient" is meant literally and shows up in four places:
+//
+//   1. The lateral equation keeps the m*u*r term, so the car has a real yaw
+//      response with overshoot rather than a steady-state cornering balance.
+//   2. Wheel speeds are states, so slip ratio is dynamic -- you can spin the
+//      rears up and you can lock a wheel under braking.
+//   3. Slip angles pass through a relaxation-length lag, so tyre force builds
+//      over roughly the first third of a metre of travel after a steer input.
+//   4. Load transfer is fed by the previous step's measured accelerations, so
+//      it settles rather than teleporting.
+//
+// The bicycle model lumps each axle into one tyre, but grip is still computed
+// from the LEFT/RIGHT load split: `axleMu` derates each axle by how much
+// lateral transfer it is carrying, using the SDM26 roll-stiffness distribution.
+// That keeps the balance sensitive to the ARB setting even though there are
+// only two contact patches in the equations.
+
+import { lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad } from "./params.js";
+import { axleMu, tyreForces } from "./tire.js";
+
+const G = 9.81;
+const SUBSTEP = 1 / 500;
+
+export class BicycleModel {
+  constructor(params, powertrain) {
+    this.p = params;
+    this.pt = powertrain;
+
+    this.refresh();
+    this.reset(0, 0, 0);
+  }
+
+  /**
+   * Recompute everything derived from the parameters.
+   *
+   * Called every substep rather than once in the constructor, because the
+   * parameters are live: mass, wheelbase, unsprung and the axle inertias can
+   * all be edited while the car is moving. Caching these once meant a slider
+   * appeared to do nothing. It is half a dozen divisions at 500 Hz.
+   */
+  refresh() {
+    const p = this.p;
+    this.a = lengthToFrontAxle(p);   // CG -> front axle
+    this.b = lengthToRearAxle(p);    // CG -> rear axle
+    this.Fz0 = nominalTyreLoad(p);
+    this.mSprung = p.massKg - 2 * (p.unsprungFrontKg + p.unsprungRearKg);
+    this.IwF = 2 * p.wheelInertiaFrontKgM2;
+    this.IwR = 2 * p.wheelInertiaRearKgM2;
+  }
+
+  /**
+   * Steering servo limits from the active control profile, or null to derive
+   * them from the vehicle parameters. Configuration, so it survives a reset.
+   * @type {{maxRateDegPerS:number, accelDegPerS2:number, lagS:number}|null}
+   */
+  steeringServo = null;
+
+  reset(X, Y, psi) {
+    this.u = 0; this.v = 0; this.r = 0;
+    this.X = X; this.Y = Y; this.psi = psi;
+    this.wF = 0; this.wR = 0;
+    this.aF = 0; this.aR = 0;
+    this.delta = 0;
+    /**
+     * Steering velocity, deg/s at the road wheel -- the servo's state.
+     *
+     * Reset here and not just in the constructor: `respawn` goes through
+     * `reset`, and leaving a stale steering velocity behind is the same shape
+     * of bug as leaving a stale crank speed behind, which put a 900 rad/s
+     * clutch mismatch into the first substep after every respawn.
+     *
+     * `steeringServo` deliberately does NOT live here. It is configuration,
+     * not state -- resetting it would silently drop the driver's control
+     * profile every time they respawned.
+     */
+    this.steerRateDegPerS = 0;
+    this.ax = 0; this.ay = 0;
+    this.pt.gear = 0;
+    this.pt.engineRpm = this.p.idleRpm;
+    this.pt.shiftTimer = 0;
+    this.pt.pendingGear = null;
+    this.telemetry = this.blankTelemetry();
+  }
+
+  blankTelemetry() {
+    return {
+      speed: 0, axG: 0, ayG: 0, bodySlipDeg: 0, yawRateDegS: 0,
+      FzF: 0, FzR: 0, dFzLatF: 0, dFzLatR: 0,
+      slipF: 0, slipR: 0, kappaF: 0, kappaR: 0,
+      utilF: 0, utilR: 0, balance: 0,
+      downforceN: 0, dragN: 0, driveForceN: 0,
+      rollDeg: 0, pitchDeg: 0,
+    };
+  }
+
+  get speed() { return Math.hypot(this.u, this.v); }
+
+  /**
+   * Advance by `dt` seconds using fixed 500 Hz substeps.
+   * @param {number} dt
+   * @param {{steer:number, throttle:number, brake:number}} input
+   *        steer -1..1 (left positive), throttle/brake 0..1
+   */
+  step(dt, input) {
+    let remaining = Math.min(dt, 0.1); // never simulate more than 100 ms of catch-up
+    while (remaining > 1e-6) {
+      const h = Math.min(SUBSTEP, remaining);
+      this.substep(h, input);
+      remaining -= h;
+    }
+  }
+
+  substep(dt, input) {
+    const p = this.p;
+    this.refresh();
+
+    // ---- steering: a rate- and acceleration-limited servo -------------------
+    // Rate limit and first-order lag were always here. The acceleration limit
+    // is new, and it is what lets a control device have its own steering
+    // character: a keyboard key is a step input, and without a bound on how
+    // fast the steering *speed* can change, a step in position becomes a step
+    // in velocity, which no hand and no steering motor can produce.
+    //
+    // `steeringServo` is set by the game from the active control profile. The
+    // default derived from the vehicle parameters uses an effectively infinite
+    // acceleration, so with no profile attached this reduces exactly to the
+    // previous behaviour and the validated numbers do not move.
+    const cfg = this.steeringServo ?? {
+      maxRateDegPerS: p.steerRateDegS,
+      accelDegPerS2: 1e9,
+      lagS: p.steerLagS,
+    };
+    const targetDeg = clamp(input.steer, -1, 1) * p.maxSteerDeg;
+    const angleDeg = (this.delta * 180) / Math.PI;
+
+    let wantRate = (targetDeg - angleDeg) / Math.max(cfg.lagS, 1e-4);
+    wantRate = clamp(wantRate, -cfg.maxRateDegPerS, cfg.maxRateDegPerS);
+    const maxDelta = cfg.accelDegPerS2 * dt;
+    this.steerRateDegPerS += clamp(wantRate - this.steerRateDegPerS, -maxDelta, maxDelta);
+
+    let nextDeg = angleDeg + this.steerRateDegPerS * dt;
+    // Do not coast past the target: overshoot here is a discretisation
+    // artefact, not modelled inertia.
+    const err = targetDeg - angleDeg;
+    if ((err > 0 && nextDeg > targetDeg) || (err < 0 && nextDeg < targetDeg)) {
+      nextDeg = targetDeg;
+      this.steerRateDegPerS = 0;
+    }
+    this.delta = (nextDeg * Math.PI) / 180;
+    const d = this.delta;
+
+    const u = this.u, v = this.v, r = this.r;
+    const V = Math.hypot(u, v);
+    const uSafe = Math.max(Math.abs(u), 0.6);
+
+    // ---- aero (2026 CFD map) ----
+    const q = 0.5 * p.airDensityKgM3 * V * V;
+    const downforce = q * p.claM2;
+    const drag = q * p.cdaM2;
+
+    // ---- normal loads: static + longitudinal transfer + aero ----
+    const L = p.wheelbaseM;
+    const W = p.massKg * G;
+    let FzF = (W * this.b) / L - (p.massKg * this.ax * p.cgHeightM) / L + downforce * p.aeroFrontFrac;
+    let FzR = (W * this.a) / L + (p.massKg * this.ax * p.cgHeightM) / L + downforce * (1 - p.aeroFrontFrac);
+    FzF = Math.max(0, FzF);
+    FzR = Math.max(0, FzR);
+
+    // ---- lateral transfer per axle: elastic (roll stiffness) + geometric
+    //      (roll centre) + unsprung. Only its MAGNITUDE matters here, because
+    //      it is used to derate the axle's grip, not to steer the car.
+    const tF = p.trackFrontM, tR = p.trackRearM;
+    const msF = this.mSprung * p.weightDistFront;
+    const msR = this.mSprung * (1 - p.weightDistFront);
+    const unsprungF = 2 * p.unsprungFrontKg;
+    const unsprungR = 2 * p.unsprungRearKg;
+    const ay = this.ay;
+    const dFzF =
+      (this.mSprung * ay * p.roll.hRollArmM * p.roll.rsdFront) / tF +
+      (msF * ay * p.roll.rcFrontM) / tF +
+      (unsprungF * ay * p.tireRadiusM) / tF;
+    const dFzR =
+      (this.mSprung * ay * p.roll.hRollArmM * (1 - p.roll.rsdFront)) / tR +
+      (msR * ay * p.roll.rcRearM) / tR +
+      (unsprungR * ay * p.tireRadiusM) / tR;
+
+    const muYF = axleMu(p.muLat, FzF, dFzF, this.Fz0, p.tireLoadSensitivity);
+    const muYR = axleMu(p.muLat, FzR, dFzR, this.Fz0, p.tireLoadSensitivity);
+    const muXF = axleMu(p.muLong, FzF, dFzF, this.Fz0, p.tireLoadSensitivity);
+    const muXR = axleMu(p.muLong, FzR, dFzR, this.Fz0, p.tireLoadSensitivity);
+
+    // ---- slip angles with relaxation-length lag ----
+    const aFraw = d - Math.atan2(v + this.a * r, uSafe);
+    const aRraw = -Math.atan2(v - this.b * r, uSafe);
+    const relaxRate = Math.min(Math.abs(u) / p.relaxLengthM, 1 / dt); // stable at rest
+    this.aF += (aFraw - this.aF) * Math.min(1, relaxRate * dt);
+    this.aR += (aRraw - this.aR) * Math.min(1, relaxRate * dt);
+
+    // ---- slip ratios from the wheel-speed states ----
+    const kDen = Math.max(Math.abs(u), 2.0);
+    const kF = (this.wF * p.tireRadiusM - u) / kDen;
+    const kR = (this.wR * p.tireRadiusM - u) / kDen;
+
+    const fF = tyreForces(this.aF, kF, FzF, muYF, muXF);
+    const fR = tyreForces(this.aR, kR, FzR, muYR, muXR);
+
+    // ---- resolve front tyre forces through the steer angle ----
+    const cd = Math.cos(d), sd = Math.sin(d);
+    const FxFb = fF.fx * cd - fF.fy * sd;
+    const FyFb = fF.fx * sd + fF.fy * cd;
+    const FxRb = fR.fx;
+    const FyRb = fR.fy;
+
+    const rollRes = p.crr * (FzF + FzR) * Math.sign(u || 1);
+
+    // ---- rigid-body equations of motion ----
+    const du = (FxFb + FxRb - drag - rollRes) / p.massKg + v * r;
+    const dv = (FyFb + FyRb) / p.massKg - u * r;
+    const dr = (this.a * FyFb - this.b * FyRb) / p.izzKgM2;
+
+    // ---- driveline ----
+    const drive = this.pt.step(dt, input.throttle, this.wR, V);
+
+    // ---- wheel dynamics; brake torque cannot drive a wheel backwards ----
+    const brakeTotal = clamp(input.brake, 0, 1) * p.brakeTorqueMaxNm;
+    const tbF = brakeTotal * p.brakeBiasFront;
+    const tbR = brakeTotal * (1 - p.brakeBiasFront);
+
+    const IwR = this.IwR + drive.addedWheelInertia;
+    let dwF = (-fF.fx * p.tireRadiusM - Math.sign(this.wF) * tbF) / this.IwF;
+    let dwR = (drive.wheelTorqueNm - fR.fx * p.tireRadiusM - Math.sign(this.wR) * tbR) / IwR;
+
+    // Clamp so braking stops a wheel instead of reversing it inside one step.
+    if (this.wF > 0 && this.wF + dwF * dt < 0 && tbF > 0) dwF = -this.wF / dt;
+    if (this.wR > 0 && this.wR + dwR * dt < 0 && tbR > 0 && drive.wheelTorqueNm <= 0) {
+      dwR = -this.wR / dt;
+    }
+
+    // ---- integrate ----
+    this.u += du * dt;
+    this.v += dv * dt;
+    this.r += dr * dt;
+    this.wF = Math.max(0, this.wF + dwF * dt);
+    this.wR = Math.max(0, this.wR + dwR * dt);
+
+    // The measured accelerations that feed next step's load transfer.
+    this.ax = du - v * r;
+    this.ay = dv + u * r;
+
+    // ---- come to a genuine stop rather than creeping on numerical noise ----
+    if (Math.abs(this.u) < 0.25 && input.throttle < 0.05 && this.speed < 0.4) {
+      this.u = 0; this.v = 0; this.r = 0; this.wF = 0; this.wR = 0;
+      this.ax = 0; this.ay = 0;
+    }
+
+    // Reverse is not a thing here -- no reverse gear, and the tyre model is
+    // not valid backwards.
+    if (this.u < 0) this.u = 0;
+
+    this.X += (this.u * Math.cos(this.psi) - this.v * Math.sin(this.psi)) * dt;
+    this.Y += (this.u * Math.sin(this.psi) + this.v * Math.cos(this.psi)) * dt;
+    this.psi += this.r * dt;
+
+    // ---- telemetry ----
+    const t = this.telemetry;
+    t.speed = this.speed;
+    t.axG = this.ax / G;
+    t.ayG = this.ay / G;
+    t.bodySlipDeg = (Math.atan2(this.v, Math.max(this.u, 0.1)) * 180) / Math.PI;
+    t.yawRateDegS = (this.r * 180) / Math.PI;
+    t.FzF = FzF; t.FzR = FzR;
+    t.dFzLatF = dFzF; t.dFzLatR = dFzR;
+    t.slipF = (this.aF * 180) / Math.PI;
+    t.slipR = (this.aR * 180) / Math.PI;
+    t.kappaF = kF; t.kappaR = kR;
+    t.utilF = fF.utilisation; t.utilR = fR.utilisation;
+    t.balance = fR.utilisation - fF.utilisation; // >0 rear-limited (oversteer)
+    t.downforceN = downforce;
+    t.dragN = drag;
+    t.driveForceN = FxRb;
+    t.steerDeg = (d * 180) / Math.PI;
+    t.rollDeg = t.ayG * p.rollGradientDegG;   // + = leaning right (left turn)
+    t.pitchDeg = t.axG * p.pitchGradientDegG; // + = nose up (braking dives)
+    t.locked = drive.locked;
+  }
+
+  /**
+   * Put the car back on the road at a pose. `reset` leaves the engine at idle
+   * in first, which is right for a standing start; if we are placing the car
+   * at speed the crank has to come with it, or the clutch grabs against a
+   * rolling wheel and brakes the rear axle to a stop on the first substep.
+   */
+  respawn(X, Y, psi, speed = 0) {
+    this.reset(X, Y, psi);
+    this.u = speed;
+    this.wF = this.wR = speed / this.p.tireRadiusM;
+    if (speed > 0) this.pt.syncToWheel(this.wR);
+  }
+}
+
+function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }

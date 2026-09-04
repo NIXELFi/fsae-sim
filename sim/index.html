@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDM26 Driver-in-Loop &middot; FSAE Michigan 2026</title>
+<style>
+  :root {
+    --gold: #FFC627;
+    --maroon: #8C1D40;
+    --bg: #0a0c11;
+    --panel: rgba(16, 20, 28, 0.92);
+    --line: rgba(255, 255, 255, 0.12);
+    --dim: rgba(255, 255, 255, 0.58);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: var(--bg);
+    color: #fff; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  /* Native window: behave like a game, not a web page. Inputs stay selectable
+     so the throttle-map table can still be typed into. */
+  body.desktop { user-select: none; -webkit-user-select: none; cursor: default; }
+  body.desktop input { user-select: text; -webkit-user-select: text; }
+  #scene, #hud {
+    position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  }
+  #hud { pointer-events: none; }
+  #scene:focus { outline: none; }
+
+  #menu {
+    position: absolute; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(1200px 700px at 50% 20%, #1a2130 0%, #07090d 70%);
+  }
+  #menu[hidden] { display: none; }
+  .card {
+    width: min(1120px, 95vw); max-height: 94vh; overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid var(--line); border-radius: 16px;
+    padding: 28px 30px 24px; box-shadow: 0 30px 90px rgba(0,0,0,0.6);
+  }
+  .brand { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 25px; margin: 0; letter-spacing: -0.01em; }
+  .tag {
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: #0a0c11; background: var(--gold); padding: 3px 8px; border-radius: 4px;
+    font-weight: 700;
+  }
+  .sub { color: var(--dim); font-size: 13.5px; margin: 10px 0 20px; line-height: 1.55; }
+
+  .row { display: flex; gap: 22px; flex-wrap: wrap; }
+  .col { flex: 1 1 300px; min-width: 260px; }
+  label.field { display: block; font-size: 11px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--dim); margin-bottom: 7px; }
+  select {
+    width: 100%; padding: 10px 12px; border-radius: 9px; font-size: 14px;
+    background: #11161f; color: #fff; border: 1px solid var(--line);
+  }
+  .checks { display: grid; gap: 9px; margin-top: 4px; }
+  .check { display: flex; align-items: center; gap: 9px; font-size: 13.5px; color: #e8ecf3; }
+  .check input { accent-color: var(--gold); width: 15px; height: 15px; }
+  .check small { color: var(--dim); font-size: 11.5px; }
+
+  #specs { margin: 18px 0 4px; display: grid; gap: 5px; font-size: 12px; }
+  #specs div { display: flex; gap: 10px; }
+  #specs span { color: var(--dim); min-width: 58px; }
+  #specs b { font-weight: 500; color: #dbe2ec; }
+
+  .controls {
+    margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 7px 20px;
+    font-size: 12px; color: var(--dim);
+  }
+  .controls b { color: #fff; font-weight: 600; }
+
+  .actions { display: flex; align-items: center; gap: 14px; margin-top: 20px; }
+  button#start {
+    background: var(--gold); color: #0a0c11; border: 0; font-weight: 700;
+    font-size: 15px; padding: 12px 26px; border-radius: 10px; cursor: pointer;
+  }
+  button#start:disabled { opacity: 0.45; cursor: default; }
+  button.secondary {
+    background: #11161f; color: #e8ecf3; border: 1px solid var(--line);
+    font-size: 13.5px; padding: 12px 20px; border-radius: 10px; cursor: pointer;
+  }
+  button.secondary:hover { border-color: var(--gold); }
+  #padStatus {
+    font-size: 12px; color: var(--dim);
+    border: 1px solid var(--line); padding: 6px 11px; border-radius: 20px;
+  }
+  #padStatus.ok { color: #3ddc84; border-color: rgba(61,220,132,0.4); }
+  #loadNote { font-size: 12px; color: var(--dim); }
+  #loadNote.error { color: #ff6b6b; }
+
+  /* ---------------- vehicle model / parameter provenance ---------------- */
+  #vehicle { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 18px; }
+  .veh-head { display: flex; gap: 26px; flex-wrap: wrap; align-items: flex-start; }
+  .veh-head > div:first-child { flex: 1 1 420px; }
+  .veh-head h3 { margin: 0 0 6px; font-size: 16px; }
+  .veh-sum { margin: 0 0 8px; font-size: 12.5px; color: var(--dim); line-height: 1.55; max-width: 68ch; }
+  .veh-int { margin: 0; font-size: 11.5px; color: var(--dim); }
+  .veh-int b { color: #c8d0dc; font-weight: 600; margin-right: 6px; }
+
+  .veh-tally { flex: 1 1 300px; min-width: 280px; }
+  .veh-tally .bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; }
+  .veh-tally .seg { display: block; }
+  .seg-team { background: #3ddc84; }
+  .seg-cfd { background: #4a9eff; }
+  .seg-calibrated { background: var(--gold); }
+  .seg-estimate { background: #ff8f4a; }
+  .veh-tally p { font-size: 11.5px; color: var(--dim); line-height: 1.6; margin: 9px 0 0; }
+  .veh-tally b { color: #e8ecf3; font-weight: 600; }
+  .veh-tally b.warn { color: #ff8f4a; }
+
+  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 8px 18px; margin: 16px 0 4px; }
+  .legend-item { display: flex; gap: 9px; align-items: flex-start; font-size: 11px; }
+  .legend-item b { display: block; color: #dbe2ec; font-weight: 600; font-size: 11.5px; }
+  .legend-item span { color: var(--dim); line-height: 1.45; }
+
+  .prov {
+    display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.05em;
+    padding: 2px 5px; border-radius: 4px; font-family: ui-monospace, monospace;
+    cursor: help; white-space: nowrap;
+  }
+  .prov-team { background: rgba(61,220,132,0.18); color: #6ff0ab; border: 1px solid rgba(61,220,132,0.4); }
+  .prov-cfd { background: rgba(74,158,255,0.18); color: #86c2ff; border: 1px solid rgba(74,158,255,0.4); }
+  .prov-calibrated { background: rgba(255,198,39,0.16); color: var(--gold); border: 1px solid rgba(255,198,39,0.4); }
+  .prov-estimate { background: rgba(255,143,74,0.18); color: #ffab77; border: 1px solid rgba(255,143,74,0.45); }
+
+  .veh-block { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; }
+  .veh-block > summary {
+    cursor: pointer; padding: 10px 14px; font-size: 11px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--dim); user-select: none;
+  }
+  .veh-block > summary:hover { color: #fff; }
+  .veh-block[open] > summary { border-bottom: 1px solid var(--line); }
+
+  .dof-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 14px 22px; padding: 14px; }
+  .dof-group h5, .dof-extra h5, .pgroup h5 {
+    margin: 0 0 6px; font-size: 11.5px; color: var(--gold); font-weight: 600;
+  }
+  .dof-group ul { margin: 0 0 6px; padding-left: 0; list-style: none; }
+  .dof-group li { font-size: 11.5px; color: #cdd5e0; margin-bottom: 2px; }
+  .dof-group code {
+    color: #fff; font-family: ui-monospace, monospace; font-size: 11px;
+    background: rgba(255,255,255,0.07); padding: 1px 4px; border-radius: 3px; margin-right: 5px;
+  }
+  .dof-group em { color: var(--dim); font-style: normal; font-size: 10.5px; }
+  .dof-group p { margin: 0; font-size: 11px; color: var(--dim); line-height: 1.5; }
+  .dof-extra { padding: 0 14px 14px; }
+  .dof-extra ul { margin: 0 0 12px; padding-left: 16px; }
+  .dof-extra li { font-size: 11.5px; color: var(--dim); line-height: 1.6; }
+  .dof-extra .notmod b { color: #cdd5e0; font-weight: 600; }
+
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+    gap: 8px 26px; padding: 14px; }
+  .pgroup table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  .pgroup tr { border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .pgroup tr:hover { background: rgba(255,255,255,0.03); }
+  .pgroup td { padding: 4px 0; font-size: 11.5px; vertical-align: baseline; }
+  .p-label { color: var(--dim); }
+  .p-info {
+    display: inline-block; margin-left: 5px; width: 11px; height: 11px; line-height: 11px;
+    text-align: center; border-radius: 50%; font-style: normal; font-size: 8px;
+    background: rgba(255,255,255,0.13); color: #cdd5e0; cursor: help;
+  }
+  .p-value { text-align: right; color: #fff; font-family: ui-monospace, monospace;
+    white-space: nowrap; padding-left: 10px; }
+  .p-value span { color: var(--dim); margin-left: 4px; font-size: 10px; }
+  .p-prov { text-align: right; width: 1%; padding-left: 8px; }
+  tr.p-estimate .p-label { color: #d6b39a; }
+
+  /* live parameter editors */
+  tr.p-live { border-bottom: 0; }
+  tr.p-editrow td { padding: 0 0 6px; }
+  .p-edit { display: grid; grid-template-columns: 1fr 66px 22px; gap: 7px; align-items: center; }
+  .p-edit input[type=range] {
+    -webkit-appearance: none; appearance: none; height: 3px; border-radius: 2px;
+    background: rgba(255,255,255,0.16); outline: none; cursor: pointer;
+  }
+  .p-edit input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+    background: #8b93a1; cursor: pointer; border: 0;
+  }
+  .p-edit.changed input[type=range]::-webkit-slider-thumb { background: var(--gold); }
+  .p-edit.changed input[type=range] { background: rgba(255,198,39,0.28); }
+  .p-edit input[type=number] {
+    background: #11161f; color: #e8ecf3; border: 1px solid var(--line);
+    border-radius: 5px; padding: 3px 5px; font-size: 11px;
+    font-family: ui-monospace, monospace; width: 100%;
+  }
+  .p-edit.changed input[type=number] { border-color: rgba(255,198,39,0.5); color: var(--gold); }
+  .p-reset {
+    background: transparent; border: 1px solid var(--line); border-radius: 5px;
+    color: var(--dim); cursor: pointer; font-size: 11px; line-height: 1; padding: 3px 0;
+  }
+  .p-reset:hover { color: var(--gold); border-color: var(--gold); }
+  #paramActions { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+  #paramActions .note { font-size: 11.5px; color: var(--dim); }
+
+  /* ---------------- ETC throttle-map editor ---------------- */
+  #etcOverlay {
+    position: absolute; inset: 0; z-index: 20; display: flex;
+    align-items: center; justify-content: center;
+    background: rgba(4, 6, 10, 0.78); backdrop-filter: blur(3px);
+  }
+  #etcOverlay[hidden] { display: none; }
+  .etc-card {
+    width: min(1000px, 95vw); max-height: 92vh; overflow: auto;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 16px; padding: 22px 24px;
+    box-shadow: 0 30px 90px rgba(0,0,0,0.6);
+  }
+  .etc-head { display: flex; gap: 18px; align-items: flex-start; justify-content: space-between; }
+  .etc-head h2 { margin: 0 0 6px; font-size: 19px; }
+  .etc-head p { margin: 0; font-size: 12.5px; color: var(--dim); max-width: 62ch; line-height: 1.5; }
+  .etc-close {
+    background: var(--gold); color: #0a0c11; border: 0; font-weight: 700;
+    padding: 9px 20px; border-radius: 9px; cursor: pointer; font-size: 13.5px;
+  }
+  .etc-body { display: flex; gap: 26px; margin-top: 16px; flex-wrap: wrap; }
+  .etc-plotwrap { flex: 1 1 440px; min-width: 340px; }
+  .etc-side { flex: 0 1 300px; min-width: 260px; }
+
+  .etc-plot { width: 100%; height: auto; display: block; touch-action: none; cursor: crosshair; }
+  .etc-bg { fill: rgba(255,255,255,0.028); }
+  .etc-grid { stroke: rgba(255,255,255,0.10); stroke-width: 0.7; }
+  .etc-tick { fill: var(--dim); font-size: 8px; text-anchor: middle; font-family: ui-monospace, monospace; }
+  .etc-tick-y { text-anchor: end; }
+  .etc-axis { fill: var(--dim); font-size: 9px; text-anchor: middle; letter-spacing: 0.06em; }
+  .etc-linear { stroke: rgba(255,255,255,0.30); stroke-width: 1; stroke-dasharray: 4 4; }
+  .etc-curve { fill: none; stroke: var(--gold); stroke-width: 2.4; stroke-linejoin: round; }
+  .etc-pt { fill: #12161f; stroke: var(--gold); stroke-width: 2; cursor: grab; }
+  .etc-pt-anchor { stroke: rgba(255,255,255,0.55); }
+  .etc-pt-sel { fill: var(--gold); }
+  .etc-live { fill: #3ddc84; stroke: #0a0c11; stroke-width: 1.2; }
+  .etc-live-line { stroke: rgba(61,220,132,0.45); stroke-width: 1; stroke-dasharray: 3 3; }
+
+  .etc-stats {
+    display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 6px;
+    font-size: 11.5px; color: var(--dim);
+  }
+  .etc-stats b { color: #fff; font-weight: 600; }
+  .etc-stats i { font-style: normal; color: var(--gold); }
+
+  .etc-label {
+    display: block; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--dim); margin: 4px 0 8px;
+  }
+  .etc-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+  .etc-presets button, .etc-actions button {
+    background: #11161f; color: #e8ecf3; border: 1px solid var(--line);
+    padding: 6px 11px; border-radius: 7px; cursor: pointer; font-size: 12px;
+  }
+  .etc-presets button:hover, .etc-actions button:hover { border-color: var(--gold); color: #fff; }
+  .etc-note { font-size: 11.5px; color: var(--dim); line-height: 1.5; margin: 10px 0 14px; min-height: 3em; }
+
+  .etc-table { display: grid; gap: 5px; max-height: 210px; overflow: auto; padding-right: 4px; }
+  .etc-row { display: grid; grid-template-columns: 1fr 16px 1fr 26px; gap: 6px; align-items: center; }
+  .etc-row.sel input { border-color: var(--gold); }
+  .etc-row input {
+    width: 100%; background: #11161f; color: #fff; border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 7px; font-size: 12px; font-family: ui-monospace, monospace;
+  }
+  .etc-row input:disabled { opacity: 0.45; }
+  .etc-arrow { color: var(--dim); font-size: 11px; text-align: center; }
+  .etc-del {
+    background: transparent; color: var(--dim); border: 1px solid var(--line);
+    border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1; padding: 4px 0;
+  }
+  .etc-del:hover:not(:disabled) { color: #ff6b6b; border-color: #ff6b6b; }
+  .etc-del:disabled { opacity: 0.25; cursor: default; }
+  .etc-actions { display: flex; gap: 6px; margin-top: 10px; }
+  .etc-msg { font-size: 11.5px; color: var(--gold); min-height: 1.4em; margin: 10px 0 0; }
+
+  #etcSummary { font-size: 11.5px; color: var(--dim); margin-top: 8px; }
+
+  #pauseHint {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    z-index: 5; font-size: 12px; color: var(--dim); background: rgba(10,13,20,0.8);
+    padding: 7px 14px; border-radius: 20px; border: 1px solid var(--line);
+  }
+</style>
+</head>
+<body>
+  <canvas id="scene" tabindex="0"></canvas>
+  <canvas id="hud"></canvas>
+
+  <div id="pauseHint" hidden>Paused &middot; Menu / Esc to resume &middot; View / Backspace to restart</div>
+
+  <div id="etcOverlay" hidden></div>
+
+  <div id="menu">
+    <div class="card">
+      <div class="brand">
+        <h1>SDM26 Driver-in-Loop</h1>
+        <span class="tag">FSAE Michigan 2026</span>
+      </div>
+      <p class="sub">
+        First-person simulator for Sun Devil Motorsports' SDM26. Transient bicycle
+        model with combined-slip tyres and load-transfer grip derating; powertrain
+        driven by the Helios CFD engine sweep; courses are the traced 2026 Michigan
+        autocross and endurance geometry from the Helios lap sim.
+      </p>
+
+      <div class="row">
+        <div class="col">
+          <label class="field" for="track">Course</label>
+          <select id="track">
+            <option value="autocross">Autocross 2026 &mdash; 685 m, single run</option>
+            <option value="endurance">Endurance 2026 &mdash; 2.12 km, lapped</option>
+            <option value="mis">Michigan International Speedway &mdash; venue, free roam</option>
+          </select>
+          <div id="specs"></div>
+        </div>
+        <div class="col">
+          <label class="field">Driver aids</label>
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="tc">
+              Traction control <small>&mdash; caps rear slip ratio</small></label>
+            <label class="check"><input type="checkbox" id="abs">
+              ABS <small>&mdash; releases on lockup</small></label>
+            <label class="check"><input type="checkbox" id="auto">
+              Automatic gearbox <small>&mdash; shifts on the torque crossover</small></label>
+            <label class="check"><input type="checkbox" id="sound" checked>
+              Engine audio</label>
+          </div>
+
+          <label class="field" for="etcBtn" style="margin-top:16px">Throttle map</label>
+          <button id="etcBtn" class="etc-close" style="background:#11161f;color:#e8ecf3;
+                  border:1px solid var(--line);font-weight:500">Edit ETC pedal map&hellip;</button>
+          <div id="etcSummary"></div>
+        </div>
+      </div>
+
+      <div class="controls" id="cheatsheet">
+        <div><b>RT / RB</b> throttle &middot; upshift</div>
+        <div><b>LT / LB</b> brake &middot; downshift</div>
+        <div><b>Left stick</b> steering</div>
+        <div><b>B</b> recover to course</div>
+        <div><b>X / Y</b> traction control &middot; camera</div>
+        <div><b>View / Menu</b> restart &middot; pause</div>
+        <div><b>Keyboard</b> WASD, Q/E shift, R recover</div>
+        <div><b>C / T / P</b> camera &middot; TC &middot; pause</div>
+        <div><b>M / F11</b> throttle map &middot; fullscreen</div>
+        <div><b>D-pad</b> &#9668;&#9658; pick setup &middot; &#9650;&#9660; adjust 0.1%</div>
+        <div><b>L3 / H</b> back to this screen</div>
+        <div><b>Walkaround</b> drag to orbit &middot; wheel to zoom &middot; double-click for auto</div>
+        <div><b>, . / R F / [ ]</b> orbit &middot; raise &middot; zoom</div>
+      </div>
+
+      <div id="controls"></div>
+
+      <div id="audioLevels"></div>
+
+      <div id="controls"></div>
+
+      <div id="audioLevels"></div>
+
+      <div id="vehicle"></div>
+      <div id="paramActions">
+        <button id="resetParams" class="secondary" style="padding:8px 14px;font-size:12.5px">
+          Reset all parameters</button>
+        <span class="note" id="paramNote">Changes apply immediately and persist.</span>
+        <span class="note" id="cadNote"></span>
+      </div>
+
+      <div class="actions">
+        <button id="start" disabled>Start engine</button>
+        <button id="restartBtn" class="secondary" hidden>Restart run</button>
+        <span id="padStatus">Pad: not detected</span>
+        <span id="loadNote">Loading&hellip;</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
