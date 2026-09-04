@@ -1,5 +1,5 @@
 /target
 **/target
 
-# CAD bodywork for the Bevy build. Same story as fsae-sim/data/car.glb.
+# CAD bodywork for the Bevy build. Same story as sim/data/car.glb.
 /apps/bevy-spike/assets/car.glb

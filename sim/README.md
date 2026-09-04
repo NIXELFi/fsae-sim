@@ -14,7 +14,7 @@ It is a desktop app — a Tauri v2 window with the whole game embedded in the
 executable. No server, no install, nothing to keep running in a terminal.
 
 ```bash
-cargo build --release --manifest-path fsae-sim/src-tauri/Cargo.toml
+cargo build --release --manifest-path sim/src-tauri/Cargo.toml
 ```
 
 That produces `src-tauri/target/release/fsae-sim.exe`. Double-click it.
@@ -29,7 +29,7 @@ The frontend is still plain ES modules and WebGL2 with zero dependencies, so it
 also runs in a browser — and that is the loop to use while working on the game:
 
 ```bash
-python fsae-sim/tools/serve.py
+python sim/tools/serve.py
 ```
 
 The reason matters. `generate_context!` embeds the frontend into the binary at
@@ -403,7 +403,7 @@ Primary length sets the resonance. Exhaust gas temperature changes the speed of
 sound, so the tuned length of the header shifts with load and the note moves on
 the overrun. None of that is scripted.
 
-The same model exists as the `engine-audio` Rust crate in `fsae-sim-rs`. They
+The same model exists as the `engine-audio` Rust crate in `native`. They
 are kept in lockstep the way `sim-core` is — the Rust side emits golden vectors
 and `tools/validate.js` checks this build against them, currently agreeing to
 2e-3 over 512 samples, which is f32-against-f64 rounding and nothing else.
@@ -713,5 +713,5 @@ In the desktop app, open devtools with `cargo run` (a debug build enables them).
 Regenerate the data (needs `helios-dev/` alongside this folder):
 
 ```bash
-python fsae-sim/tools/prepare_data.py
+python sim/tools/prepare_data.py
 ```

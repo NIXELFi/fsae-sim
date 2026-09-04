@@ -5,8 +5,8 @@
 //! still baked into the solver, suspension and aero, and a [`VehicleDefinition`]
 //! that names which implementation of each a given car uses.
 //!
-//! The shape mirrors `fsae-sim/src/vehicle/modules.js` and
-//! `fsae-sim/src/vehicle/library.js` deliberately: the same definition, with
+//! The shape mirrors `sim/src/vehicle/modules.js` and
+//! `sim/src/vehicle/library.js` deliberately: the same definition, with
 //! the same field names, should be readable by both builds. That is why the
 //! module identifiers are strings rather than an enum -- an enum would be
 //! tidier in Rust and would immediately stop matching a JSON file written by

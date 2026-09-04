@@ -1,13 +1,13 @@
-# fsae-sim-rs
+# native — Rust solver and Bevy build
 
 Two things, kept deliberately separate:
 
 - **`crates/sim-core`** — the vehicle dynamics solver as a pure, dependency-free
   Rust crate. Valuable on its own merits and *not* tied to Bevy.
 - **`apps/bevy-spike`** — a throwaway visual spike to answer one question: does
-  Bevy look better than the hand-written WebGL2 renderer in `../fsae-sim`?
+  Bevy look better than the hand-written WebGL2 renderer in `../sim`?
 
-`../fsae-sim` (the Tauri + WebGL2 build) is untouched and still the working app.
+`../sim` (the Tauri + WebGL2 build) is untouched and still the working app.
 
 ```bash
 cargo test -p sim-core --release        # 21 tests, under a second

@@ -12,25 +12,29 @@ hardware plugged in.
 
 ## 1. What exists, and where
 
-Two sibling folders under `Documents/Claude Code/`. They are deliberately
-separate.
+Two directories in one repository, `dgerm17/fsae-sim`. They are deliberately
+separate programs; they are in one repository because the `engine-audio` Rust
+crate is the reference implementation for the JS port and the two are held in
+lockstep by golden vectors, so they have to change in the same commit.
 
-**Both are now git repositories.** They were initialised partway through the
-session that added the engine audio, so neither has an honest "before" commit
-and both baselines say so in their message. `fsae-sim-rs` has two branches:
-`main` carries the shared crates, `bevy-frontend` carries the Bevy app on top.
+Both started as their own repository and were merged in with their history
+intact. Neither has an honest "before" commit -- they were initialised partway
+through the session that added the engine audio -- and both baselines say so in
+their message. Commits made before the merge refer to the old paths, so
+`git log -- src/main.js` reaches them where `git log -- sim/src/main.js` stops
+at the import.
 
-### `fsae-sim/` — the app
+### `sim/` — the app
 
 First-person SDM26 driving simulator. **Tauri v2 desktop app**; the frontend is
 plain ES modules + WebGL2 with **zero dependencies and no build step**.
 
 ```bash
-cargo build --release --manifest-path fsae-sim/src-tauri/Cargo.toml   # -> 6.3 MB exe
-python fsae-sim/tools/serve.py                                        # browser, port 5273
-node fsae-sim/tools/validate.js                                       # physics + ETC map + engine audio
-node fsae-sim/tools/smoke_desktop.mjs                                 # does the EXE boot the game
-python fsae-sim/tools/prepare_data.py                                 # regenerate data/ from helios-dev
+cargo build --release --manifest-path sim/src-tauri/Cargo.toml   # -> 6.3 MB exe
+python sim/tools/serve.py                                        # browser, port 5273
+node sim/tools/validate.js                                       # physics + ETC map + engine audio
+node sim/tools/smoke_desktop.mjs                                 # does the EXE boot the game
+python sim/tools/prepare_data.py                                 # regenerate data/ from helios-dev
 ```
 
 The exe lands at `src-tauri/target/release/fsae-sim.exe`, and there is a Desktop
@@ -39,7 +43,7 @@ shortcut (**SDM26 Driver-in-Loop**) pointing at it.
 **Iterate in the browser, not the exe.** `generate_context!` embeds the frontend
 at compile time, so any `.js` edit forces a recompile and relink (~60-75 s).
 
-### `fsae-sim-rs/` — Rust solver + Bevy build
+### `native/` — Rust solver + Bevy build
 
 **The Bevy build is not inside the desktop exe and cannot be.** They are two
 separate programs with two different renderers: `fsae-sim.exe` is the Tauri app
@@ -50,12 +54,12 @@ crates are shared.
 ```bash
 cargo test -p sim-core --release        # 22 tests
 cargo test -p engine-audio --release    # 52 tests, about a second
-cargo run  -p bevy-spike                # WASD, Q/E shift  (bevy-frontend branch)
+cargo run  -p bevy-spike                # WASD, Q/E shift
 cargo run  -p bevy-spike -- --chase --screenshot shot.png
 
 # Regenerate the reference the JS engine-audio port checks itself against:
 cargo run -p engine-audio --release --example golden_vectors \
-  > ../fsae-sim/data/engine-audio-golden.json
+  > ../sim/data/engine-audio-golden.json
 ```
 
 - `crates/sim-core` — dependency-free solver. Pluggable tyre / powertrain /
@@ -63,7 +67,7 @@ cargo run -p engine-audio --release --example golden_vectors \
   tied to Bevy.**
 - `crates/engine-audio` — physically-modelled internal-combustion sound. Shared
   by both packages; the reference implementation the JS port is checked against.
-- `apps/bevy-spike` — the Bevy build, on the `bevy-frontend` branch. Still one
+- `apps/bevy-spike` — the Bevy build. Still one
   line of UI; it now has real engine sound and a glTF bodywork hook.
 
 ---
@@ -238,7 +242,7 @@ restretch the drawn body and the cone hitbox.
 ## 8. Layout
 
 ```
-fsae-sim/
+sim/
   src/vehicle/   params, paramMeta (provenance + edit ranges), tyre,
                  powertrain, bicycle, etcMap, setupAdjust,
                  modules + library (vehicles as data)
@@ -251,7 +255,7 @@ fsae-sim/
                  plan_view.py, validate.js, smoke_desktop.mjs
   src-tauri/     build.rs stages dist/ on every cargo build
 
-fsae-sim-rs/                       (main | bevy-frontend)
+native/
   crates/sim-core/     vehicle, tyre, powertrain, modular (suspension, aero,
                        VehicleDefinition), solver/{point_mass, bicycle,
                        double_track}
@@ -345,8 +349,8 @@ crank angle
   -> samples
 ```
 
-Implemented twice: `fsae-sim-rs/crates/engine-audio` (reference) and
-`fsae-sim/src/audio/engineAudio.js` (port). WASM was the alternative and was
+Implemented twice: `native/crates/engine-audio` (reference) and
+`sim/src/audio/engineAudio.js` (port). WASM was the alternative and was
 declined for the same reason as before — it costs the zero-build-step frontend.
 They are kept in lockstep the way `sim-core` is: the Rust side emits golden
 vectors, `tools/validate.js` checks the JS against them. Measured agreement is
@@ -598,8 +602,8 @@ silently does nothing. **Extracting them is the next real step.**
 
 ## 13. CAD bodywork
 
-**Working in both builds.** Drop a `.glb` at `fsae-sim/data/car.glb` or
-`fsae-sim-rs/apps/bevy-spike/assets/car.glb` and it replaces the procedural
+**Working in both builds.** Drop a `.glb` at `sim/data/car.glb` or
+`native/apps/bevy-spike/assets/car.glb` and it replaces the procedural
 body. Absent is the normal case and draws the procedural SDM26.
 
 Neither model is committed: the reference car is a crude box assembly and

@@ -1,6 +1,6 @@
 // Physically-modelled internal-combustion engine audio.
 //
-// A port of the `engine-audio` Rust crate in ../../fsae-sim-rs, which is itself
+// A port of the `engine-audio` Rust crate in ../../../native, which is itself
 // adapted from ange-yaghi/engine-sim (MIT). The repository the community
 // edition lives in ships the built application and no source; the algorithms
 // follow the original open codebase.

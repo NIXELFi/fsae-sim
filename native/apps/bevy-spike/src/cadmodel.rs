@@ -41,7 +41,7 @@
 //!    forward x up = right. Backwards mirrors the car, which on a symmetric
 //!    model is invisible.
 //!
-//!    Run `node ../../fsae-sim/tools/check_car_glb.mjs your.glb` before trusting
+//!    Run `node ../../../sim/tools/check_car_glb.mjs your.glb` before trusting
 //!    an export.
 //!
 //!    NOTE: unlike the WebGL build, this one does NOT solve the frame from the

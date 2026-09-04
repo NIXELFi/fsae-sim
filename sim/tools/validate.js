@@ -262,7 +262,7 @@ console.log("\nETC MAP  (pedal -> throttle plate)");
 //
 // Regenerate after changing either side:
 //   cargo run -p engine-audio --release --example golden_vectors \
-//     > fsae-sim/data/engine-audio-golden.json
+//     > sim/data/engine-audio-golden.json
 console.log("\nENGINE AUDIO  (vs golden vectors from the Rust crate)");
 {
   const golden = JSON.parse(
