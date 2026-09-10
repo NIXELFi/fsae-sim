@@ -163,6 +163,48 @@ fn front_roll_stiffness_adds_understeer() {
     }
 }
 
+/// The limit balance: steer ramped slowly at constant speed, the FRONT axle
+/// must reach its peak first and the car must push wide rather than spin.
+/// With equal tyres front and rear this model was neutral to within 1% of
+/// force and spun from any step steer at the limit; `front_grip_factor` is
+/// what makes it push. Mirrors the HANDLING section of validate.js.
+#[test]
+fn front_limits_first_and_the_car_pushes() {
+    for speed in [10.0, 15.0, 20.0] {
+        let mut car = bicycle();
+        car.reset(0.0, 0.0, 0.0, speed);
+        // Whatever gear puts the engine near 9500 rpm, as a driver would be.
+        let (mut best, mut bd) = (0usize, f64::MAX);
+        let ratios = [2.75, 2.0, 1.667, 1.444, 1.304, 1.208];
+        for (g, r) in ratios.iter().enumerate() {
+            let rpm = speed / 0.2 * 2.111 * r * 3.0 * 60.0 / (2.0 * std::f64::consts::PI);
+            if rpm < 14000.0 && (rpm - 9500.0).abs() < bd {
+                bd = (rpm - 9500.0).abs();
+                best = g;
+            }
+        }
+        car.powertrain_mut().set_gear(best);
+        car.powertrain_mut().sync_to_wheel(speed / 0.2);
+        let (mut t, mut peak_ay, mut bal_at_peak, mut peak_beta) = (0.0, 0.0f64, 0.0, 0.0f64);
+        while t < 12.0 {
+            let v_err = speed - car.state().speed();
+            let throttle = (0.2 + v_err * 0.8).clamp(0.0, 1.0);
+            car.step(DT, Controls { steer: t / 12.0 * 0.6, throttle, brake: 0.0 });
+            t += DT;
+            let tel = car.telemetry();
+            peak_beta = peak_beta.max(tel.body_slip_deg.abs());
+            if tel.ay_g > peak_ay {
+                peak_ay = tel.ay_g;
+                bal_at_peak = tel.utilisation[FL] - tel.utilisation[RL];
+            }
+        }
+        println!("{speed} m/s: {peak_ay:.2} g, utilF-utilR {bal_at_peak:.2}, peak body slip {peak_beta:.1} deg");
+        assert!((1.35..=1.9).contains(&peak_ay), "{speed} m/s peak {peak_ay:.2} g");
+        assert!(bal_at_peak > 0.08, "{speed} m/s: rear-limited ({bal_at_peak:.2})");
+        assert!(peak_beta < 12.0, "{speed} m/s: spun ({peak_beta:.1} deg)");
+    }
+}
+
 /// Brake bias must move which axle locks first.
 #[test]
 fn brake_bias_moves_the_lockup() {

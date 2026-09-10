@@ -206,9 +206,13 @@ export const PROFILES = {
       lagS: 0.10,
       deadzone: 0,
       expo: 1,
-      // The lock a key can reach shrinks with speed: Ackermann for 1.6 g plus
-      // the peak slip angle plus 5 degrees. Full lock up to ~8 m/s, ~20 deg
-      // at 15 m/s, ~17 deg at 20 m/s. See `usableLockFrac`.
+      // The lock a key can reach shrinks with speed: Ackermann for 1.4 g plus
+      // the peak slip angle plus 3 degrees. Full lock up to ~8 m/s, ~17 deg
+      // at 15 m/s, ~14.5 deg at 20 m/s. See `usableLockFrac`. Measured on the
+      // model with the key held to this lock at a steady throttle: a push at
+      // 10 and 15 m/s. Above ~18 m/s a step still slides whatever the lock,
+      // because the 2026 aero map puts 55% of the downforce on the front of a
+      // 48.5% front car and the rear runs out of margin first at speed.
       speedSensitive: { ayG: 1.4, marginDeg: 3 },
     }),
     // Mouse steering: horizontal movement maps to steering angle. Off by
