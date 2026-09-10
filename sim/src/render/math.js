@@ -111,3 +111,32 @@ export function normalize(v) {
   const l = Math.hypot(v[0], v[1], v[2]) || 1;
   return [v[0] / l, v[1] / l, v[2] / l];
 }
+
+/** Orthographic projection, column-major, GL clip conventions. */
+export function ortho(out, l, r, b, t, n, f) {
+  out.fill(0);
+  out[0] = 2 / (r - l);
+  out[5] = 2 / (t - b);
+  out[10] = -2 / (f - n);
+  out[12] = -(r + l) / (r - l);
+  out[13] = -(t + b) / (t - b);
+  out[14] = -(f + n) / (f - n);
+  out[15] = 1;
+  return out;
+}
+
+/** Inverse of a rigid transform (rotation + translation), column-major. */
+export function invertRigid(out, m) {
+  const r0 = m[0], r1 = m[1], r2 = m[2];
+  const r4 = m[4], r5 = m[5], r6 = m[6];
+  const r8 = m[8], r9 = m[9], r10 = m[10];
+  const tx = m[12], ty = m[13], tz = m[14];
+  out[0] = r0; out[1] = r4; out[2] = r8; out[3] = 0;
+  out[4] = r1; out[5] = r5; out[6] = r9; out[7] = 0;
+  out[8] = r2; out[9] = r6; out[10] = r10; out[11] = 0;
+  out[12] = -(r0 * tx + r1 * ty + r2 * tz);
+  out[13] = -(r4 * tx + r5 * ty + r6 * tz);
+  out[14] = -(r8 * tx + r9 * ty + r10 * tz);
+  out[15] = 1;
+  return out;
+}

@@ -22,6 +22,7 @@ import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet } from "./game/specSheet.js";
 import { PARAM_DEFAULTS, readParam, writeParam } from "./vehicle/paramMeta.js";
 import { SetupAdjuster } from "./vehicle/setupAdjust.js";
+import { drawCoursePlan } from "./game/coursePlan.js";
 
 // Chassis footprint used for cone strikes, and the wheel hub positions, both
 // derived from the LIVE geometry. Hardcoding them meant stretching the
@@ -56,6 +57,7 @@ const CAMERAS = [
   { name: "Walkaround", orbit: true, radius: 3.6, height: 1.05, focusHeight: 0.42,
     fov: 55, rigid: false },
 ];
+const WALKAROUND = CAMERAS[3];
 
 class Game {
   constructor(dom) {
@@ -99,9 +101,10 @@ class Game {
       this.controlsPanel = new ControlsPanel(controlsRoot, this.input, () => {
         this.car.steeringServo = this.input.steeringServo();
         this.syncFfb();
+        updateSession();
       }, this);
       // Re-render when plugging a device in changes the detected profile.
-      this.input.onProfileChange = () => { this.controlsPanel.render(); this.syncFfb(); };
+      this.input.onProfileChange = () => { this.controlsPanel.render(); this.syncFfb(); updateSession(); };
     }
 
     const audioRoot = document.getElementById("audioLevels");
@@ -119,7 +122,7 @@ class Game {
     this.brakeApplied = 0;  // brake after ABS intervention
     this.etcEditor = new EtcEditor(dom.etcOverlay, {
       getMap: () => this.etc,
-      onChange: (map) => { saveEtc(map); dom.etcSummary.textContent = etcSummary(map); this.syncFfb(); },
+      onChange: (map) => { saveEtc(map); dom.etcSummary.innerHTML = etcSummary(map); this.syncFfb(); updateSession(); },
       getLive: () => ({ pedal: this.pedal, plate: this.plate }),
     });
 
@@ -140,7 +143,7 @@ class Game {
     this.lastConeSound = 0;
 
     this.input.onPadChange = (connected, id) => {
-      dom.padStatus.textContent = connected ? `Pad: ${shortPadName(id)}` : "Pad: not detected";
+      dom.padStatus.textContent = connected ? shortPadName(id) : "not detected";
       dom.padStatus.classList.toggle("ok", connected);
     };
   }
@@ -154,7 +157,9 @@ class Game {
    */
   wireWalkaround(dom) {
     const canvas = dom.gl.canvas ?? dom.gl;
-    const active = () => CAMERAS[this.cameraIndex]?.orbit;
+    // The launch screen shows the walkaround behind its panels, so the drag
+    // and wheel work there too.
+    const active = () => CAMERAS[this.cameraIndex]?.orbit || !dom.menu.hidden;
 
     let dragging = false;
     let lastX = 0;
@@ -196,7 +201,7 @@ class Game {
     canvas.addEventListener("dblclick", () => {
       if (!active()) return;
       this.orbitAuto = !this.orbitAuto;
-      this.timing.say(this.orbitAuto ? "WALKAROUND: AUTO" : "WALKAROUND: FREE", 1.2);
+      this.timing?.say(this.orbitAuto ? "WALKAROUND: AUTO" : "WALKAROUND: FREE", 1.2);
     });
   }
 
@@ -250,7 +255,7 @@ class Game {
           `${st.materials} materials (${st.generator})`;
       console.info(this.cadStatus);
     } else {
-      this.cadStatus = "No data/car.glb — drawing the procedural body.";
+      this.cadStatus = "No data/car.glb -- drawing the procedural body.";
     }
     this.cadWheel = cadWheel ?? null;
     if (this.cadWheel?.error) {
@@ -313,7 +318,7 @@ class Game {
     const cadNote = document.getElementById("cadNote");
     if (cadNote) {
       cadNote.textContent = [this.cadStatus, this.bodyStatus, this.wheelStatus]
-        .filter(Boolean).join("  ·  ");
+        .filter(Boolean).join("  /  ");
     }
 
     this.restart();
@@ -415,6 +420,7 @@ class Game {
     if (this.input.edges.traction) {
       this.assists.traction = !this.assists.traction;
       this.dom.tcToggle.checked = this.assists.traction;
+      updateSession();
       this.timing.say(`TRACTION CONTROL ${this.assists.traction ? "ON" : "OFF"}`, 1.5);
     }
     if (this.input.edges.restart) this.restart();
@@ -562,7 +568,9 @@ class Game {
   }
 
   render() {
-    const cam = CAMERAS[this.cameraIndex];
+    // Behind the launch screen the walkaround orbits the car, whatever view
+    // the driver last had; the driving camera comes back with the run.
+    const cam = this.dom.menu.hidden ? CAMERAS[this.cameraIndex] : WALKAROUND;
     const tel = this.car.telemetry;
     // Surface texture through the seat: tiny, speed-scaled, and it does a lot
     // for the sense of motion two feet off the deck.
@@ -621,8 +629,11 @@ class Game {
         rimFade,
       },
       heaveM: bump - Math.abs(tel.axG) * (SDM26.heaveMmG / 1000) * 0.5 * vib,
-      fovBoost: Math.min(10, this.car.speed * 0.42),
+      fovBoost: cam.orbit ? 0 : Math.min(10, this.car.speed * 0.42),
     });
+
+    // No HUD over the launch screen: the scene is the backdrop there.
+    if (!this.dom.menu.hidden) { this.hud.clear(); return; }
 
     const t = this.timing;
     const last = t.laps.length ? t.laps[t.laps.length - 1] : null;
@@ -680,7 +691,7 @@ class Game {
     this.dom.pauseHint.hidden = true;
     this.dom.menu.hidden = false;
     this.audio.setEnabled(false);
-    // The run is still there — offer to go back to it rather than bin it.
+    // The run is still there -- offer to go back to it rather than bin it.
     this.dom.startBtn.textContent = "Resume run";
     this.dom.restartBtn.hidden = false;
   }
@@ -719,7 +730,76 @@ const dom = {
   resetParams: document.getElementById("resetParams"),
   paramNote: document.getElementById("paramNote"),
   restartBtn: document.getElementById("restartBtn"),
+  coursePlan: document.getElementById("coursePlan"),
+  sCourse: document.getElementById("sCourse"),
+  sCar: document.getElementById("sCar"),
+  sAids: document.getElementById("sAids"),
+  sEtc: document.getElementById("sEtc"),
+  sControls: document.getElementById("sControls"),
+  carBadge: document.getElementById("carBadge"),
+  paramBadge: document.getElementById("paramBadge"),
 };
+
+/** Tabs on the launch screen. Every pane stays in the DOM; only one shows. */
+function wireTabs() {
+  const tabs = [...document.querySelectorAll(".tab")];
+  const panes = [...document.querySelectorAll(".pane")];
+  const show = (name) => {
+    for (const t of tabs) t.setAttribute("aria-selected", t.dataset.pane === name ? "true" : "false");
+    for (const p of panes) p.classList.toggle("active", p.dataset.pane === name);
+    try { localStorage.setItem("fsae-sim.tab", name); } catch { /* ignore */ }
+  };
+  for (const t of tabs) t.addEventListener("click", () => show(t.dataset.pane));
+  let saved = null;
+  try { saved = localStorage.getItem("fsae-sim.tab"); } catch { /* ignore */ }
+  if (saved && tabs.some((t) => t.dataset.pane === saved)) show(saved);
+}
+
+/**
+ * The session card: what the run will be, in one glance, beside Start.
+ * Called after anything that changes it -- course load, an aid toggle, a
+ * parameter edit, a control-profile change.
+ */
+function updateSession() {
+  if (!game) return;
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  const t = game.track;
+  if (t && dom.sCourse) {
+    const detail = t.kind === "venue"
+      ? `${(t.length / 1000).toFixed(2)} km oval, free roam`
+      : `${t.length.toFixed(0)} m, ${t.cones.length} cones${t.closed ? ", lapped" : ", single run"}`;
+    dom.sCourse.innerHTML = `<b>${esc(t.name)}</b><small>${esc(detail)}</small>`;
+  }
+
+  let changed = 0;
+  for (const path of Object.keys(PARAM_DEFAULTS)) {
+    if (Math.abs(readParam(path) - PARAM_DEFAULTS[path]) > 1e-12) changed++;
+  }
+  const pt = game.powertrain;
+  const engine = pt ? `${pt.peakPower.powerKW.toFixed(0)} kW at ${pt.peakPower.rpm} rpm` : "";
+  dom.sCar.innerHTML = `<b>SDM26</b><small>${esc(engine)}${changed
+    ? ` <span class="changed">${changed} parameter${changed === 1 ? "" : "s"} changed</span>` : ""}</small>`;
+  if (dom.paramBadge) dom.paramBadge.textContent = changed ? String(changed) : "";
+
+  const aids = [];
+  if (dom.tcToggle.checked) aids.push("TC");
+  if (dom.absToggle.checked) aids.push("ABS");
+  if (dom.autoToggle.checked) aids.push("auto gearbox");
+  dom.sAids.innerHTML = aids.length
+    ? `<b>${esc(aids.join(", "))}</b>`
+    : `<span class="off">none</span>`;
+  if (dom.carBadge) dom.carBadge.textContent = aids.length ? String(aids.length) : "";
+
+  if (game.etc) {
+    const d = game.etc.describe();
+    const name = game.etc.name === "custom" ? "Custom" : game.etc.name[0].toUpperCase() + game.etc.name.slice(1);
+    dom.sEtc.innerHTML = `<b>${esc(name)}</b><small>${esc(d.character)}, ${d.plateAtFullPedal}% plate at full pedal</small>`;
+  }
+
+  const profile = game.input?.settings?.active?.();
+  if (profile) dom.sControls.innerHTML = `<b>${esc(profile.label)}</b>`;
+}
 
 const PARAM_KEY = "fsae-sim.params";
 
@@ -751,8 +831,8 @@ function loadParams() {
 function etcSummary(map) {
   const d = map.describe();
   const name = map.name === "custom" ? "Custom" : map.name[0].toUpperCase() + map.name.slice(1);
-  return `${name} · ${d.points} points · initial gain ${d.initialGain.toFixed(2)} ` +
-         `(${d.character}) · ${d.plateAtFullPedal}% plate at full pedal`;
+  return `<b>${name}</b>, ${d.points} points. Initial gain ${d.initialGain.toFixed(2)} ` +
+         `(${d.character}), ${d.plateAtFullPedal}% plate at full pedal.`;
 }
 
 let game;
@@ -760,6 +840,7 @@ let game;
 async function boot() {
   installDesktopBehaviour();
   if (isDesktop) document.body.classList.add("desktop");
+  wireTabs();
 
   // Restore saved overrides BEFORE the sheet renders, so the sliders come up
   // showing what the car is actually running. PARAM_DEFAULTS was captured at
@@ -769,6 +850,7 @@ async function boot() {
     saveParams();
     game?.pushParams();
     if (GEOMETRY_PATHS.includes(path)) game?.renderer.rebuildCar(SDM26);
+    updateSession();
   };
   renderSpecSheet(dom.vehicle, onParamChange);
   if (restored) dom.paramNote.textContent = `${restored} parameter${restored === 1 ? "" : "s"} restored from your last session.`;
@@ -780,6 +862,7 @@ async function boot() {
     game?.pushParams();
     game?.renderer.rebuildCar(SDM26);
     dom.paramNote.textContent = "All parameters back to as-shipped.";
+    updateSession();
   });
 
   try {
@@ -794,14 +877,20 @@ async function boot() {
   dom.loadNote.textContent = "Loading course and engine data...";
   const { track, curve } = await game.load(dom.trackSel.value);
 
-  const pt = game.powertrain;
-  dom.specs.innerHTML = `
-    <div><span>Course</span><b>${track.name} &middot; ${track.length.toFixed(0)} m &middot;
-      ${track.cones.length} cones</b></div>
-    <div><span>Engine</span><b>${pt.peakTorque.torqueNm.toFixed(1)} N&middot;m @
-      ${pt.peakTorque.rpm} &middot; ${pt.peakPower.powerKW.toFixed(1)} kW @
-      ${pt.peakPower.rpm}</b></div>
-    <div><span>Source</span><b>${curve.name}</b></div>`;
+  const showCourse = (track, curve) => {
+    const pt = game.powertrain;
+    const geometry = track.kind === "venue"
+      ? `<em>${(track.length / 1000).toFixed(2)} km</em> oval, <em>${track.width.toFixed(1)} m</em> wide, infield and apron driveable`
+      : `<em>${track.length.toFixed(0)} m</em>, <em>${track.cones.length}</em> cones, <em>${track.width.toFixed(1)} m</em> wide, ${track.closed ? "lapped" : "single run"}`;
+    dom.specs.innerHTML = `
+      <div><span>Layout</span><b>${geometry}</b></div>
+      <div><span>Engine</span><b><em>${pt.peakTorque.torqueNm.toFixed(1)} N.m</em> at ${pt.peakTorque.rpm} rpm,
+        <em>${pt.peakPower.powerKW.toFixed(1)} kW</em> at ${pt.peakPower.rpm} rpm</b></div>
+      <div><span>Source</span><b>${curve.name}</b></div>`;
+    drawCoursePlan(dom.coursePlan, track);
+    updateSession();
+  };
+  showCourse(track, curve);
 
   dom.loadNote.textContent = "";
   dom.startBtn.disabled = false;
@@ -809,16 +898,19 @@ async function boot() {
   dom.trackSel.addEventListener("change", async () => {
     dom.startBtn.disabled = true;
     dom.loadNote.textContent = "Loading course...";
-    await game.load(dom.trackSel.value);
+    const loaded = await game.load(dom.trackSel.value);
+    showCourse(loaded.track, loaded.curve);
     dom.loadNote.textContent = "";
     dom.startBtn.disabled = false;
   });
+  window.addEventListener("resize", () => { if (game?.track) drawCoursePlan(dom.coursePlan, game.track); });
 
   const sync = () => {
     game.assists.traction = dom.tcToggle.checked;
     game.assists.abs = dom.absToggle.checked;
     game.assists.autoShift = dom.autoToggle.checked;
     game.audio.setEnabled(dom.audioToggle.checked);
+    updateSession();
   };
   // A control profile can ask for driver aids on by default -- the keyboard
   // does, because its pedals are switches. Applied once at boot from whatever
@@ -835,7 +927,8 @@ async function boot() {
   }
 
   game.renderer.rebuildCar(SDM26);
-  dom.etcSummary.textContent = etcSummary(game.etc);
+  dom.etcSummary.innerHTML = etcSummary(game.etc);
+  updateSession();
   dom.etcBtn.addEventListener("click", () => game.etcEditor.open());
 
   const enterSim = (fresh) => {

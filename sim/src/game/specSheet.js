@@ -27,7 +27,7 @@ export function renderSpecSheet(root, onChange) {
     </div>`).join("");
 
   const notModelled = MODEL.notModelled.map(([what, why]) =>
-    `<li><b>${esc(what)}</b> — ${esc(why)}</li>`).join("");
+    `<li><b>${esc(what)}</b> - ${esc(why)}</li>`).join("");
 
   const params = groups.map((g) => `
     <section class="pgroup">
@@ -48,7 +48,7 @@ export function renderSpecSheet(root, onChange) {
                        step="${r.edit.step}" value="${r.edit.raw}">
                 <input type="number" min="${r.edit.min}" max="${r.edit.max}"
                        step="${r.edit.step}" value="${round(r.edit.raw, r.edit.step)}">
-                <button class="p-reset" title="Back to as-shipped">⟲</button>
+                <button class="p-reset" title="Back to as-shipped">reset</button>
               </div>
             </td>
           </tr>` : ""}`).join("")}
@@ -82,7 +82,7 @@ export function renderSpecSheet(root, onChange) {
     <div class="legend">${legend}</div>
 
     <details class="veh-block" open>
-      <summary>Degrees of freedom &mdash; ${countStates()} states</summary>
+      <summary>Degrees of freedom: ${countStates()} states</summary>
       <div class="dof-grid">${dof}</div>
       <div class="dof-extra">
         <h5>Discrete state</h5>
@@ -93,7 +93,7 @@ export function renderSpecSheet(root, onChange) {
     </details>
 
     <details class="veh-block" open>
-      <summary>Parameters &mdash; ${total} total</summary>
+      <summary>Parameters: ${total} total</summary>
       <div class="pgrid">${params}</div>
     </details>`;
 
@@ -120,7 +120,7 @@ function round(value, step) {
  * Wire the sliders to the live parameters.
  *
  * Values are written straight into the object the physics already holds a
- * reference to, so a change lands on the next 500 Hz substep — no restart. The
+ * reference to, so a change lands on the next 500 Hz substep -- no restart. The
  * displayed value and the stored value differ by `factor` (CG height is stored
  * in metres, shown in millimetres), so the slider reads in the same units as
  * the label beside it.

@@ -30,6 +30,12 @@ export class Hud {
     return { w, h };
   }
 
+  /** Blank the overlay (the launch screen shows the scene without a HUD). */
+  clear() {
+    const { w, h } = this.resize();
+    this.ctx.clearRect(0, 0, w, h);
+  }
+
   draw(s) {
     const { w, h } = this.resize();
     const ctx = this.ctx;
@@ -143,7 +149,7 @@ export class Hud {
   /**
    * Driver inputs: accelerator pedal, the plate the ETC map asked for, and
    * brake. APS against TPS matters because on anything but a linear map the
-   * gap between those two bars IS the map, live — the only way to feel what a
+   * gap between those two bars IS the map, live -- the only way to feel what a
    * curve actually did without stopping to look at it.
    */
   pedalTrace(ctx, x, y, w, s) {
@@ -193,7 +199,7 @@ export class Hud {
     ctx.textAlign = "left";
     ctx.fillStyle = s.setup.active ? GOLD : "rgba(255,255,255,0.45)";
     ctx.font = "9px ui-monospace, monospace";
-    ctx.fillText("SETUP  ◄ ► select   ▲ ▼ adjust", x + 10, y + 15);
+    ctx.fillText("SETUP   < > select   ^ v adjust", x + 10, y + 15);
 
     items.forEach((it, i) => {
       const ry = y + 24 + i * rowH;
@@ -202,7 +208,7 @@ export class Hud {
         roundRect(ctx, x + 5, ry - 2, w - 10, rowH - 2, 5); ctx.fill();
         ctx.fillStyle = GOLD;
         ctx.font = "600 10px ui-monospace, monospace";
-        ctx.fillText("▸", x + 8, ry + 11);
+        ctx.fillText(">", x + 8, ry + 11);
       }
       ctx.fillStyle = it.selected ? "#fff" : "rgba(255,255,255,0.62)";
       ctx.font = "10px ui-monospace, monospace";
@@ -411,10 +417,10 @@ export class Hud {
 // ---------------------------------------------------------------- drawing ---
 
 function panel(ctx, x, y, w, h, r) {
-  ctx.fillStyle = "rgba(10,13,20,0.62)";
+  ctx.fillStyle = "rgba(12,15,20,0.66)";
   roundRect(ctx, x, y, w, h, r);
   ctx.fill();
-  ctx.strokeStyle = "rgba(255,255,255,0.10)";
+  ctx.strokeStyle = "rgba(255,255,255,0.09)";
   ctx.lineWidth = 1;
   ctx.stroke();
 }
