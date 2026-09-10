@@ -168,6 +168,75 @@ console.log("\nTYRE");
   const cs = TIRE_INFO.corneringStiffness(SDM26.muLat, Fz);
   check("cornering stiffness / tyre", cs / 57.3, 200, 380, " N/deg");
   check("peak slip angle", TIRE_INFO.peakSlipAngleDeg, 6, 11, " deg");
+
+  // Aligning torque: the trail must be longest at zero slip, gone once the
+  // tyre is sliding, and grow with load. These are the shape a driver feels
+  // through force feedback, not numbers from a data sheet.
+  const t0 = TIRE_INFO.pneumaticTrail(0, Fz);
+  const tPeak = TIRE_INFO.pneumaticTrail(1, Fz);
+  const tSlide = TIRE_INFO.pneumaticTrail(1.5, Fz);
+  check("pneumatic trail at zero slip", t0 * 1000, 10, 35, " mm");
+  check("trail at peak grip / trail at zero", tPeak / t0, 0.0, 0.25, "");
+  check("trail once sliding", tSlide * 1000, 0, 1e-9, " mm");
+  check("trail grows with load", TIRE_INFO.pneumaticTrail(0, 2 * Fz) / t0, 1.2, 1.6, "x");
+}
+
+// ----------------------------------------------------------- steering feel ---
+// Rim torque out of the vehicle model, which is what force feedback plays.
+// A left turn must produce a torque that tries to steer back right, it must
+// grow with lateral g, and it must fall away as the front tyres start to
+// slide even while the lateral force is still near its peak.
+console.log("\nSTEERING FEEL  (rim torque for force feedback)");
+{
+  const { ForceFeedback } = await import("../src/game/forceFeedback.js");
+  const settle = (steer, v) => {
+    const { car } = fresh();
+    car.pt.gear = 2;
+    car.respawn(0, 0, 0, v);
+    for (let i = 0; i < 400; i++) car.step(1 / 200, { steer, throttle: 0.25, brake: 0 });
+    return car.telemetry;
+  };
+  const straight = settle(0, 15);
+  const gentle = settle(0.08, 15);
+  const hard = settle(0.16, 15);
+  check("no torque going straight", Math.abs(straight.rimTorqueNm), 0, 0.05, " N.m");
+  check("left turn pulls the rim back right", -gentle.rimTorqueNm, 0.5, 30, " N.m");
+  check("harder turn, more torque", hard.rimTorqueNm / gentle.rimTorqueNm, 1.2, 5, "x");
+  check("rim torque at ~1 g", -gentle.rimTorqueNm / Math.max(gentle.ayG, 0.1), 2, 20, " N.m/g");
+  // Push the front past its peak and the pneumatic trail collapses. Torque
+  // per unit lateral force falls to what the mechanical trail alone gives --
+  // with 5 deg of caster on a 0.2 m tyre that is about half the low-slip
+  // figure, and it is the caster, not the tyre, holding it up.
+  const sliding = settle(0.45, 12);
+  const perFyGentle = -gentle.rimTorqueNm / Math.max(gentle.ayG, 1e-3);
+  const perFySliding = -sliding.rimTorqueNm / Math.max(sliding.ayG, 1e-3);
+  check("front slip angle when sliding", sliding.slipF, 10, 90, " deg");
+  check("torque per g collapses when sliding", perFySliding / perFyGentle, 0.3, 0.7, "");
+
+  // The mixer: with a wheel profile, a resting rim at zero slip commands zero,
+  // damping opposes rim motion, and the end stop pushes back toward the lock.
+  const cfg = {
+    enabled: true, gain: 1, alignTorqueGain: 1, roadTextureGain: 0.35, damping: 0.15,
+    friction: 0.04, softLockGain: 1, minForce: 0, maxForceNm: 5.5, invert: false,
+  };
+  const feel = { spin: 0, lock: 0, offTrack: false, coneHit: 0 };
+  const ffb = new ForceFeedback();
+  const still = ffb.update(1 / 60, cfg, straight, { deg: 0, halfLockDeg: 56 }, feel);
+  check("mixer: straight and still commands nothing", Math.abs(still.command), 0, 1e-6, "");
+  const turned = ffb.update(1 / 60, cfg, gentle, { deg: -20, halfLockDeg: 56 }, feel);
+  check("mixer: left turn -> clockwise command", turned.command, 0.05, 1, "");
+  const ffb2 = new ForceFeedback();
+  ffb2.update(1 / 60, cfg, straight, { deg: 0, halfLockDeg: 56 }, feel);
+  const moving = ffb2.update(1 / 60, cfg, straight, { deg: 30, halfLockDeg: 56 }, feel);
+  check("mixer: damping opposes rim motion", -moving.damping, 0.01, 6, " N.m");
+  const over = new ForceFeedback().update(1 / 60, cfg, straight, { deg: 70, halfLockDeg: 56 }, feel);
+  check("mixer: end stop pushes back from over-lock", -over.softLock, 4, 6, " N.m");
+  const kicked = new ForceFeedback().update(1 / 60, cfg, straight, { deg: 0, halfLockDeg: 56 }, { ...feel, coneHit: 1 });
+  check("mixer: a cone kicks", Math.abs(kicked.kickNm), 1, 6, " N.m");
+  const spun = new ForceFeedback().update(1 / 60, cfg, gentle, { deg: 0, halfLockDeg: 56 }, { ...feel, spin: 1 });
+  check("mixer: wheelspin makes texture", spun.textureNm, 0.2, 3, " N.m");
+  const inv = new ForceFeedback().update(1 / 60, { ...cfg, invert: true }, gentle, { deg: -20, halfLockDeg: 56 }, feel);
+  check("mixer: invert flips the command", inv.command / turned.command, -1.0001, -0.9999, "");
 }
 
 // --------------------------------------------------------------- ETC map ---

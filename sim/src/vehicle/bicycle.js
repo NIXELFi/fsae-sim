@@ -33,7 +33,7 @@
 // only two contact patches in the equations.
 
 import { lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad } from "./params.js";
-import { axleMu, tyreForces } from "./tire.js";
+import { axleMu, pneumaticTrail, tyreForces } from "./tire.js";
 
 const G = 9.81;
 const SUBSTEP = 1 / 500;
@@ -107,6 +107,10 @@ export class BicycleModel {
       utilF: 0, utilR: 0, balance: 0,
       downforceN: 0, dragN: 0, driveForceN: 0,
       rollDeg: 0, pitchDeg: 0,
+      // Steering feel. kingpinTorqueNm is the moment both front tyres put on
+      // the steering axis; rimTorqueNm is what reaches the driver's hands.
+      // Both left-positive like `delta`: positive tries to steer further left.
+      kingpinTorqueNm: 0, rimTorqueNm: 0, trailFm: 0, mechTrailM: 0,
     };
   }
 
@@ -299,6 +303,34 @@ export class BicycleModel {
     t.rollDeg = t.ayG * p.rollGradientDegG;   // + = leaning right (left turn)
     t.pitchDeg = t.axG * p.pitchGradientDegG; // + = nose up (braking dives)
     t.locked = drive.locked;
+
+    // ---- steering torque, for force feedback ----
+    // The bicycle model has one front slip angle, but the two tyres carry
+    // different loads once the car rolls, and the trail grows with load, so
+    // the aligning torque is summed per tyre with the axle's force split by
+    // load. The self-aligning moment opposes the slip angle, which is what
+    // makes a wheel try to return to centre.
+    const geo = p.steering;
+    const mechTrail = p.tireRadiusM * Math.tan((geo.casterDeg * Math.PI) / 180) +
+      geo.kingpinOffsetTrailM;
+    let kingpin = 0;
+    if (FzF > 1) {
+      const half = FzF / 2;
+      const shift = Math.min(Math.abs(dFzF), half);
+      const outer = half + shift, inner = half - shift;
+      const sF = fF.utilisation;
+      const tO = pneumaticTrail(sF, outer), tI = pneumaticTrail(sF, inner);
+      // Per-tyre share of the axle lateral force, by load.
+      const fyO = fF.fy * (outer / FzF), fyI = fF.fy * (inner / FzF);
+      kingpin = -(fyO * (tO + mechTrail) + fyI * (tI + mechTrail));
+      t.trailFm = (tO * outer + tI * inner) / FzF;
+    } else {
+      t.trailFm = 0;
+    }
+    t.mechTrailM = mechTrail;
+    t.kingpinTorqueNm = kingpin;
+    const torqueRatio = geo.torqueRatio ?? 1 / Math.max(p.steeringRatio, 1e-6);
+    t.rimTorqueNm = kingpin * torqueRatio * geo.rackEfficiency;
   }
 
   /**

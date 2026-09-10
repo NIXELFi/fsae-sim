@@ -37,10 +37,12 @@ export class ControlsPanel {
    * @param input the Input instance, so the panel can read live axis values
    * @param onChange called after any edit, so the game can re-read the profile
    */
-  constructor(root, input, onChange) {
+  constructor(root, input, onChange, game = null) {
     this.root = root;
     this.input = input;
     this.onChange = onChange;
+    /** The game, for the force feedback status and live torque. Optional. */
+    this.game = game;
     this.calibrating = null;
     this.render();
   }
@@ -80,6 +82,7 @@ export class ControlsPanel {
     this.root.append(note);
 
     if (profile.kind === "wheel") this.root.append(this.wheelMapping(id, profile));
+    if (profile.kind === "wheel") this.root.append(this.ffbBlock(id, profile));
     if (profile.kind === "keyboard") this.root.append(this.mouseToggle(id, profile));
 
     for (const group of editableSettings(profile)) {
@@ -209,6 +212,71 @@ export class ControlsPanel {
       this.onChange?.();
     });
     box.append(soft);
+    return box;
+  }
+
+  /**
+   * Force feedback: the switch, whether the shell can actually drive a wheel,
+   * and a live torque bar so a driver can see the model's signal before
+   * trusting their hands to it.
+   */
+  ffbBlock(id, profile) {
+    const s = this.settings();
+    const box = el("div", "ctl-group");
+    box.append(el("h4", null, "Force feedback"));
+    box.append(
+      checkbox("Drive the wheel from the tyre model", profile.forceFeedback.enabled, (on) => {
+        s.set(id, "forceFeedback.enabled", on);
+        this.input.refreshProfile();
+        this.onChange?.();
+      }),
+    );
+    box.append(
+      checkbox("Invert direction", profile.forceFeedback.invert, (on) => {
+        s.set(id, "forceFeedback.invert", on);
+        this.input.refreshProfile();
+        this.onChange?.();
+      }),
+    );
+
+    const st = this.game?.ffbState;
+    let line;
+    if (!st || !st.supported) {
+      line = "Not available here: force feedback needs the Windows desktop build (DirectInput). " +
+        "In a browser the torque is still computed and shown below.";
+    } else if (st.running) {
+      line = `Driving: ${st.device || "force feedback device"}`;
+    } else if (st.error) {
+      line = `Not running: ${st.error}`;
+    } else {
+      line = "Ready. Switch on above to open the wheel.";
+    }
+    box.append(el("small", "ctl-hint", line));
+
+    // Live torque, as a centred bar. Right of centre pulls the rim clockwise.
+    const meter = el("div", "ctl-ffb-meter");
+    const fill = el("div", "ctl-ffb-fill");
+    meter.append(fill);
+    const read = el("pre", "ctl-axes", "");
+    box.append(meter, read);
+
+    const tick = () => {
+      if (!this.root.isConnected) return;
+      const last = this.game?.ffb?.last;
+      if (last) {
+        const c = last.command;
+        fill.style.left = `${50 + Math.min(0, c) * 50}%`;
+        fill.style.width = `${Math.abs(c) * 50}%`;
+        fill.style.background = last.clipped ? "#e0552f" : "";
+        read.textContent =
+          `rim torque ${last.torqueNm >= 0 ? " " : ""}${last.torqueNm.toFixed(2)} N.m` +
+          `   tyre ${last.align.toFixed(2)}   damping ${last.damping.toFixed(2)}` +
+          `   stop ${last.softLock.toFixed(2)}   texture ${last.textureNm.toFixed(2)}` +
+          (last.clipped ? "   CLIPPING" : "");
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
     return box;
   }
 

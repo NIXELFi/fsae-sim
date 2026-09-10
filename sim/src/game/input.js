@@ -71,6 +71,12 @@ export class Input {
     this._prevKeys = new Set();
 
     this.state = { steer: 0, throttle: 0, brake: 0, launch: false };
+    /**
+     * The rim, for force feedback: measured angle in degrees (right positive,
+     * as the device reports it) and the car's lock at the rim. Only meaningful
+     * on a wheel profile; zero otherwise.
+     */
+    this.rim = { deg: 0, halfLockDeg: 0 };
 
     // Typing a throttle-map value into a number field must not also stand on
     // the throttle, so keys aimed at a form control never reach the car.
@@ -200,14 +206,17 @@ export class Input {
     // Rim angle in degrees, from the -1..1 axis, with the centre trim applied.
     const rimDeg = raw * (rotation / 2) - (w.centreTrimDeg || 0);
 
+    const carRimHalf = (this.carLockDeg ?? 28) * (this.carSteeringRatio ?? 4) * 0.5;
     let norm;
     if (w.mapping === "match-car") {
       // The car's rim travel is lock * ratio; anything beyond it is over-lock.
-      const carRimHalf = (this.carLockDeg ?? 28) * (this.carSteeringRatio ?? 4) * 0.5;
       norm = rimDeg / Math.max(carRimHalf, 1e-6);
+      this.rim.halfLockDeg = carRimHalf;
     } else {
       norm = rimDeg / (rotation / 2);
+      this.rim.halfLockDeg = rotation / 2;
     }
+    this.rim.deg = rimDeg;
 
     if (w.softLock !== false) norm = Math.max(-1, Math.min(1, norm));
     // A wheel measures hand position directly, so the curve is a no-op unless

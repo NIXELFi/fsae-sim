@@ -25,8 +25,8 @@
 // how fast arms and a steering rack actually can.
 //
 // Force feedback is not implemented. The fields are reserved and documented so
-// the steer-force calculation can be dropped in without reshaping the profile
-// format, and `forceFeedback.enabled` is false everywhere until it exists.
+// the force feedback mix (`forceFeedback.js`) reads the wheel profile's
+// `forceFeedback` block; the other profiles carry a disabled stub.
 
 const STORAGE_KEY = "fsae-sim.controls.v1";
 
@@ -322,34 +322,51 @@ export const PROFILES = {
     },
     forceFeedback: {
       /**
-       * Reserved. Nothing here is implemented yet.
+       * Rim torque from the vehicle model, out to a direct-drive wheel.
        *
-       * The plan is to drive it from the steer torque the vehicle model can
-       * already almost produce: front tyre lateral force through the pneumatic
-       * trail and the mechanical trail from caster gives self-aligning torque,
-       * which is the signal a driver actually reads through a wheel. That needs
-       * the tyre model to return Mz (it currently returns Fy only) and a
-       * kingpin geometry block in the parameters, neither of which exists.
+       * The signal is the self-aligning torque of the front tyres: lateral
+       * force through the pneumatic trail (which collapses as the tyre starts
+       * to slide -- the wheel going light before the front lets go) and the
+       * mechanical trail from caster, through the steering ratio to the rim.
+       * `forceFeedback.js` adds damping, friction, the end stops and texture,
+       * and the desktop shell streams it to the wheel over DirectInput.
        *
-       * The web platform has no force-feedback API beyond dual-rumble, so the
-       * desktop build will need a native path. Left declared so the shape of
-       * the profile does not have to change when it lands.
+       * `enabled` is the driver's switch. Whether it can actually run is
+       * reported by the desktop shell at runtime (a browser has no path to a
+       * wheel motor) and shown in the settings panel.
        */
-      enabled: false,
-      supported: false,
-      gain: 1.0,
-      /** Self-aligning torque from the front tyres. The main effect. */
+      enabled: true,
+      /**
+       * Master gain on the whole mix. 1.0 = the model's torque, unscaled.
+       *
+       * SDM26 puts about 9 N.m per g into a 4:1 rack, so an unscaled mix
+       * clips a 5.5 N.m R5 from ~0.6 g up -- and the clip erases the very
+       * thing worth feeling, the rim going light as the front starts to
+       * slide. 0.55 keeps the collapse inside the motor's range on an R5.
+       * On a 12 N.m base 1.0 is right.
+       */
+      gain: 0.55,
+      /** Self-aligning torque from the front tyres. The signal itself. */
       alignTorqueGain: 1.0,
-      /** Kerb and surface texture. */
+      /** Wheelspin, lockup, kerbs and grass, as vibration. */
       roadTextureGain: 0.35,
-      /** Damping, to stop the wheel oscillating when unloaded. */
+      /** Rim-speed damping: fraction of rated torque at 10 rad/s of rim. */
       damping: 0.15,
-      /** Friction, standing in for the rack. */
-      friction: 0.05,
-      /** Force at the soft lock. */
+      /** Coulomb friction, fraction of rated torque. The rack and the column. */
+      friction: 0.04,
+      /** Stiffness of the stop past the car's lock. */
       softLockGain: 1.0,
+      /** Lift torques below this fraction of rated, past the motor's cogging. */
       minForce: 0.0,
-      maxForceNm: 8.0,
+      /**
+       * The motor's rated torque, Nm. This is the ONLY place the hardware
+       * enters: the mix is in newton-metres at the rim and 1.0 out means this
+       * much. 5.5 is a MOZA R5; set it to what the base is rated for and the
+       * same gain feels the same on any wheel.
+       */
+      maxForceNm: 5.5,
+      /** Flip the direction if the wheel pulls the wrong way. */
+      invert: false,
     },
   },
 };
@@ -607,6 +624,30 @@ export function editableSettings(profile) {
           unit: " deg",
           min: -20, max: 20, step: 0.5,
         },
+      ],
+    });
+  }
+
+  if (profile.kind === "wheel") {
+    rows.push({
+      group: "Force feedback",
+      items: [
+        { path: "forceFeedback.maxForceNm", label: "Wheel rated torque", unit: " N.m",
+          min: 1, max: 30, step: 0.5, note: "What the base is rated for. MOZA R5 = 5.5." },
+        { path: "forceFeedback.gain", label: "Overall gain", unit: "",
+          min: 0, max: 3, step: 0.05, note: "1.0 is the model unscaled; 0.55 keeps an R5 out of clipping." },
+        { path: "forceFeedback.alignTorqueGain", label: "Tyre aligning torque", unit: "",
+          min: 0, max: 2, step: 0.05 },
+        { path: "forceFeedback.roadTextureGain", label: "Slip and surface texture", unit: "",
+          min: 0, max: 1, step: 0.05 },
+        { path: "forceFeedback.damping", label: "Damping", unit: "",
+          min: 0, max: 1, step: 0.01, note: "Stops the wheel whipping in a spin." },
+        { path: "forceFeedback.friction", label: "Friction", unit: "",
+          min: 0, max: 0.3, step: 0.01 },
+        { path: "forceFeedback.softLockGain", label: "End-stop strength", unit: "",
+          min: 0, max: 1, step: 0.05 },
+        { path: "forceFeedback.minForce", label: "Minimum force", unit: "",
+          min: 0, max: 0.2, step: 0.005, note: "Lifts small torques over the motor's cogging." },
       ],
     });
   }

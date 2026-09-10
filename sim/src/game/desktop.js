@@ -51,3 +51,28 @@ export function installDesktopBehaviour() {
 
   addEventListener("dragstart", (e) => e.preventDefault());
 }
+
+// ---- force feedback bridge ------------------------------------------------
+//
+// The only thing the webview cannot do itself. The shell (src-tauri/src/ffb.rs)
+// owns a DirectInput device on its own thread and renders torque at 1 kHz; the
+// game sends it one message a frame. In a browser every call resolves to
+// "not supported" and the game carries on without it.
+
+function invoke(cmd, args) {
+  const core = window.__TAURI__?.core;
+  if (!core?.invoke) return Promise.resolve(null);
+  return core.invoke(cmd, args);
+}
+
+const NOT_SUPPORTED = { supported: false, running: false, device: "", error: "" };
+
+export const ffbNative = {
+  status: () => invoke("ffb_status").then((s) => s ?? NOT_SUPPORTED).catch(() => NOT_SUPPORTED),
+  start: () => invoke("ffb_start").then((s) => s ?? NOT_SUPPORTED).catch((e) => ({ ...NOT_SUPPORTED, error: String(e) })),
+  stop: () => invoke("ffb_stop").then((s) => s ?? NOT_SUPPORTED).catch(() => NOT_SUPPORTED),
+  /** Fire-and-forget; called every frame. */
+  update: (cmd) => {
+    invoke("ffb_update", cmd).catch(() => {});
+  },
+};

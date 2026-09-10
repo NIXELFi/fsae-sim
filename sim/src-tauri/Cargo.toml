@@ -11,6 +11,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+# DirectInput for the steering-wheel force feedback (src/ffb.rs).
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Devices_HumanInterfaceDevice",
+  "Win32_System_LibraryLoader",
+] }
 
 [profile.release]
 opt-level = "s"

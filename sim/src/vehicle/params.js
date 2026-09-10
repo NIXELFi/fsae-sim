@@ -112,6 +112,30 @@ export const SDM26 = {
   // the wheel rotates in the cockpit, not how the car responds.
   steeringRatio: 4.0,
 
+  // EST: steering geometry, for the force the driver feels. None of this
+  // affects how the car goes round a corner; all of it sets what comes back
+  // through the rim. Take caster and trail off the real uprights when known.
+  steering: {
+    /** Caster angle, deg. Sets the mechanical trail with the tyre radius. */
+    casterDeg: 5.0,
+    /**
+     * Extra mechanical trail from the kingpin axis being ahead of the hub
+     * centre, m. Zero when the kingpin passes through the hub.
+     */
+    kingpinOffsetTrailM: 0.0,
+    /**
+     * Fraction of the kingpin moment that reaches the rim. Rack and column
+     * friction eat the rest. 0.85 is a plain rack with rod ends.
+     */
+    rackEfficiency: 0.85,
+    /**
+     * Ratio of rim torque to kingpin torque. Mechanically this is the inverse
+     * of `steeringRatio` (rim angle per road-wheel angle), and it stays derived
+     * from that unless the real rack says otherwise.
+     */
+    torqueRatio: null,
+  },
+
   // EST: brakes. 1500 N.m total at the wheels is enough to lock all four at
   // low speed (a rules requirement), so threshold braking is a skill.
   brakeTorqueMaxNm: 1500,

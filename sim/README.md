@@ -494,11 +494,44 @@ not use the Gamepad API's standard mapping and every vendor assigns axes
 differently, so watching which number moves is the only reliable way to find a
 pedal.
 
-**Force feedback is not implemented.** The settings are declared and documented
-so the shape does not have to change later, but nothing drives them. It needs
-the tyre model to return self-aligning torque (it returns lateral force only)
-and a kingpin/caster geometry block in the parameters — otherwise the force
-would be invented rather than derived, which is the one thing worth not doing.
+### Force feedback
+
+A direct-drive wheel is driven from the vehicle model, not from a canned
+effect. The signal is the **self-aligning torque of the front tyres**:
+
+- lateral force through the **pneumatic trail**, which is longest at zero slip
+  and collapses to zero as the contact patch starts to slide (`tire.js`,
+  brush-model shape). This collapse is why the rim goes light *before* the
+  front lets go, and it is the signal a driver actually reads;
+- plus the **mechanical trail** from caster (`params.steering`, estimated at
+  5 deg until the real uprights are measured);
+- summed per tyre with the axle's load split, so the outside tyre dominates as
+  the car rolls; through the 4.0 steering ratio and a rack efficiency to the
+  rim. The vehicle model reports it as `telemetry.rimTorqueNm`.
+
+`forceFeedback.js` adds what a real column has that the model does not --
+damping, friction, the end stops at the car's lock -- and describes texture
+(wheelspin, lockup, grass) and impacts (cones) for the motor. Everything is in
+newton-metres at the rim until the last line, where it is divided by the
+wheel's **rated torque** (5.5 N.m for a MOZA R5): the same settings feel the
+same on any base once each is told what it is.
+
+The web platform has no path to a wheel motor, so the desktop shell does it:
+`src-tauri/src/ffb.rs` opens the first force-feedback DirectInput device on
+its own thread and renders a constant-force effect at **1 kHz**, slewing the
+per-frame torque, synthesising the texture sine and the cone kick itself, and
+fading to zero within 250 ms if the game stops sending. In a browser the torque
+is still computed and shown live in the controls panel; it just goes nowhere.
+
+SDM26 puts about 9 N.m per g into the rim, so an R5 clips from ~0.6 g up. The
+default gain of 0.55 keeps the going-light signal inside the motor's range;
+raise it on a stronger base. If the wheel pulls the wrong way, there is an
+**Invert** switch -- and that would be worth reporting, because the sign
+convention is worked out rather than guessed.
+
+Set the base's own centring spring and damping to zero in Pit House; the
+shell switches DirectInput auto-centre off but a base-level spring would fight
+the tyre model.
 
 ## Vehicles as data
 

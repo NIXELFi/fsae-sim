@@ -15,7 +15,8 @@ import { EngineAudio } from "./game/audio.js";
 import { Timing, fmt } from "./game/timing.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
-import { isDesktop, installDesktopBehaviour } from "./game/desktop.js";
+import { isDesktop, installDesktopBehaviour, ffbNative } from "./game/desktop.js";
+import { ForceFeedback } from "./game/forceFeedback.js";
 import { renderSpecSheet } from "./game/specSheet.js";
 import { PARAM_DEFAULTS, readParam, writeParam } from "./vehicle/paramMeta.js";
 import { SetupAdjuster } from "./vehicle/setupAdjust.js";
@@ -62,6 +63,14 @@ class Game {
     this.input = new Input();
     this.audio = new EngineAudio();
 
+    // Force feedback: the mix is computed here every frame from the vehicle
+    // model's rim torque; the desktop shell streams it to the wheel. `ffbState`
+    // is what the shell last reported, for the settings panel.
+    this.ffb = new ForceFeedback();
+    this.ffbState = { supported: false, running: false, device: "", error: "" };
+    this.coneHitsThisFrame = 0;
+    ffbNative.status().then((st) => { this.ffbState = st; this.controlsPanel?.render(); });
+
     // Walkaround camera state. Free rather than a fixed orbit: looking at a
     // car means choosing the angle, and the interesting ones -- low at a
     // wheel, down on the floor, level with a wing -- are not on any one circle.
@@ -80,7 +89,8 @@ class Game {
     if (controlsRoot) {
       this.controlsPanel = new ControlsPanel(controlsRoot, this.input, () => {
         this.car.steeringServo = this.input.steeringServo();
-      });
+        this.syncFfb();
+      }, this);
       // Re-render when plugging a device in changes the detected profile.
       this.input.onProfileChange = () => this.controlsPanel.render();
     }
@@ -303,6 +313,20 @@ class Game {
     this.started = true;
   }
 
+  /**
+   * Start or stop the native force feedback to match the active profile. The
+   * shell only opens the wheel when a wheel profile with FFB enabled is
+   * active, so a pad user never has DirectInput grabbing a device they do not
+   * have.
+   */
+  async syncFfb() {
+    const prof = this.input.profile;
+    const want = prof.kind === "wheel" && prof.forceFeedback?.enabled && this.ffbState.supported;
+    if (want && !this.ffbState.running) this.ffbState = await ffbNative.start();
+    else if (!want && this.ffbState.running) this.ffbState = await ffbNative.stop();
+    this.controlsPanel?.render();
+  }
+
   /** Put the car back on the centreline where it left the course. */
   recover() {
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
@@ -421,6 +445,26 @@ class Game {
     if (hits > 0) {
       this.audio.coneHit();
       this.input.rumble(0.7, 0.4, 130);
+    }
+
+    // ---- force feedback ----
+    // Mixed every frame whether or not a wheel is attached: the settings panel
+    // shows the live torque, and a pad user can see what a wheel would feel.
+    const ffbCfg = this.input.profile.forceFeedback;
+    const cmd = this.ffb.update(dt, ffbCfg, tel, this.input.rim, {
+      spin: Math.max(0, tel.kappaR - 0.2) * 2.5,
+      lock: Math.max(0, -Math.min(tel.kappaF, tel.kappaR) - 0.2) * 2.5,
+      offTrack: !loc.onTrack && this.car.speed > 2,
+      coneHit: hits,
+    });
+    if (this.ffbState.running) {
+      const rated = Math.max(ffbCfg.maxForceNm, 0.1);
+      ffbNative.update({
+        command: cmd.command,
+        textureAmp: cmd.textureNm / rated,
+        textureHz: cmd.textureHz,
+        kick: cmd.kickNm / rated,
+      });
     }
 
     // Rumble for the things a driver feels: wheelspin, lockup, running wide.
@@ -598,6 +642,7 @@ class Game {
   }
 
   setPaused(on) {
+    if (on && this.ffbState.running) ffbNative.update({ command: 0, textureAmp: 0, textureHz: 0, kick: 0 });
     this.paused = on;
     this.dom.pauseHint.hidden = !on;
   }

@@ -112,14 +112,14 @@ export function axleMu(mu0, FzAxle, dFzLateral, Fz0, sensitivity) {
  * @returns {fx, fy, utilisation} forces in N, utilisation 0..1+ of the ellipse
  */
 export function tyreForces(slipAngle, slipRatio, Fz, muY, muX) {
-  if (Fz <= 1) return { fx: 0, fy: 0, utilisation: 0 };
+  if (Fz <= 1) return { fx: 0, fy: 0, utilisation: 0, trail: 0 };
 
   // Normalised slip vector (Pacejka similarity): each channel measured in
   // units of its own peak, so the combined limit is a true ellipse.
   const sx = slipRatio / PEAK_SLIP_RATIO;
   const sy = Math.tan(slipAngle) / Math.tan(PEAK_SLIP_ANGLE_RAD);
   const s = Math.hypot(sx, sy);
-  if (s < 1e-6) return { fx: 0, fy: 0, utilisation: 0 };
+  if (s < 1e-6) return { fx: 0, fy: 0, utilisation: 0, trail: pneumaticTrail(0, Fz) };
 
   // Evaluate each pure curve at the combined slip magnitude, then split the
   // resulting force along the slip direction.
@@ -130,5 +130,44 @@ export function tyreForces(slipAngle, slipRatio, Fz, muY, muX) {
     fx: (sx / s) * fx0,
     fy: (sy / s) * fy0,
     utilisation: Math.min(s, 3),
+    trail: pneumaticTrail(s, Fz),
   };
 }
+
+// ---- aligning torque -------------------------------------------------------
+//
+// Self-aligning torque is Fy acting through the pneumatic trail: the lateral
+// force is centred behind the contact-patch centre while the patch is mostly
+// gripping, and moves forward to the centre as the rear of the patch starts to
+// slide. So the trail is longest at zero slip and collapses to zero at the
+// point the tyre is fully sliding -- which is why a steering wheel goes light
+// BEFORE the front end lets go. That collapse, not the peak force, is the
+// signal a driver reads through force feedback.
+//
+// Shape is the brush model's: trail falls as (1 - s)^2 in normalised slip and
+// is zero from full sliding on. The brush model actually puts full sliding at
+// the force peak; a real slick keeps a little trail past the peak, so full
+// sliding is placed a bit beyond it (TRAIL_ZERO_SLIP). The scale grows with the
+// square root of load because contact-patch length does.
+//
+// EST: t0 = 20 mm at static load. Trail data for the 10" R20 is in the TTC Mz
+// channel and this constant should be fitted from it when that fit is done.
+
+const PNEUMATIC_TRAIL_M = 0.020;
+const TRAIL_ZERO_SLIP = 1.25;         // normalised slip at which trail hits zero
+const TRAIL_REF_LOAD_N = 700;         // load at which t0 applies (~ one SDM26 corner)
+
+/**
+ * Pneumatic trail (m) at normalised combined slip `s` and load `Fz`.
+ * Multiply by Fy for the aligning torque that opposes the slip.
+ */
+export function pneumaticTrail(s, Fz) {
+  if (Fz <= 0) return 0;
+  const x = Math.min(Math.abs(s) / TRAIL_ZERO_SLIP, 1);
+  const shape = (1 - x) * (1 - x);
+  return PNEUMATIC_TRAIL_M * Math.sqrt(Fz / TRAIL_REF_LOAD_N) * shape;
+}
+
+TIRE_INFO.pneumaticTrailM = PNEUMATIC_TRAIL_M;
+TIRE_INFO.trailZeroSlip = TRAIL_ZERO_SLIP;
+TIRE_INFO.pneumaticTrail = pneumaticTrail;
