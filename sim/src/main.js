@@ -363,7 +363,10 @@ class Game {
 
   update(dt) {
     this.lastDt = dt;
-    if (this.car?.native) this.input.nativeDevice = this.car.device;
+    if (this.car?.native) {
+      this.input.nativeDevice = this.car.device;
+      if (this.rigState.wheelName) this.input.nativeName = this.rigState.wheelName;
+    }
     const inp = this.input.poll();
 
     // Hand the control profile's steering dynamics to the vehicle model, and

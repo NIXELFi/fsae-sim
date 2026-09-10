@@ -13,6 +13,7 @@
 // produces is the only way to get full travel out of it.
 
 import { editableSettings } from "./controlProfiles.js";
+import { presetFor } from "./wheelPresets.js";
 
 const PROFILE_NOTES = {
   keyboard:
@@ -244,12 +245,51 @@ export class ControlsPanel {
     if (!st || !st.ffbSupported) {
       line = "Not available here: force feedback needs the Windows desktop build (DirectInput). " +
         "In a browser the torque is still computed and shown below.";
-    } else if (st.wheelPresent) {
+    } else if (st.wheelPresent && st.ffbActive) {
       line = `Driving ${st.wheelName || "the wheel"} natively at 1 kHz.`;
+    } else if (st.wheelPresent) {
+      line = `Reading ${st.wheelName} for steering and pedals, but not driving it: ${st.wheelError}`;
     } else {
-      line = `No force feedback wheel: ${st.wheelError || "none found"}. Restart the game with the base on.`;
+      line = `No wheel: ${st.wheelError || "none found"}. Plug the base in, put it in PC mode, and pick it below.`;
     }
     box.append(el("small", "ctl-hint", line));
+    if (st?.wheelPresent && st.deviceNames?.length > 1) {
+      box.append(el("small", "ctl-hint", `Also reading: ${st.deviceNames.slice(1).join(", ")} (axes 8 and up, buttons 32 and up).`));
+    }
+
+    // Which base, when there is a choice.
+    if (st?.available?.length) {
+      const pick = document.createElement("select");
+      const auto = document.createElement("option");
+      auto.value = "";
+      auto.textContent = "Steer with: first force feedback wheel found";
+      pick.append(auto);
+      for (const d of st.available) {
+        const o = document.createElement("option");
+        o.value = d.name;
+        o.textContent = `Steer with: ${d.name}${d.forceFeedback ? "" : " (no force feedback)"}`;
+        if (profile.wheel.deviceName === d.name) o.selected = true;
+        pick.append(o);
+      }
+      pick.addEventListener("change", () => {
+        s.set(id, "wheel.deviceName", pick.value);
+        this.input.refreshProfile();
+        this.onChange?.();
+      });
+      box.append(pick);
+    }
+
+    // What the preset did, and what it could not know.
+    const base = st?.wheelName || this.input.padName;
+    if (profile.kind === "wheel" && base) {
+      const preset = presetFor(base);
+      box.append(el("small", "ctl-hint",
+        `${preset.label}: rated ${preset.ratedNm} N.m, ${preset.rotationDeg} deg. ${preset.note}` +
+        (preset.verify ? " Pedal axes are a starting guess: press each pedal and watch the monitor." : "")));
+    }
+    box.append(el("small", "ctl-hint",
+      "Direction check: at speed, in a corner, ease your grip. The rim should pull back toward centre. " +
+      "If it pulls further into the corner, tick Invert."));
     const stats = this.game?.car?.stats;
     if (stats && stats.ticks > 0) {
       box.append(el("small", "ctl-hint",

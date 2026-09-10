@@ -35,6 +35,7 @@ import {
   applySteeringCurve,
   detectProfile,
 } from "./controlProfiles.js";
+import { presetFor, presetPaths } from "./wheelPresets.js";
 
 // Only used to decide whether the pad is being touched at all; the real
 // deadzone comes from the active profile.
@@ -187,8 +188,13 @@ export class Input {
    * controls work from a wheel's hat.
    */
   syntheticPad(nd) {
+    // Buttons: 32 per device, base first, so a button box's buttons sit at
+    // 32 and up. The base's hat becomes the standard d-pad indices 12-15.
+    const words = Array.isArray(nd.buttons) ? nd.buttons : [nd.buttons | 0];
     const buttons = [];
-    for (let i = 0; i < 16; i++) buttons.push({ pressed: !!(nd.buttons & (1 << i)), value: nd.buttons & (1 << i) ? 1 : 0 });
+    for (const w of words) {
+      for (let i = 0; i < 32; i++) buttons.push({ pressed: !!(w & (1 << i)), value: w & (1 << i) ? 1 : 0 });
+    }
     if (nd.pov >= 0) {
       const dir = Math.round(nd.pov / 9000) % 4; // 0 up, 1 right, 2 down, 3 left
       buttons[12] = { pressed: dir === 0, value: dir === 0 ? 1 : 0 };
@@ -196,18 +202,35 @@ export class Input {
       buttons[13] = { pressed: dir === 2, value: dir === 2 ? 1 : 0 };
       buttons[14] = { pressed: dir === 3, value: dir === 3 ? 1 : 0 };
     }
-    for (let i = 16; i < 32; i++) buttons.push({ pressed: !!(nd.buttons & (1 << i)), value: 0 });
-    if (!this._nativeAnnounced) {
-      this._nativeAnnounced = true;
+    if (this._nativeAnnounced !== this.nativeName) {
+      this._nativeAnnounced = this.nativeName;
       this.padName = this.nativeName;
       if (!this.pinned) {
         this.settings.setActive("wheel");
         this.profile = this.settings.active();
-        this.onProfileChange?.("wheel", this.nativeName);
       }
+      this.applyWheelPreset(this.nativeName);
+      this.onProfileChange?.(this.settings.activeId, this.nativeName);
       this.onPadChange?.(true, this.nativeName);
     }
     return { id: this.nativeName, index: -1, connected: true, mapping: "", axes: Array.from(nd.axes), buttons };
+  }
+
+  /**
+   * First time a given base is seen: rated torque, rotation, axis guesses
+   * and a gain that fits the motor, from `wheelPresets.js`. Only once per
+   * base, so the driver's own calibration survives every later launch.
+   * @returns the preset applied, or null if this base was already set up
+   */
+  applyWheelPreset(name) {
+    const s = this.settings;
+    if (s.read("wheel", "wheel.presetApplied") === name) return null;
+    const preset = presetFor(name);
+    for (const [path, value] of Object.entries(presetPaths(preset))) s.set("wheel", path, value);
+    s.set("wheel", "wheel.presetApplied", name);
+    this.lastPreset = preset;
+    this.profile = s.active();
+    return preset;
   }
 
   /** Rumble. Ignored silently on pads or browsers without an actuator. */

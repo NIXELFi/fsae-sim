@@ -290,6 +290,18 @@ export const PROFILES = {
 
       /** Centre offset, degrees, if the wheel does not zero perfectly. */
       centreTrimDeg: 0,
+      /**
+       * Product name of the base to steer with, when more than one game
+       * controller is plugged in. Empty lets the rig choose: the first
+       * thing with a force feedback actuator that looks like a wheel.
+       */
+      deviceName: "",
+      /**
+       * The base a preset was last applied for (`wheelPresets.js`). When a
+       * different base shows up its preset is applied once; after that the
+       * driver's own edits win.
+       */
+      presetApplied: "",
     },
     axes: {
       // Sensible defaults for a Logitech G-series on Windows. Wheels do NOT use
@@ -340,12 +352,12 @@ export const PROFILES = {
        * Master gain on the whole mix. 1.0 = the model's torque, unscaled.
        *
        * SDM26 puts about 9 N.m per g into a 4:1 rack, so an unscaled mix
-       * clips a 5.5 N.m R5 from ~0.6 g up -- and the clip erases the very
-       * thing worth feeling, the rim going light as the front starts to
-       * slide. 0.55 keeps the collapse inside the motor's range on an R5.
-       * On a 12 N.m base 1.0 is right.
+       * clips a small base from well under 1 g -- and the clip erases the
+       * very thing worth feeling, the rim going light as the front starts
+       * to slide. The preset derives this from the rated torque
+       * (`defaultGainFor`): about 0.5 on a 5 N.m base, 1.0 from 11 N.m up.
        */
-      gain: 0.55,
+      gain: 0.5,
       /** Self-aligning torque from the front tyres. The signal itself. */
       alignTorqueGain: 1.0,
       /** Wheelspin, lockup, kerbs and grass, as vibration. */
@@ -361,10 +373,11 @@ export const PROFILES = {
       /**
        * The motor's rated torque, Nm. This is the ONLY place the hardware
        * enters: the mix is in newton-metres at the rim and 1.0 out means this
-       * much. 5.5 is a MOZA R5; set it to what the base is rated for and the
-       * same gain feels the same on any wheel.
+       * much. Filled in from `wheelPresets.js` when a known base is detected
+       * (5.5 for a MOZA R5, 2.2 for a G29, 25 for a DD2); set it to what the
+       * base is rated for and the same gain feels the same on any wheel.
        */
-      maxForceNm: 5.5,
+      maxForceNm: 5.0,
       /** Flip the direction if the wheel pulls the wrong way. */
       invert: false,
     },
@@ -633,9 +646,9 @@ export function editableSettings(profile) {
       group: "Force feedback",
       items: [
         { path: "forceFeedback.maxForceNm", label: "Wheel rated torque", unit: " N.m",
-          min: 1, max: 30, step: 0.5, note: "What the base is rated for. MOZA R5 = 5.5." },
+          min: 1, max: 35, step: 0.5, note: "What the base is rated for. Set from the preset when the base is recognised." },
         { path: "forceFeedback.gain", label: "Overall gain", unit: "",
-          min: 0, max: 3, step: 0.05, note: "1.0 is the model unscaled; 0.55 keeps an R5 out of clipping." },
+          min: 0, max: 3, step: 0.05, note: "1.0 is the model unscaled (~9 N.m per g). Small bases clip sooner; the preset picks a fit." },
         { path: "forceFeedback.alignTorqueGain", label: "Tyre aligning torque", unit: "",
           min: 0, max: 2, step: 0.05 },
         { path: "forceFeedback.roadTextureGain", label: "Slip and surface texture", unit: "",

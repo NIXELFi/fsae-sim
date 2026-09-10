@@ -223,6 +223,28 @@ console.log("\nRUST PARITY  (sim-core golden vectors vs the JS model)");
   check("worst front trail difference", worstTrail, 0, 1e-9, " m");
 }
 
+// ------------------------------------------------------------ wheel presets ---
+console.log("\nWHEEL PRESETS");
+{
+  const { presetFor, defaultGainFor, presetPaths, WHEEL_PRESETS } = await import("../src/game/wheelPresets.js");
+  check("R5 recognised", presetFor("MOZA R5 Base").ratedNm, 5.5, 5.5, " N.m");
+  check("R9 beats generic MOZA", presetFor("MOZA R9 Base").ratedNm, 9, 9, " N.m");
+  check("G29 recognised", presetFor("Logitech G29 Driving Force Racing Wheel USB").ratedNm, 2.2, 2.2, " N.m");
+  check("DD2 recognised", presetFor("Fanatec Podium Wheel Base DD2").ratedNm, 25, 25, " N.m");
+  check("Simucube Pro recognised", presetFor("Simucube 2 Pro").ratedNm, 25, 25, " N.m");
+  check("unknown falls back", presetFor("Some Wheel Co Model X").ratedNm, 5, 5, " N.m");
+  check("gain on a 5.5 N.m base", defaultGainFor(5.5), 0.45, 0.55, "");
+  check("gain on a 12 N.m base", defaultGainFor(12), 1, 1, "");
+  check("gain floor on a 2 N.m base", defaultGainFor(2.2), 0.3, 0.3, "");
+  let bad = 0;
+  for (const p of WHEEL_PRESETS) {
+    const paths = presetPaths(p);
+    if (!(p.ratedNm > 0 && p.rotationDeg >= 180 && Number.isInteger(p.steerAxis))) bad++;
+    if (paths["forceFeedback.maxForceNm"] !== p.ratedNm) bad++;
+  }
+  check("every preset is well formed", bad, 0, 0, "");
+}
+
 // ----------------------------------------------------------- steering feel ---
 // Rim torque out of the vehicle model, which is what force feedback plays.
 // A left turn must produce a torque that tries to steer back right, it must

@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::wheel::{self, DeviceState, Wheel};
+use crate::wheel::{self, DeviceInfo, DeviceState, Wheel, AXES_PER_DEVICE, MAX_DEVICES};
 
 const RATE_HZ: f64 = 1000.0;
 
@@ -79,6 +79,8 @@ pub struct WheelConfig {
     /// Car lock at the rim, one side (deg). Sent by the webview from the
     /// vehicle's lock and ratio.
     pub car_rim_half_deg: f64,
+    /// Product name of the base the driver picked, if any. Empty = choose.
+    pub device_name: String,
     pub throttle: Option<PedalCal>,
     pub brake: Option<PedalCal>,
     /// Pedal -> plate map, [[pedal %, plate %], ...]. Applied to the native
@@ -96,6 +98,7 @@ impl Default for WheelConfig {
             soft_lock: true,
             centre_trim_deg: 0.0,
             car_rim_half_deg: 56.0,
+            device_name: String::new(),
             throttle: None,
             brake: None,
             etc_points: vec![[0.0, 0.0], [100.0, 100.0]],
@@ -240,6 +243,9 @@ pub enum RigCommand {
     ClearBoundary,
     Ffb(FfbConfig),
     Wheel(WheelConfig),
+    /// Re-open the wheel, steering by the named base (or the best guess).
+    #[serde(rename_all = "camelCase")]
+    SelectDevice { name: String },
 }
 
 // ---------------------------------------------------------------- outputs --
@@ -335,8 +341,10 @@ pub struct FfbOut {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceOut {
     pub present: bool,
-    pub axes: [f32; 8],
-    pub buttons: u32,
+    /// Axis `8*d + i`: axis i of device d; device 0 is the base.
+    pub axes: [f32; MAX_DEVICES * AXES_PER_DEVICE],
+    /// Per device, bit i is button i.
+    pub buttons: [u32; MAX_DEVICES],
     pub pov: i32,
     pub rim_deg: f64,
     pub half_lock_deg: f64,
@@ -370,10 +378,18 @@ pub struct Snapshot {
 #[serde(rename_all = "camelCase")]
 pub struct RigStatus {
     pub running: bool,
+    /// This build can drive a wheel at all (Windows).
     pub ffb_supported: bool,
+    /// A base is open and being read.
     pub wheel_present: bool,
+    /// ...and it has an actuator DirectInput can drive.
+    pub ffb_active: bool,
     pub wheel_name: String,
+    /// Every device being read, base first.
+    pub device_names: Vec<String>,
     pub wheel_error: String,
+    /// Everything plugged in, for the picker.
+    pub available: Vec<DeviceInfo>,
 }
 
 // ----------------------------------------------------------------- shared --
@@ -488,6 +504,8 @@ struct Loop {
     boundary: Option<Boundary>,
     etc: EtcMap,
     wheel: Option<Wheel>,
+    hwnd_raw: isize,
+    shared: Arc<Shared>,
     wheel_cfg: WheelConfig,
     ffb_cfg: FfbConfig,
     ffb: FfbMixer,
@@ -511,19 +529,10 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
     car.reset(0.0, 0.0, 0.0, 0.0);
 
     // The wheel is optional: no wheel means the webview steers.
-    let (wheel, wheel_status) = match Wheel::open(hwnd_raw) {
-        Ok(w) => {
-            let name = w.name.clone();
-            (Some(w), (true, name, String::new()))
-        }
-        Err(e) => (None, (false, String::new(), e)),
-    };
+    let wheel = open_wheel(&shared, hwnd_raw, None);
     {
         let mut st = shared.status.lock().unwrap();
         st.running = true;
-        st.wheel_present = wheel_status.0;
-        st.wheel_name = wheel_status.1;
-        st.wheel_error = wheel_status.2;
     }
     let _ = ready.send(());
 
@@ -533,6 +542,8 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
         boundary: None,
         etc: EtcMap::linear(),
         wheel,
+        hwnd_raw,
+        shared: shared.clone(),
         wheel_cfg: WheelConfig::default(),
         ffb_cfg: FfbConfig::default(),
         ffb: FfbMixer::default(),
@@ -603,6 +614,32 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
     st.running = false;
 }
 
+/// Open (or re-open) the base and report what happened in the status.
+fn open_wheel(shared: &Arc<Shared>, hwnd_raw: isize, prefer: Option<&str>) -> Option<Wheel> {
+    let available = wheel::enumerate();
+    let result = Wheel::open(hwnd_raw, prefer);
+    let mut st = shared.status.lock().unwrap();
+    st.available = available;
+    match result {
+        Ok(w) => {
+            st.wheel_present = true;
+            st.ffb_active = w.ffb;
+            st.wheel_name = w.name.clone();
+            st.device_names = w.names.clone();
+            st.wheel_error = if w.ffb { String::new() } else { "no force feedback actuator on this base (console mode, or a wheel DirectInput cannot drive); steering and pedals still work".into() };
+            Some(w)
+        }
+        Err(e) => {
+            st.wheel_present = false;
+            st.ffb_active = false;
+            st.wheel_name.clear();
+            st.device_names.clear();
+            st.wheel_error = e;
+            None
+        }
+    }
+}
+
 impl Loop {
     fn apply_command(&mut self, c: RigCommand) {
         match c {
@@ -621,9 +658,27 @@ impl Loop {
                 if pts.len() >= 2 {
                     self.etc.set_points(&pts);
                 }
+                let want = cfg.device_name.clone();
+                let have = self.wheel.as_ref().map(|w| w.name.clone()).unwrap_or_default();
                 self.wheel_cfg = cfg;
+                if !want.is_empty() && want != have {
+                    self.reopen(Some(&want));
+                }
+            }
+            RigCommand::SelectDevice { name } => {
+                let prefer = if name.is_empty() { None } else { Some(name.as_str()) };
+                self.reopen(prefer);
             }
         }
+    }
+
+    fn reopen(&mut self, prefer: Option<&str>) {
+        if let Some(mut w) = self.wheel.take() {
+            w.close();
+        }
+        self.device = DeviceState::default();
+        self.device_present = false;
+        self.wheel = open_wheel(&self.shared, self.hwnd_raw, prefer);
     }
 
     fn apply_params(&mut self, p: &ParamSet) {
@@ -769,7 +824,9 @@ impl Loop {
         let ffb_on = self.ffb_cfg.enabled && input.ffb_enabled && !input.paused;
         let ffb = self.ffb.mix(dt, &self.ffb_cfg, ffb_on, &tel, rim_deg, half_lock, native, &feel);
         if let Some(w) = self.wheel.as_mut() {
-            let _ = w.set_torque(if ffb_on { ffb.command as f32 } else { 0.0 });
+            if w.ffb {
+                let _ = w.set_torque(if ffb_on { ffb.command as f32 } else { 0.0 });
+            }
         }
 
         // ---- powertrain readouts the HUD and audio want ----

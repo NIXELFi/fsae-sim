@@ -541,9 +541,24 @@ Raise it on a stronger base. If the wheel pulls the wrong way, there is an
 **Invert** switch -- and that would be worth reporting, because the sign
 convention is worked out rather than guessed.
 
-Set the base's own centring spring and damping to zero in Pit House; the
-shell switches DirectInput auto-centre off but a base-level spring would fight
-the tyre model.
+**Any wheel, not one wheel.** The rig reads whatever DirectInput can see: the
+base plus up to three more devices (a separate pedal set, a shifter, a button
+box; their axes appear at 8 and up, buttons at 32 and up). When a base is
+recognised, `wheelPresets.js` fills in what cannot be read from the device --
+the motor's rated torque, the rotation it ships with, a first guess at the
+pedal axes -- and derives a gain that fits the motor. MOZA R3 to R21, Logitech
+G27/G29/G920/G923, Thrustmaster T150 to T-GT, Fanatec CSL DD to DD2, Simucube
+2, Simagic, Cammus, Asetek and VRS are in the table; anything else is treated
+as a 5 N.m base until you set the slider. Presets apply once per base, so a
+calibration you did is never overwritten by a relaunch. A base without an
+actuator DirectInput can drive (console mode, or a wheel without PC-mode FFB)
+still steers and reads its pedals; the panel says why it is silent. With more
+than one controller plugged in, the panel has a picker.
+
+Whatever the base, zero its own centring spring and damping in the vendor
+software (Pit House, G HUB, the Fanatec tuning menu, True Drive): the rig
+switches DirectInput auto-centre off, but a base-level spring would fight the
+tyre model.
 
 ## Vehicles as data
 

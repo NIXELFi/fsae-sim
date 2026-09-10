@@ -154,6 +154,7 @@ export class NativeCar {
       mapping: w.mapping ?? "match-car",
       softLock: w.softLock !== false,
       centreTrimDeg: w.centreTrimDeg ?? 0,
+      deviceName: w.deviceName ?? "",
       carRimHalfDeg: (this.p.maxSteerDeg * this.p.steeringRatio) / 2,
       throttle: isWheel ? pedal(profile.pedals?.throttle) : null,
       brake: isWheel ? pedal(profile.pedals?.brake) : null,
