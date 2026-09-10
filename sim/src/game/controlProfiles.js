@@ -209,7 +209,7 @@ export const PROFILES = {
       // The lock a key can reach shrinks with speed: Ackermann for 1.6 g plus
       // the peak slip angle plus 5 degrees. Full lock up to ~8 m/s, ~20 deg
       // at 15 m/s, ~17 deg at 20 m/s. See `usableLockFrac`.
-      speedSensitive: { ayG: 1.6, marginDeg: 5 },
+      speedSensitive: { ayG: 1.4, marginDeg: 3 },
     }),
     // Mouse steering: horizontal movement maps to steering angle. Off by
     // default because it is a different skill, not a better one. The mouse
