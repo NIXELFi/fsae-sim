@@ -12,6 +12,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
+# The vehicle model. The same crate the JS build is checked against
+# (sim/data/vehicle-golden.json); the desktop build runs it natively at 1 kHz.
+sim-core = { path = "../../native/crates/sim-core" }
 
 [target.'cfg(windows)'.dependencies]
 # DirectInput for the steering-wheel force feedback (src/ffb.rs).
@@ -19,6 +22,8 @@ windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Devices_HumanInterfaceDevice",
   "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_Media",
 ] }
 
 [profile.release]
@@ -30,3 +35,9 @@ opt-level = "s"
 # for a fraction of the link.
 lto = "thin"
 strip = true
+
+# The shell is size-optimised, but the physics is not: the rig thread steps
+# the vehicle model and the force feedback at 1 kHz, and that code wants the
+# full optimiser.
+[profile.release.package.sim-core]
+opt-level = 3

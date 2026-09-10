@@ -30,6 +30,31 @@ pub struct PowertrainTelemetry {
 pub trait PowertrainModel: Send + Sync {
     fn name(&self) -> &'static str;
 
+    /// For a host that needs the concrete model back. See `TyreModel`.
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        None
+    }
+
+    /// Would a downshift right now over-rev the engine? Powertrains without
+    /// gears have nothing to over-rev.
+    fn downshift_safe(&self, _wheel_omega: f64) -> bool {
+        true
+    }
+
+    /// Rpm above which the next gear already makes more wheel force.
+    fn optimal_upshift_rpm(&self) -> f64 {
+        f64::INFINITY
+    }
+
+    /// Indicated crank torque for a throttle demand (what the sound model
+    /// wants), and the throttle plate position the ETC actually holds.
+    fn indicated_torque_nm(&self, _rpm: f64, _demand: f64) -> f64 {
+        0.0
+    }
+    fn plate_position(&self, _rpm: f64, demand: f64) -> f64 {
+        demand
+    }
+
     /// Advance one substep and report what reaches the wheel.
     fn step(&mut self, dt: f64, throttle: f64, wheel_omega: f64, speed: f64) -> DriveOutput;
 
@@ -454,6 +479,29 @@ impl GearedEngine {
 impl PowertrainModel for GearedEngine {
     fn name(&self) -> &'static str {
         "Geared engine (CFD sweep + clutch)"
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
+    }
+
+    fn downshift_safe(&self, wheel_omega: f64) -> bool {
+        if self.gear == 0 {
+            return false;
+        }
+        wheel_omega * self.ratio_for(self.gear - 1) * RADS_TO_RPM < self.rev_limit_rpm
+    }
+
+    fn optimal_upshift_rpm(&self) -> f64 {
+        GearedEngine::optimal_upshift_rpm(self)
+    }
+
+    fn indicated_torque_nm(&self, rpm: f64, demand: f64) -> f64 {
+        self.indicated_torque(rpm, demand)
+    }
+
+    fn plate_position(&self, rpm: f64, demand: f64) -> f64 {
+        GearedEngine::plate_position(self, rpm, demand)
     }
 
     fn wot_torque_nm(&self, rpm: f64) -> f64 {

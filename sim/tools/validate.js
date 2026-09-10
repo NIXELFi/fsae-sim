@@ -181,6 +181,48 @@ console.log("\nTYRE");
   check("trail grows with load", TIRE_INFO.pneumaticTrail(0, 2 * Fz) / t0, 1.2, 1.6, "x");
 }
 
+// ------------------------------------------------------ Rust model parity ---
+// The desktop build runs the vehicle model in Rust (native/crates/sim-core);
+// the JS model is what a browser runs and what this script validates. They
+// are ports of each other and must agree to floating-point noise on the same
+// scripted drive. A divergence is a bug in one of them, not a modelling
+// choice. Regenerate the golden file with:
+//   cargo run --release -p sim-core --example golden_vehicle > sim/data/vehicle-golden.json
+console.log("\nRUST PARITY  (sim-core golden vectors vs the JS model)");
+{
+  const golden = JSON.parse(readFileSync(join(here, "../data/vehicle-golden.json"), "utf8"));
+  // Same drive as examples/golden_vehicle.rs, deliberately inside the tyre:
+  // at the limit the model is chaotic and one-ulp libm differences grow into
+  // centimetres, which says nothing about whether the models agree.
+  const script = (t) =>
+    t < 3 ? [0, 0.55, 0] : t < 5 ? [0.15, 0.4, 0] : t < 5.5 ? [0.05, 0, 0.25] : t < 9 ? [-0.12, 0.5, 0] : [0.08, 0.8, 0];
+  const { car } = fresh();
+  car.respawn(0, 0, 0, 0);
+  const dt = golden.dt;
+  const shifts = new Set(golden.shiftFrames);
+  let worstPos = 0, worstVel = 0, worstRpm = 0, worstRim = 0, worstTrail = 0;
+  const byFrame = new Map(golden.rows.map((r) => [r.f, r]));
+  for (let f = 0; f < 12 * 60; f++) {
+    const [steer, throttle, brake] = script(f * dt);
+    if (shifts.has(f)) car.pt.requestUpshift();
+    car.step(dt, { steer, throttle, brake });
+    const g = byFrame.get(f);
+    if (!g) continue;
+    const t = car.telemetry;
+    worstPos = Math.max(worstPos, Math.abs(car.X - g.x), Math.abs(car.Y - g.y), Math.abs(car.psi - g.psi));
+    worstVel = Math.max(worstVel, Math.abs(car.u - g.u), Math.abs(car.v - g.v), Math.abs(car.r - g.r));
+    worstRpm = Math.max(worstRpm, Math.abs(car.pt.engineRpm - g.rpm));
+    worstRim = Math.max(worstRim, Math.abs(t.rimTorqueNm - g.rim));
+    worstTrail = Math.max(worstTrail, Math.abs(t.trailFm - g.trail));
+    if (car.pt.gear !== g.gear) worstRpm = 1e9;
+  }
+  check("worst pose difference", worstPos, 0, 1e-6, " m|rad");
+  check("worst velocity difference", worstVel, 0, 1e-6, " m/s|rad/s");
+  check("worst engine rpm difference", worstRpm, 0, 1e-3, " rpm");
+  check("worst rim torque difference", worstRim, 0, 1e-6, " N.m");
+  check("worst front trail difference", worstTrail, 0, 1e-9, " m");
+}
+
 // ----------------------------------------------------------- steering feel ---
 // Rim torque out of the vehicle model, which is what force feedback plays.
 // A left turn must produce a torque that tries to steer back right, it must
@@ -203,15 +245,27 @@ console.log("\nSTEERING FEEL  (rim torque for force feedback)");
   check("left turn pulls the rim back right", -gentle.rimTorqueNm, 0.5, 30, " N.m");
   check("harder turn, more torque", hard.rimTorqueNm / gentle.rimTorqueNm, 1.2, 5, "x");
   check("rim torque at ~1 g", -gentle.rimTorqueNm / Math.max(gentle.ayG, 0.1), 2, 20, " N.m/g");
-  // Push the front past its peak and the pneumatic trail collapses. Torque
-  // per unit lateral force falls to what the mechanical trail alone gives --
-  // with 5 deg of caster on a 0.2 m tyre that is about half the low-slip
-  // figure, and it is the caster, not the tyre, holding it up.
-  const sliding = settle(0.45, 12);
-  const perFyGentle = -gentle.rimTorqueNm / Math.max(gentle.ayG, 1e-3);
-  const perFySliding = -sliding.rimTorqueNm / Math.max(sliding.ayG, 1e-3);
-  check("front slip angle when sliding", sliding.slipF, 10, 90, " deg");
-  check("torque per g collapses when sliding", perFySliding / perFyGentle, 0.3, 0.7, "");
+  // The claim force feedback rests on: the rim goes light BEFORE the front
+  // lets go. Straight from the tyre, on one front tyre at its static load:
+  // sweep slip angle, and the aligning moment (lateral force through the
+  // pneumatic plus mechanical trail) must peak at a smaller slip angle than
+  // the lateral force does, and be well down by the time the force peaks.
+  // A trail that only collapsed after the force peak would fail this.
+  const { tyreForces } = await import("../src/vehicle/tire.js");
+  const FzTyre = gentle.FzF / 2;
+  const mech = gentle.mechTrailM;
+  let fyPeak = { a: 0, v: 0 }, mzPeak = { a: 0, v: 0 }, mzAtFyPeak = 0, mzLow = 0, fyLow = 0;
+  for (let deg = 0.25; deg <= 16; deg += 0.25) {
+    const f = tyreForces((deg * Math.PI) / 180, 0, FzTyre, SDM26.muLat, SDM26.muLong);
+    const mz = f.fy * (f.trail + mech);
+    if (deg === 0.25) { mzLow = mz; fyLow = f.fy; }
+    if (f.fy > fyPeak.v) { fyPeak = { a: deg, v: f.fy }; mzAtFyPeak = mz; }
+    if (mz > mzPeak.v) mzPeak = { a: deg, v: mz };
+  }
+  check("lateral force peaks at", fyPeak.a, 7, 10, " deg");
+  check("aligning torque peaks before the force does", fyPeak.a - mzPeak.a, 2, 7, " deg");
+  check("torque per N at the grip peak vs low slip", (mzAtFyPeak / fyPeak.v) / (mzLow / fyLow), 0.35, 0.75, "");
+  check("mechanical trail", mech * 1000, 10, 25, " mm");
 
   // The mixer: with a wheel profile, a resting rim at zero slip commands zero,
   // damping opposes rim motion, and the end stop pushes back toward the lock.

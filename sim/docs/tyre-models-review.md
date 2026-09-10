@@ -18,16 +18,22 @@ the fit's nominal; `UNLOADED_RADIUS = 0.34` m on a 0.2 m tyre; `WIDTH = 0`;
 `NOMPRES = 180 kPa` against a 97 kPa test pressure. Friction peaks are raw
 TTC belt values (2.6-3.4) with no road scaling.
 
-The MF6.1.2 R20 file is the only one with an Mz fit, and it is not a shape
-anyone should feel through a wheel:
+The MF6.1.2 R20 file is the only one with an Mz fit, and the fit is broken
+rather than merely rough. Evaluated straight from MF6.1 (4.E26 onward):
 
-- cornering stiffness (`Kya`) changes sign between 1000 and 1500 N, so Fy
-  itself is wrong above ~900 N, which is the loaded outside front at 1.5 g;
-- pneumatic trail barely falls with slip (`Ct` ~ 1.27 with a tiny `Bt`), so
-  the wheel would not go light as the front slides -- the one thing FFB is for;
-- `Dt` scales with the 0.34 m radius, inflating the trail 1.7x;
-- at 300-700 N the low-slip trail evaluates to 6-12 mm, which after the radius
-  correction is 4-7 mm. Raw TTC Mz/Fy for a 10" R20 is nearer 15-25 mm.
+- `PKY4 = 38.7` (physically ~2), so `Kya = PKY1 Fz0 sin(PKY4 atan(Fz / (PKY2 Fz0)))`
+  crosses zero at about 1640 N even at the fit's nominal pressure, and at
+  14 psi `(1 + PPY2 dpi) = -0.64` flips the sign of the whole argument. The
+  cornering stiffness therefore has the wrong sign over most of the range and
+  changes sign inside it; Fy itself is wrong above ~900 N, which is the loaded
+  outside front at 1.5 g. Whether Fz is stored negative (SAE) changes nothing:
+  every term is a ratio to `FNOMIN`.
+- The aligning block is worse: `SHt = QHZ1 + QHZ2 dfz` is a horizontal shift
+  of -56 to -66 DEGREES at 300-1500 N, `Dt` is negative (-15 to -65 mm), and
+  the `Et` polynomial runs from -33 to +31 and is clamped on one side only.
+  Any "trail" read off this curve is garbage output, not a property of the
+  tyre.
+- `Dt` also scales with the 0.34 m `UNLOADED_RADIUS`, 1.7x the real tyre.
 
 So the simulator keeps its own trail: a brush-model shape, 20 mm at 700 N
 scaling with the square root of load, gone at 1.25x the peak slip. Those are

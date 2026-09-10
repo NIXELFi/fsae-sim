@@ -26,6 +26,7 @@ pub struct DoubleTrackSolver {
     w: [f64; 4],
     alpha_lag: [f64; 4],
     delta: f64,
+    steer_rate: f64,
     ax: f64,
     ay: f64,
     tel: Telemetry,
@@ -39,6 +40,7 @@ impl DoubleTrackSolver {
             w: [0.0; 4],
             alpha_lag: [0.0; 4],
             delta: 0.0,
+            steer_rate: 0.0,
             ax: 0.0,
             ay: 0.0,
             tel: Telemetry::default(),
@@ -87,6 +89,10 @@ impl Solver for DoubleTrackSolver {
     fn state(&self) -> ChassisState {
         self.s
     }
+
+    fn state_mut(&mut self) -> &mut ChassisState {
+        &mut self.s
+    }
     fn telemetry(&self) -> Telemetry {
         self.tel
     }
@@ -118,11 +124,15 @@ impl Solver for DoubleTrackSolver {
     fn tyre(&self) -> &dyn TyreModel {
         self.c.tyre.as_ref()
     }
+
+    fn tyre_mut(&mut self) -> &mut dyn TyreModel {
+        self.c.tyre.as_mut()
+    }
 }
 
 impl DoubleTrackSolver {
     fn substep(&mut self, dt: f64, controls: Controls) {
-        self.delta = advance_steer(self.delta, controls.steer, &self.c.params, dt);
+        self.delta = advance_steer(self.delta, &mut self.steer_rate, controls.steer, &self.c.params, dt);
         let (dl, dr) = self.steer_angles();
         let steer = [dl, dr, 0.0, 0.0];
 
@@ -154,13 +164,14 @@ impl DoubleTrackSolver {
         let ms = p.sprung_mass();
         let ms_f = ms * p.weight_dist_front;
         let ms_r = ms * (1.0 - p.weight_dist_front);
-        let unsprung_axle = 2.0 * p.unsprung_per_corner_kg;
+        let unsprung_f = 2.0 * p.unsprung_front_kg;
+        let unsprung_r = 2.0 * p.unsprung_rear_kg;
         let d_fz_f = (ms * self.ay * p.roll.roll_arm_m * p.roll.rsd_front) / p.track_front_m
             + (ms_f * self.ay * p.roll.rc_front_m) / p.track_front_m
-            + (unsprung_axle * self.ay * p.tyre_radius_m) / p.track_front_m;
+            + (unsprung_f * self.ay * p.tyre_radius_m) / p.track_front_m;
         let d_fz_r = (ms * self.ay * p.roll.roll_arm_m * (1.0 - p.roll.rsd_front)) / p.track_rear_m
             + (ms_r * self.ay * p.roll.rc_rear_m) / p.track_rear_m
-            + (unsprung_axle * self.ay * p.tyre_radius_m) / p.track_rear_m;
+            + (unsprung_r * self.ay * p.tyre_radius_m) / p.track_rear_m;
 
         // Positive ay is a left turn, which loads the right-hand tyres.
         let mut fz = [0.0f64; 4];
@@ -295,6 +306,7 @@ impl DoubleTrackSolver {
             shifting: pt.shifting,
             wheel_omega_front: 0.5 * (self.w[FL] + self.w[FR]),
             wheel_omega_rear: rear_omega,
+            ..Default::default()
         };
     }
 }

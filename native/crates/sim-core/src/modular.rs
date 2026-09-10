@@ -90,7 +90,7 @@ pub struct ElasticGeometricSuspension;
 
 impl SuspensionModel for ElasticGeometricSuspension {
     fn lateral_transfer(&self, v: &VehicleParams, ay: f64) -> AxleTransfer {
-        let m_sprung = v.mass_kg - 4.0 * v.unsprung_per_corner_kg;
+        let m_sprung = v.sprung_mass();
         let front_share = v.roll.rsd_front;
 
         // Elastic: the sprung mass rolling about the roll axis.
@@ -105,8 +105,8 @@ impl SuspensionModel for ElasticGeometricSuspension {
         let geom_r = w_r * ay * v.roll.rc_rear_m / v.track_rear_m.max(1e-6);
 
         // Unsprung, through its own centre of gravity (about wheel centre).
-        let uns_f = 2.0 * v.unsprung_per_corner_kg * ay * v.tyre_radius_m / v.track_front_m.max(1e-6);
-        let uns_r = 2.0 * v.unsprung_per_corner_kg * ay * v.tyre_radius_m / v.track_rear_m.max(1e-6);
+        let uns_f = 2.0 * v.unsprung_front_kg * ay * v.tyre_radius_m / v.track_front_m.max(1e-6);
+        let uns_r = 2.0 * v.unsprung_rear_kg * ay * v.tyre_radius_m / v.track_rear_m.max(1e-6);
 
         AxleTransfer {
             front_n: elastic_f + geom_f + uns_f,

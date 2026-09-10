@@ -52,12 +52,13 @@ export function installDesktopBehaviour() {
   addEventListener("dragstart", (e) => e.preventDefault());
 }
 
-// ---- force feedback bridge ------------------------------------------------
+// ---- rig bridge ------------------------------------------------------------
 //
-// The only thing the webview cannot do itself. The shell (src-tauri/src/ffb.rs)
-// owns a DirectInput device on its own thread and renders torque at 1 kHz; the
-// game sends it one message a frame. In a browser every call resolves to
-// "not supported" and the game carries on without it.
+// The desktop shell (src-tauri/src/rig.rs) runs the vehicle model, reads the
+// steering wheel and drives its motor on a native 1 kHz thread. The webview
+// talks to it with one `rig_frame` per rendered frame and the occasional
+// `rig_command`. In a browser every call resolves to "not available" and the
+// game runs the JS model instead.
 
 function invoke(cmd, args) {
   const core = window.__TAURI__?.core;
@@ -65,14 +66,16 @@ function invoke(cmd, args) {
   return core.invoke(cmd, args);
 }
 
-const NOT_SUPPORTED = { supported: false, running: false, device: "", error: "" };
+const NO_RIG = { running: false, ffbSupported: false, wheelPresent: false, wheelName: "", wheelError: "" };
 
-export const ffbNative = {
-  status: () => invoke("ffb_status").then((s) => s ?? NOT_SUPPORTED).catch(() => NOT_SUPPORTED),
-  start: () => invoke("ffb_start").then((s) => s ?? NOT_SUPPORTED).catch((e) => ({ ...NOT_SUPPORTED, error: String(e) })),
-  stop: () => invoke("ffb_stop").then((s) => s ?? NOT_SUPPORTED).catch(() => NOT_SUPPORTED),
-  /** Fire-and-forget; called every frame. */
-  update: (cmd) => {
-    invoke("ffb_update", cmd).catch(() => {});
-  },
+export const rigNative = {
+  /** True only in the desktop shell. */
+  available: () => !!window.__TAURI__?.core?.invoke,
+  status: () => invoke("rig_status").then((s) => s ?? NO_RIG).catch(() => NO_RIG),
+  start: () => invoke("rig_start").then((s) => s ?? NO_RIG).catch((e) => ({ ...NO_RIG, wheelError: String(e) })),
+  stop: () => invoke("rig_stop").then((s) => s ?? NO_RIG).catch(() => NO_RIG),
+  /** Inputs in, latest snapshot out. Once per frame. */
+  frame: (input) => invoke("rig_frame", { input }),
+  /** Fire-and-forget: respawn, parameters, barrier, control config. */
+  command: (command) => { invoke("rig_command", { command }).catch(() => {}); },
 };

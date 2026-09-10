@@ -77,6 +77,15 @@ export class Input {
      * on a wheel profile; zero otherwise.
      */
     this.rim = { deg: 0, halfLockDeg: 0 };
+    /**
+     * A wheel read natively by the desktop rig (DirectInput), presented here
+     * as if it were a Gamepad API device so profiles, calibration and the
+     * live axis monitor all work unchanged. Set by the game each frame;
+     * null in a browser. While present it takes precedence over the
+     * Gamepad API, which cannot see an exclusively acquired device anyway.
+     */
+    this.nativeDevice = null;
+    this.nativeName = "wheel (native)";
 
     // Typing a throttle-map value into a number field must not also stand on
     // the throttle, so keys aimed at a form control never reach the car.
@@ -156,6 +165,8 @@ export class Input {
   }
 
   pad() {
+    const nd = this.nativeDevice;
+    if (nd && nd.present) return this.syntheticPad(nd);
     const pads = navigator.getGamepads?.() ?? [];
     if (this.padIndex != null && pads[this.padIndex]) return pads[this.padIndex];
     // Some browsers only populate the array after the first button press, so
@@ -168,6 +179,35 @@ export class Input {
       }
     }
     return null;
+  }
+
+  /**
+   * The rig's device state in Gamepad API shape. Buttons are a bitmask; the
+   * hat becomes the standard-mapping d-pad indices 12-15 so the setup
+   * controls work from a wheel's hat.
+   */
+  syntheticPad(nd) {
+    const buttons = [];
+    for (let i = 0; i < 16; i++) buttons.push({ pressed: !!(nd.buttons & (1 << i)), value: nd.buttons & (1 << i) ? 1 : 0 });
+    if (nd.pov >= 0) {
+      const dir = Math.round(nd.pov / 9000) % 4; // 0 up, 1 right, 2 down, 3 left
+      buttons[12] = { pressed: dir === 0, value: dir === 0 ? 1 : 0 };
+      buttons[15] = { pressed: dir === 1, value: dir === 1 ? 1 : 0 };
+      buttons[13] = { pressed: dir === 2, value: dir === 2 ? 1 : 0 };
+      buttons[14] = { pressed: dir === 3, value: dir === 3 ? 1 : 0 };
+    }
+    for (let i = 16; i < 32; i++) buttons.push({ pressed: !!(nd.buttons & (1 << i)), value: 0 });
+    if (!this._nativeAnnounced) {
+      this._nativeAnnounced = true;
+      this.padName = this.nativeName;
+      if (!this.pinned) {
+        this.settings.setActive("wheel");
+        this.profile = this.settings.active();
+        this.onProfileChange?.("wheel", this.nativeName);
+      }
+      this.onPadChange?.(true, this.nativeName);
+    }
+    return { id: this.nativeName, index: -1, connected: true, mapping: "", axes: Array.from(nd.axes), buttons };
   }
 
   /** Rumble. Ignored silently on pads or browsers without an actuator. */

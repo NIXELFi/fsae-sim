@@ -95,3 +95,21 @@ no file.
   adjustment. It is a spike, not the app.
 - Gamepad works (bevy_gilrs detected the pads immediately) but is untested
   beyond enumeration.
+
+
+## Parity with the JS model
+
+`sim-core` is what the desktop build drives with (the Tauri shell's rig
+thread), and `sim/src/vehicle/*.js` is what a browser drives with. They are
+ports of each other and are held to it: `examples/golden_vehicle.rs` emits a
+scripted 12 s drive and `sim/tools/validate.js` replays it through the JS
+model, requiring agreement to 1e-6 m. Regenerate after any model change:
+
+```bash
+cargo run --release -p sim-core --example golden_vehicle > ../sim/data/vehicle-golden.json
+```
+
+The drive stays inside the tyre and above walking pace on purpose. At the
+limit, or with the clutch chattering at a crawl, the model is discontinuous
+and one-ulp differences between JS `Math` and Rust libm flip a branch -- which
+says nothing about whether the models agree.

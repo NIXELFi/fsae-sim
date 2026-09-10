@@ -42,8 +42,24 @@ pub struct SteeringParams {
     pub lag_s: f64,
     /// Rate limit at the road wheel (rad/s).
     pub rate_rad_s: f64,
-    /// Steering-wheel turns per road-wheel angle, for display only.
+    /// Acceleration limit at the road wheel (rad/s^2). Effectively infinite
+    /// by default, which reduces the servo to rate limit + lag; a control
+    /// profile lowers it so a step input (a key) cannot become a step in
+    /// steering velocity.
+    pub accel_rad_s2: f64,
+    /// Rim angle per road-wheel angle. With force feedback it is also the
+    /// torque ratio the other way: rim torque = kingpin torque / ratio.
     pub ratio: f64,
+    /// Caster angle (rad). With the tyre radius it sets the mechanical trail.
+    pub caster_rad: f64,
+    /// Extra mechanical trail from the kingpin axis sitting ahead of the hub
+    /// centre (m).
+    pub kingpin_offset_trail_m: f64,
+    /// Fraction of the kingpin moment that reaches the rim.
+    pub rack_efficiency: f64,
+    /// Rim torque per kingpin torque, if the real rack says something other
+    /// than 1/ratio.
+    pub torque_ratio: Option<f64>,
     /// 0 = parallel steer, 1 = full Ackermann. Only the double-track solver
     /// can use this; a bicycle model has one front wheel by definition.
     pub ackermann: f64,
@@ -61,7 +77,10 @@ pub struct VehicleParams {
     pub track_rear_m: f64,
     pub tyre_radius_m: f64,
     pub izz_kg_m2: f64,
-    pub unsprung_per_corner_kg: f64,
+    /// Unsprung mass per corner, front and rear (kg). They differ: the front
+    /// carries the steering upright, the rear the driveshaft and sprocket.
+    pub unsprung_front_kg: f64,
+    pub unsprung_rear_kg: f64,
     pub wheel_inertia_front_kg_m2: f64,
     pub wheel_inertia_rear_kg_m2: f64,
     pub crr: f64,
@@ -88,11 +107,22 @@ impl VehicleParams {
     }
 
     pub fn sprung_mass(&self) -> f64 {
-        self.mass_kg - 4.0 * self.unsprung_per_corner_kg
+        self.mass_kg - 2.0 * (self.unsprung_front_kg + self.unsprung_rear_kg)
     }
 
     pub fn weight(&self) -> f64 {
         self.mass_kg * G
+    }
+
+    /// Mechanical trail from caster and kingpin offset (m).
+    pub fn mechanical_trail(&self) -> f64 {
+        self.tyre_radius_m * self.steering.caster_rad.tan() + self.steering.kingpin_offset_trail_m
+    }
+
+    /// Rim torque per unit kingpin torque, losses included.
+    pub fn rim_torque_ratio(&self) -> f64 {
+        let r = self.steering.torque_ratio.unwrap_or(1.0 / self.steering.ratio.max(1e-6));
+        r * self.steering.rack_efficiency
     }
 
     /// Downforce and drag at a given speed (N).
@@ -118,7 +148,8 @@ pub fn sdm26() -> VehicleParams {
         track_rear_m: 1.194,
         tyre_radius_m: 0.20,
         izz_kg_m2: 105.0,
-        unsprung_per_corner_kg: 11.0,
+        unsprung_front_kg: 11.0,
+        unsprung_rear_kg: 11.0,
         wheel_inertia_front_kg_m2: 0.22,
         wheel_inertia_rear_kg_m2: 0.25,
         crr: 0.02,
@@ -139,7 +170,12 @@ pub fn sdm26() -> VehicleParams {
             max_steer_rad: 28.0_f64.to_radians(),
             lag_s: 0.06,
             rate_rad_s: 360.0_f64.to_radians(),
+            accel_rad_s2: 1e9,
             ratio: 4.0,
+            caster_rad: 5.0_f64.to_radians(),
+            kingpin_offset_trail_m: 0.0,
+            rack_efficiency: 0.85,
+            torque_ratio: None,
             ackermann: 0.0,
         },
     }

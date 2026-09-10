@@ -239,19 +239,23 @@ export class ControlsPanel {
       }),
     );
 
-    const st = this.game?.ffbState;
+    const st = this.game?.rigState;
     let line;
-    if (!st || !st.supported) {
+    if (!st || !st.ffbSupported) {
       line = "Not available here: force feedback needs the Windows desktop build (DirectInput). " +
         "In a browser the torque is still computed and shown below.";
-    } else if (st.running) {
-      line = `Driving: ${st.device || "force feedback device"}`;
-    } else if (st.error) {
-      line = `Not running: ${st.error}`;
+    } else if (st.wheelPresent) {
+      line = `Driving ${st.wheelName || "the wheel"} natively at 1 kHz.`;
     } else {
-      line = "Ready. Switch on above to open the wheel.";
+      line = `No force feedback wheel: ${st.wheelError || "none found"}. Restart the game with the base on.`;
     }
     box.append(el("small", "ctl-hint", line));
+    const stats = this.game?.car?.stats;
+    if (stats && stats.ticks > 0) {
+      box.append(el("small", "ctl-hint",
+        `Rig: ${stats.rateHz.toFixed(0)} Hz, ${stats.tickUsAvg.toFixed(0)} us/tick avg, ` +
+        `${stats.tickUsMax.toFixed(0)} us max, ${stats.overruns} overruns.`));
+    }
 
     // Live torque, as a centred bar. Right of centre pulls the rim clockwise.
     const meter = el("div", "ctl-ffb-meter");

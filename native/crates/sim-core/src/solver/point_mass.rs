@@ -18,6 +18,7 @@ pub struct PointMassSolver {
     c: Chassis,
     s: ChassisState,
     delta: f64,
+    steer_rate: f64,
     ax: f64,
     ay: f64,
     tel: Telemetry,
@@ -29,6 +30,7 @@ impl PointMassSolver {
             c,
             s: ChassisState::default(),
             delta: 0.0,
+            steer_rate: 0.0,
             ax: 0.0,
             ay: 0.0,
             tel: Telemetry::default(),
@@ -56,6 +58,10 @@ impl Solver for PointMassSolver {
 
     fn state(&self) -> ChassisState {
         self.s
+    }
+
+    fn state_mut(&mut self) -> &mut ChassisState {
+        &mut self.s
     }
 
     fn telemetry(&self) -> Telemetry {
@@ -86,12 +92,16 @@ impl Solver for PointMassSolver {
     fn tyre(&self) -> &dyn TyreModel {
         self.c.tyre.as_ref()
     }
+
+    fn tyre_mut(&mut self) -> &mut dyn TyreModel {
+        self.c.tyre.as_mut()
+    }
 }
 
 impl PointMassSolver {
     fn substep(&mut self, dt: f64, controls: Controls) {
         let p = &self.c.params;
-        self.delta = advance_steer(self.delta, controls.steer, p, dt);
+        self.delta = advance_steer(self.delta, &mut self.steer_rate, controls.steer, p, dt);
 
         let u = self.s.u.max(0.0);
         let (downforce, drag) = p.aero_forces(u);
@@ -150,6 +160,7 @@ impl PointMassSolver {
             shifting: pt.shifting,
             wheel_omega_front: wheel_omega,
             wheel_omega_rear: wheel_omega,
+            ..Default::default()
         };
     }
 }

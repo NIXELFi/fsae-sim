@@ -35,6 +35,8 @@
 //! assert!(car.state().speed() > 0.0);
 //! ```
 
+pub mod assists;
+pub mod boundary;
 pub mod etc_map;
 pub mod modular;
 pub mod powertrain;
@@ -43,6 +45,8 @@ pub mod tyre;
 pub mod vehicle;
 
 pub mod prelude {
+    pub use crate::assists::Assists;
+    pub use crate::boundary::Boundary;
     pub use crate::etc_map::EtcMap;
     pub use crate::powertrain::{
         ElectricDrive, GearedEngine, IdealDrive, PowertrainModel, PowertrainTelemetry,

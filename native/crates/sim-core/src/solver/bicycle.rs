@@ -29,6 +29,8 @@ pub struct BicycleSolver {
     a_f: f64,
     a_r: f64,
     delta: f64,
+    /// Steering servo velocity state (rad/s).
+    steer_rate: f64,
     ax: f64,
     ay: f64,
     tel: Telemetry,
@@ -44,6 +46,7 @@ impl BicycleSolver {
             a_f: 0.0,
             a_r: 0.0,
             delta: 0.0,
+            steer_rate: 0.0,
             ax: 0.0,
             ay: 0.0,
             tel: Telemetry::default(),
@@ -57,22 +60,22 @@ impl BicycleSolver {
         let ms = p.sprung_mass();
         let ms_f = ms * p.weight_dist_front;
         let ms_r = ms * (1.0 - p.weight_dist_front);
-        let unsprung_axle = 2.0 * p.unsprung_per_corner_kg;
+        let unsprung_f = 2.0 * p.unsprung_front_kg;
+        let unsprung_r = 2.0 * p.unsprung_rear_kg;
 
         let d_f = (ms * ay * p.roll.roll_arm_m * p.roll.rsd_front) / p.track_front_m
             + (ms_f * ay * p.roll.rc_front_m) / p.track_front_m
-            + (unsprung_axle * ay * p.tyre_radius_m) / p.track_front_m;
+            + (unsprung_f * ay * p.tyre_radius_m) / p.track_front_m;
         let d_r = (ms * ay * p.roll.roll_arm_m * (1.0 - p.roll.rsd_front)) / p.track_rear_m
             + (ms_r * ay * p.roll.rc_rear_m) / p.track_rear_m
-            + (unsprung_axle * ay * p.tyre_radius_m) / p.track_rear_m;
+            + (unsprung_r * ay * p.tyre_radius_m) / p.track_rear_m;
         (d_f, d_r)
     }
 
     /// Sum the two contact patches of an axle at their own loads.
-    /// Returns (fx, fy, utilisation, inner_fz, outer_fz).
-    fn axle_forces(&self, slip: Slip, fz_axle: f64, d_fz: f64) -> (f64, f64, f64, f64, f64) {
+    fn axle_forces(&self, slip: Slip, fz_axle: f64, d_fz: f64) -> AxleForces {
         if fz_axle <= 1.0 {
-            return (0.0, 0.0, 0.0, 0.0, 0.0);
+            return AxleForces::default();
         }
         let half = fz_axle * 0.5;
         let shift = d_fz.abs().min(half); // the inner tyre lifts, it does not go negative
@@ -80,14 +83,33 @@ impl BicycleSolver {
         let inner = half - shift;
         let fo = self.c.tyre.forces(slip, outer);
         let fi = self.c.tyre.forces(slip, inner);
-        (
-            fo.fx + fi.fx,
-            fo.fy + fi.fy,
-            fo.utilisation.max(fi.utilisation),
-            inner,
-            outer,
-        )
+        AxleForces {
+            fx: fo.fx + fi.fx,
+            fy: fo.fy + fi.fy,
+            utilisation: fo.utilisation.max(fi.utilisation),
+            inner_fz: inner,
+            outer_fz: outer,
+            // Self-aligning moment about the steering axis, both tyres, with
+            // the mechanical trail added to each tyre's pneumatic trail. It
+            // opposes the slip, which is what makes a wheel return to centre
+            // and go light before the front lets go.
+            align_nm: -(fo.fy * (fo.trail + self.c.params.mechanical_trail())
+                + fi.fy * (fi.trail + self.c.params.mechanical_trail())),
+            trail_m: (fo.trail * outer + fi.trail * inner) / fz_axle,
+        }
     }
+}
+
+/// One axle's contact patches summed, plus what force feedback needs.
+#[derive(Debug, Clone, Copy, Default)]
+struct AxleForces {
+    fx: f64,
+    fy: f64,
+    utilisation: f64,
+    inner_fz: f64,
+    outer_fz: f64,
+    align_nm: f64,
+    trail_m: f64,
 }
 
 impl Solver for BicycleSolver {
@@ -112,6 +134,10 @@ impl Solver for BicycleSolver {
         self.s
     }
 
+    fn state_mut(&mut self) -> &mut ChassisState {
+        &mut self.s
+    }
+
     fn telemetry(&self) -> Telemetry {
         self.tel
     }
@@ -123,6 +149,7 @@ impl Solver for BicycleSolver {
         self.a_f = 0.0;
         self.a_r = 0.0;
         self.delta = 0.0;
+        self.steer_rate = 0.0;
         self.ax = 0.0;
         self.ay = 0.0;
         self.tel = Telemetry::default();
@@ -147,11 +174,16 @@ impl Solver for BicycleSolver {
     fn tyre(&self) -> &dyn TyreModel {
         self.c.tyre.as_ref()
     }
+
+    fn tyre_mut(&mut self) -> &mut dyn TyreModel {
+        self.c.tyre.as_mut()
+    }
 }
 
 impl BicycleSolver {
     fn substep(&mut self, dt: f64, controls: Controls) {
-        self.delta = advance_steer(self.delta, controls.steer, &self.c.params, dt);
+        self.delta =
+            advance_steer(self.delta, &mut self.steer_rate, controls.steer, &self.c.params, dt);
         let d = self.delta;
 
         let (u, v, r) = (self.s.u, self.s.v, self.s.r);
@@ -193,10 +225,10 @@ impl BicycleSolver {
         let k_f = (self.w_f * radius - u) / k_den;
         let k_r = (self.w_r * radius - u) / k_den;
 
-        let (fx_f, fy_f, util_f, fzi_f, fzo_f) =
-            self.axle_forces(Slip { alpha: self.a_f, kappa: k_f }, fz_f, d_fz_f);
-        let (fx_r, fy_r, util_r, fzi_r, fzo_r) =
-            self.axle_forces(Slip { alpha: self.a_r, kappa: k_r }, fz_r, d_fz_r);
+        let af = self.axle_forces(Slip { alpha: self.a_f, kappa: k_f }, fz_f, d_fz_f);
+        let ar = self.axle_forces(Slip { alpha: self.a_r, kappa: k_r }, fz_r, d_fz_r);
+        let (fx_f, fy_f, util_f, fzi_f, fzo_f) = (af.fx, af.fy, af.utilisation, af.inner_fz, af.outer_fz);
+        let (fx_r, fy_r, util_r, fzi_r, fzo_r) = (ar.fx, ar.fy, ar.utilisation, ar.inner_fz, ar.outer_fz);
 
         // Resolve the front through the steer angle.
         let (cd, sd) = (d.cos(), d.sin());
@@ -252,6 +284,11 @@ impl BicycleSolver {
             self.w_r = 0.0;
             self.ax = 0.0;
             self.ay = 0.0;
+            // The lagged slip angles too: relaxation is speed-proportional,
+            // so at rest they would hold the last corner's slip forever and
+            // leave a static aligning torque on the steering wheel.
+            self.a_f = 0.0;
+            self.a_r = 0.0;
         }
         if self.s.u < 0.0 {
             self.s.u = 0.0; // no reverse gear, and the tyre model is not valid backwards
@@ -292,6 +329,12 @@ impl BicycleSolver {
             shifting: pt.shifting,
             wheel_omega_front: self.w_f,
             wheel_omega_rear: self.w_r,
+            drive_force_n: fx_r,
+            locked: drive.locked,
+            kingpin_torque_nm: af.align_nm,
+            rim_torque_nm: af.align_nm * self.c.params.rim_torque_ratio(),
+            trail_front_m: af.trail_m,
+            mech_trail_m: self.c.params.mechanical_trail(),
         };
     }
 }

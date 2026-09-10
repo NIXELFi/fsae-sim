@@ -68,12 +68,11 @@ export class ForceFeedback {
 
     const rated = Math.max(cfg.maxForceNm, 0.1);
 
-    // Rim velocity from the measured angle. First-order filtered: the Gamepad
-    // API's axis resolution on a 900-degree wheel is coarse enough that a raw
-    // derivative is mostly quantisation noise.
+    // Rim velocity from the measured angle, first-order filtered over about
+    // two frames so a single quantisation step does not become a spike.
     if (dt > 1e-4) {
       const rawRate = (rim.deg - this._rimDeg) / dt;
-      const k = Math.min(1, dt / 0.012);
+      const k = Math.min(1, dt / 0.03);
       this._rimRateDegS += (rawRate - this._rimRateDegS) * k;
     }
     this._rimDeg = rim.deg;
@@ -127,17 +126,20 @@ export class ForceFeedback {
     }
 
     out.torqueNm = out.align + out.damping + out.friction + out.softLock;
-    // The floor lifts tiny torques to where the motor's own cogging and
-    // friction do not swallow them. Applied to the tyre signal only.
-    if (cfg.minForce > 0 && Math.abs(out.align) > 1e-3) {
-      const floor = cfg.minForce * rated;
-      if (Math.abs(out.torqueNm) < floor) out.torqueNm = Math.sign(out.torqueNm) * floor;
-    }
 
     let cmd = (out.torqueNm * cfg.gain) / rated;
-    if (cfg.invert) cmd = -cmd;
+    // The floor lifts tiny commands to where the motor's own cogging and
+    // friction do not swallow them. On the final command, after the gain,
+    // and only while the tyres are actually saying something.
+    if (cfg.minForce > 0 && Math.abs(out.align) > 1e-3 && Math.abs(cmd) < cfg.minForce) {
+      cmd = Math.sign(cmd) * cfg.minForce;
+    }
     if (cmd > 1 || cmd < -1) out.clipped = true;
-    out.command = Math.max(-1, Math.min(1, cmd));
+    cmd = Math.max(-1, Math.min(1, cmd));
+    // Texture rides on top; keep it inside the remaining headroom.
+    out.textureNm = Math.min(out.textureNm, Math.max(0, 1 - Math.abs(cmd)) * rated);
+    if (cfg.invert) cmd = -cmd;
+    out.command = cmd;
     if (cfg.invert) out.kickNm = -out.kickNm;
 
     this.last = out;

@@ -516,16 +516,28 @@ newton-metres at the rim until the last line, where it is divided by the
 wheel's **rated torque** (5.5 N.m for a MOZA R5): the same settings feel the
 same on any base once each is told what it is.
 
-The web platform has no path to a wheel motor, so the desktop shell does it:
-`src-tauri/src/ffb.rs` opens the first force-feedback DirectInput device on
-its own thread and renders a constant-force effect at **1 kHz**, slewing the
-per-frame torque, synthesising the texture sine and the cone kick itself, and
-fading to zero within 250 ms if the game stops sending. In a browser the torque
-is still computed and shown live in the controls panel; it just goes nowhere.
+The web platform has no path to a wheel motor, and a wheel is a closed loop
+through the driver's hands where every millisecond between rim and motor is
+felt. So in the desktop build the **physics moves out of the webview**: the
+rig thread (`src-tauri/src/rig.rs`) reads the wheel over DirectInput, steps
+the vehicle model, applies the driver aids and the oval's barrier, mixes the
+force feedback and writes the motor, all at **1 kHz on one native thread**.
+The webview keeps rendering, HUD, audio, cones and timing, and exchanges one
+message per frame with the rig (`vehicle/nativeCar.js` stands in for
+`BicycleModel`). A tick costs a few tens of microseconds; the panel shows the
+live rate, tick time and overrun count.
 
-SDM26 puts about 9 N.m per g into the rim, so an R5 clips from ~0.6 g up. The
-default gain of 0.55 keeps the going-light signal inside the motor's range;
-raise it on a stronger base. If the wheel pulls the wrong way, there is an
+The native model is `native/crates/sim-core`, and it is the same model: the
+JS build and the Rust crate are checked against each other to floating-point
+noise on a scripted drive (`validate.js`, "RUST PARITY", against
+`data/vehicle-golden.json`). In a browser the JS model runs and the force
+feedback is computed for display only.
+
+SDM26 puts about 9 N.m per g into the rim, so an R5 clips from ~0.65 g up at
+unity gain. The default gain of 0.55 keeps most of the going-light signal
+inside the motor's range (it still clips above ~1.2 g); 0.4-0.45 is the
+honest choice if the cue at the limit matters more than weight mid-corner.
+Raise it on a stronger base. If the wheel pulls the wrong way, there is an
 **Invert** switch -- and that would be worth reporting, because the sign
 convention is worked out rather than guessed.
 

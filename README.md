@@ -62,8 +62,11 @@ cargo run  -p bevy-spike               # the Bevy renderer, WASD + Q/E
 ```
 
 `sim-core` is a dependency-free vehicle dynamics crate with pluggable tyre,
-powertrain, suspension and aero models at three fidelity levels. It is not tied
-to Bevy and is worth having on its own.
+powertrain, suspension and aero models at three fidelity levels. It is what
+the desktop build actually drives with: `sim/src-tauri` links it and runs the
+model, the steering wheel and the force feedback on one native 1 kHz thread.
+The JS model in `sim/src/vehicle` is the browser's copy and is checked against
+it to floating-point noise (`sim/data/vehicle-golden.json`).
 
 `bevy-spike` exists to answer one question — does Bevy look better than the
 hand-written WebGL2 renderer? — and is a spike, not a product.

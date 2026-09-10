@@ -97,6 +97,18 @@ pub struct Telemetry {
     pub shifting: bool,
     pub wheel_omega_front: f64,
     pub wheel_omega_rear: f64,
+    /// Longitudinal force at the driven axle in the body frame (N).
+    pub drive_force_n: f64,
+    /// Clutch locked this substep.
+    pub locked: bool,
+    /// Steering feel. The moment both front tyres put on the steering axis,
+    /// and what reaches the driver's hands. Left-positive like `steer_rad`:
+    /// positive tries to steer further left.
+    pub kingpin_torque_nm: f64,
+    pub rim_torque_nm: f64,
+    /// Load-weighted front pneumatic trail and the mechanical trail (m).
+    pub trail_front_m: f64,
+    pub mech_trail_m: f64,
 }
 
 /// `Send + Sync` so a solver can live in an ECS resource or be shared across
@@ -109,6 +121,9 @@ pub trait Solver: Send + Sync {
     fn step(&mut self, dt: f64, controls: Controls);
 
     fn state(&self) -> ChassisState;
+    /// Direct access to the pose and velocities, for an external constraint
+    /// (a barrier) that has to move the car. Not for driving it.
+    fn state_mut(&mut self) -> &mut ChassisState;
     fn telemetry(&self) -> Telemetry;
 
     /// Place the car. If `speed` is non-zero the powertrain is synced to it.
@@ -118,6 +133,7 @@ pub trait Solver: Send + Sync {
     fn params_mut(&mut self) -> &mut VehicleParams;
     fn powertrain_mut(&mut self) -> &mut dyn PowertrainModel;
     fn tyre(&self) -> &dyn TyreModel;
+    fn tyre_mut(&mut self) -> &mut dyn TyreModel;
 }
 
 /// Everything a solver is assembled from. Swapping the tyre or the powertrain
@@ -147,11 +163,30 @@ pub fn build(fidelity: Fidelity, chassis: Chassis) -> Box<dyn Solver> {
     }
 }
 
-/// Steering actuator shared by every solver: rate limit then first-order lag,
-/// standing in for the driver's hands and rack compliance.
-pub(crate) fn advance_steer(current: f64, demand: f64, p: &VehicleParams, dt: f64) -> f64 {
-    let target = demand.clamp(-1.0, 1.0) * p.steering.max_steer_rad;
-    let rate = ((target - current) / p.steering.lag_s)
-        .clamp(-p.steering.rate_rad_s, p.steering.rate_rad_s);
-    current + rate * dt
+/// Steering actuator shared by every solver: a rate- and acceleration-limited
+/// servo behind a first-order lag, standing in for the driver's hands and rack
+/// compliance. `rate` is the servo's own state (rad/s) and is updated in
+/// place. With an effectively infinite acceleration limit this is exactly the
+/// old rate-limit-then-lag, so the validated numbers do not move.
+pub(crate) fn advance_steer(
+    current: f64,
+    rate: &mut f64,
+    demand: f64,
+    p: &VehicleParams,
+    dt: f64,
+) -> f64 {
+    let st = &p.steering;
+    let target = demand.clamp(-1.0, 1.0) * st.max_steer_rad;
+    let want = ((target - current) / st.lag_s.max(1e-4)).clamp(-st.rate_rad_s, st.rate_rad_s);
+    let max_delta = st.accel_rad_s2 * dt;
+    *rate += (want - *rate).clamp(-max_delta, max_delta);
+    let mut next = current + *rate * dt;
+    // Do not coast past the target: overshoot here is a discretisation
+    // artefact, not modelled inertia.
+    let err = target - current;
+    if (err > 0.0 && next > target) || (err < 0.0 && next < target) {
+        next = target;
+        *rate = 0.0;
+    }
+    next
 }

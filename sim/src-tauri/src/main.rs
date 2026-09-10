@@ -8,18 +8,20 @@
 // Release builds are a GUI app: no console window behind the game.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod ffb;
+mod rig;
+mod wheel;
 
 fn main() {
     tauri::Builder::default()
-        // Steering-wheel force feedback. The only thing the webview cannot do
-        // itself, and the reason this shell has any code at all.
-        .manage(ffb::Ffb::new())
+        // The rig: vehicle model, steering wheel and force feedback on one
+        // native thread at 1 kHz. The reason this shell has any code at all.
+        .manage(rig::Rig::new())
         .invoke_handler(tauri::generate_handler![
-            ffb::ffb_status,
-            ffb::ffb_start,
-            ffb::ffb_stop,
-            ffb::ffb_update,
+            rig::rig_status,
+            rig::rig_start,
+            rig::rig_stop,
+            rig::rig_frame,
+            rig::rig_command,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start SDM26 Driver-in-Loop");

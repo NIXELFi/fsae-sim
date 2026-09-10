@@ -33,7 +33,7 @@
 // only two contact patches in the equations.
 
 import { lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad } from "./params.js";
-import { axleMu, pneumaticTrail, tyreForces } from "./tire.js";
+import { axleMu, muAtLoad, pneumaticTrail, tyreForces } from "./tire.js";
 
 const G = 9.81;
 const SUBSTEP = 1 / 500;
@@ -272,6 +272,11 @@ export class BicycleModel {
     if (Math.abs(this.u) < 0.25 && input.throttle < 0.05 && this.speed < 0.4) {
       this.u = 0; this.v = 0; this.r = 0; this.wF = 0; this.wR = 0;
       this.ax = 0; this.ay = 0;
+      // The lagged slip angles too. The relaxation rate is proportional to
+      // speed, so at rest they never relax -- and a car stopped mid-corner
+      // was left holding its full cornering slip, which put 8 N.m of
+      // aligning torque on a stationary, centred steering wheel forever.
+      this.aF = 0; this.aR = 0;
     }
 
     // Reverse is not a thing here -- no reverse gear, and the tyre model is
@@ -320,8 +325,14 @@ export class BicycleModel {
       const outer = half + shift, inner = half - shift;
       const sF = fF.utilisation;
       const tO = pneumaticTrail(sF, outer), tI = pneumaticTrail(sF, inner);
-      // Per-tyre share of the axle lateral force, by load.
-      const fyO = fF.fy * (outer / FzF), fyI = fF.fy * (inner / FzF);
+      // Per-tyre share of the axle lateral force. The axle force was made
+      // with the load-weighted mean mu, so each tyre's share is its own
+      // mu * load -- which is exactly what evaluating the two tyres
+      // separately (as the Rust port does) gives.
+      const muO = muAtLoad(p.muLat, outer, this.Fz0, p.tireLoadSensitivity);
+      const muI = muAtLoad(p.muLat, inner, this.Fz0, p.tireLoadSensitivity);
+      const wO = muO * outer, wI = muI * inner;
+      const fyO = fF.fy * (wO / (wO + wI)), fyI = fF.fy * (wI / (wO + wI));
       kingpin = -(fyO * (tO + mechTrail) + fyI * (tI + mechTrail));
       t.trailFm = (tO * outer + tI * inner) / FzF;
     } else {

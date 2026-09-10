@@ -15,8 +15,9 @@ import { EngineAudio } from "./game/audio.js";
 import { Timing, fmt } from "./game/timing.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
-import { isDesktop, installDesktopBehaviour, ffbNative } from "./game/desktop.js";
+import { isDesktop, installDesktopBehaviour, rigNative } from "./game/desktop.js";
 import { ForceFeedback } from "./game/forceFeedback.js";
+import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet } from "./game/specSheet.js";
 import { PARAM_DEFAULTS, readParam, writeParam } from "./vehicle/paramMeta.js";
 import { SetupAdjuster } from "./vehicle/setupAdjust.js";
@@ -63,13 +64,20 @@ class Game {
     this.input = new Input();
     this.audio = new EngineAudio();
 
-    // Force feedback: the mix is computed here every frame from the vehicle
-    // model's rim torque; the desktop shell streams it to the wheel. `ffbState`
-    // is what the shell last reported, for the settings panel.
+    // The rig. In the desktop shell the vehicle model, the wheel and the
+    // force feedback run natively at 1 kHz; `rigState` is what it reports.
+    // In a browser the JS model runs here and the mixer below only feeds
+    // the live display in the settings panel.
     this.ffb = new ForceFeedback();
-    this.ffbState = { supported: false, running: false, device: "", error: "" };
-    this.coneHitsThisFrame = 0;
-    ffbNative.status().then((st) => { this.ffbState = st; this.controlsPanel?.render(); });
+    this.rigState = { running: false, ffbSupported: false, wheelPresent: false, wheelName: "", wheelError: "" };
+    this.useNative = false;
+    this.rigReady = rigNative.available()
+      ? rigNative.start().then((st) => {
+          this.rigState = st;
+          this.useNative = !!st.running;
+          this.controlsPanel?.render();
+        })
+      : Promise.resolve();
 
     // Walkaround camera state. Free rather than a fixed orbit: looking at a
     // car means choosing the angle, and the interesting ones -- low at a
@@ -92,7 +100,7 @@ class Game {
         this.syncFfb();
       }, this);
       // Re-render when plugging a device in changes the detected profile.
-      this.input.onProfileChange = () => this.controlsPanel.render();
+      this.input.onProfileChange = () => { this.controlsPanel.render(); this.syncFfb(); };
     }
 
     const audioRoot = document.getElementById("audioLevels");
@@ -110,7 +118,7 @@ class Game {
     this.brakeApplied = 0;  // brake after ABS intervention
     this.etcEditor = new EtcEditor(dom.etcOverlay, {
       getMap: () => this.etc,
-      onChange: (map) => { saveEtc(map); dom.etcSummary.textContent = etcSummary(map); },
+      onChange: (map) => { saveEtc(map); dom.etcSummary.textContent = etcSummary(map); this.syncFfb(); },
       getLive: () => ({ pedal: this.pedal, plate: this.plate }),
     });
 
@@ -212,9 +220,17 @@ class Game {
         : loadBodyModel("./data/body.glb", GEO_FOR_BODY,
                         { offsetM: this.bodyOffsetM ?? 0 }),
     ]);
+    await this.rigReady;
     this.powertrain = new Powertrain(SDM26, curve);
-    this.car = new BicycleModel(SDM26, this.powertrain);
+    this.car = this.useNative
+      ? new NativeCar(SDM26, this.powertrain)
+      : new BicycleModel(SDM26, this.powertrain);
     this.track = track;
+    if (this.useNative) {
+      this.car.pushParams();
+      this.car.pushBoundary(track);
+      this.syncFfb();
+    }
     this.timing = new Timing(track);
     this.renderer.setTrack(track);
 
@@ -319,12 +335,15 @@ class Game {
    * active, so a pad user never has DirectInput grabbing a device they do not
    * have.
    */
-  async syncFfb() {
-    const prof = this.input.profile;
-    const want = prof.kind === "wheel" && prof.forceFeedback?.enabled && this.ffbState.supported;
-    if (want && !this.ffbState.running) this.ffbState = await ffbNative.start();
-    else if (!want && this.ffbState.running) this.ffbState = await ffbNative.stop();
-    this.controlsPanel?.render();
+  syncFfb() {
+    if (!this.useNative || !this.car?.native) return;
+    this.car.pushControls(this.input.profile, this.etc?.points);
+    rigNative.status().then((st) => { this.rigState = st; this.controlsPanel?.render(); });
+  }
+
+  /** After any vehicle parameter edit: the rig holds its own copy. */
+  pushParams() {
+    if (this.car?.native) this.car.pushParams();
   }
 
   /** Put the car back on the centreline where it left the course. */
@@ -344,6 +363,7 @@ class Game {
 
   update(dt) {
     this.lastDt = dt;
+    if (this.car?.native) this.input.nativeDevice = this.car.device;
     const inp = this.input.poll();
 
     // Hand the control profile's steering dynamics to the vehicle model, and
@@ -361,12 +381,12 @@ class Game {
 
     // The map editor is modal, and it needs the live pedal above to keep
     // feeding its marker, so it returns after the read and before the rest.
-    if (this.etcEditor.isOpen) return;
+    if (this.etcEditor.isOpen) { this.holdNative(); return; }
 
     if (this.input.edges.mapEditor) { this.openEtcEditor(); return; }
     if (this.input.edges.home) { this.goHome(); return; }
     if (this.input.edges.pause) this.setPaused(!this.paused);
-    if (this.paused) return;
+    if (this.paused) { this.holdNative(); return; }
 
     this.clock += dt;
 
@@ -377,6 +397,7 @@ class Game {
     if (e.setupUp || e.setupDown) {
       const item = this.setup.nudge(e.setupUp ? 1 : -1, this.input.setupHoldScale, this.clock);
       this.announceSetup(item);
+      this.pushParams();
     }
 
     if (this.input.edges.camera) {
@@ -410,15 +431,26 @@ class Game {
         else this.timing.say("MONEY SHIFT BLOCKED", 1.2);
       }
     }
+    if (this.car.native && this.car.moneyShiftBlocked) this.timing.say("MONEY SHIFT BLOCKED", 1.2);
 
     // ---- driver aids ----
+    // Natively the rig applies them every millisecond; here only in the
+    // browser build, once a frame.
     let throttle = this.plate;
     let brake = inp.brake;
-    if (this.assists.traction) {
+    if (this.car.native) {
+      this.car.frame.traction = this.assists.traction;
+      this.car.frame.abs = this.assists.abs;
+      this.car.frame.autoShift = this.assists.autoShift;
+      this.car.frame.ffbEnabled = this.input.profile.forceFeedback?.enabled !== false;
+      this.car.frame.offTrack = !!this.loc && !this.loc.onTrack && this.car.speed > 2;
+      this.car.frame.rimDeg = this.input.rim.deg;
+      this.car.frame.halfLockDeg = this.input.rim.halfLockDeg;
+    } else if (this.assists.traction) {
       const over = tel.kappaR - 0.13;
       if (over > 0) throttle = Math.max(0.1, throttle * (1 - Math.min(0.9, over * 6)));
     }
-    if (this.assists.abs) {
+    if (!this.car.native && this.assists.abs) {
       // Release when a wheel is deep into lockup (large negative slip ratio).
       const lockF = -tel.kappaF - 0.16;
       const lockR = -tel.kappaR - 0.16;
@@ -430,10 +462,18 @@ class Game {
 
     // ---- physics ----
     this.car.step(dt, { steer: inp.steer, throttle, brake });
+    if (this.car.native) {
+      // What the rig actually applied, after its own aids and pedals.
+      throttle = this.car.applied.throttle;
+      brake = this.car.applied.brake;
+      this.plate = throttle;
+      this.brakeApplied = brake;
+    }
 
     // A venue is bounded by a barrier rather than scored on cones: hold the
     // car inside the foot of the banking before anything reads its position.
-    if (this.track.constrain) this.track.constrain(this.car);
+    // The rig applies the same barrier every millisecond itself.
+    if (this.track.constrain && !this.car.native) this.track.constrain(this.car);
 
     // ---- course state ----
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
@@ -445,25 +485,21 @@ class Game {
     if (hits > 0) {
       this.audio.coneHit();
       this.input.rumble(0.7, 0.4, 130);
+      if (this.car.native) this.car.frame.coneHits += hits;
     }
 
     // ---- force feedback ----
-    // Mixed every frame whether or not a wheel is attached: the settings panel
-    // shows the live torque, and a pad user can see what a wheel would feel.
-    const ffbCfg = this.input.profile.forceFeedback;
-    const cmd = this.ffb.update(dt, ffbCfg, tel, this.input.rim, {
-      spin: Math.max(0, tel.kappaR - 0.2) * 2.5,
-      lock: Math.max(0, -Math.min(tel.kappaF, tel.kappaR) - 0.2) * 2.5,
-      offTrack: !loc.onTrack && this.car.speed > 2,
-      coneHit: hits,
-    });
-    if (this.ffbState.running) {
-      const rated = Math.max(ffbCfg.maxForceNm, 0.1);
-      ffbNative.update({
-        command: cmd.command,
-        textureAmp: cmd.textureNm / rated,
-        textureHz: cmd.textureHz,
-        kick: cmd.kickNm / rated,
+    // Natively the rig mixes and drives the wheel itself; its last mix is
+    // shown in the settings panel. In a browser the mix is computed here so
+    // a pad user can still see what a wheel would feel.
+    if (this.car.native) {
+      this.ffb.last = this.car.ffb;
+    } else {
+      this.ffb.update(dt, this.input.profile.forceFeedback, tel, this.input.rim, {
+        spin: Math.max(0, tel.kappaR - 0.2) * 2.5,
+        lock: Math.max(0, -Math.min(tel.kappaF, tel.kappaR) - 0.2) * 2.5,
+        offTrack: !loc.onTrack && this.car.speed > 2,
+        coneHit: hits,
       });
     }
 
@@ -641,8 +677,12 @@ class Game {
     this.dom.restartBtn.hidden = false;
   }
 
+  /** Keep the rig informed while nothing is being driven. */
+  holdNative() {
+    if (this.car?.native) this.car.hold();
+  }
+
   setPaused(on) {
-    if (on && this.ffbState.running) ffbNative.update({ command: 0, textureAmp: 0, textureHz: 0, kick: 0 });
     this.paused = on;
     this.dom.pauseHint.hidden = !on;
   }
@@ -719,6 +759,7 @@ async function boot() {
   const restored = loadParams();
   const onParamChange = (path) => {
     saveParams();
+    game?.pushParams();
     if (GEOMETRY_PATHS.includes(path)) game?.renderer.rebuildCar(SDM26);
   };
   renderSpecSheet(dom.vehicle, onParamChange);
@@ -728,6 +769,7 @@ async function boot() {
     for (const path of Object.keys(PARAM_DEFAULTS)) writeParam(path, PARAM_DEFAULTS[path]);
     saveParams();
     renderSpecSheet(dom.vehicle, onParamChange);
+    game?.pushParams();
     game?.renderer.rebuildCar(SDM26);
     dom.paramNote.textContent = "All parameters back to as-shipped.";
   });
@@ -803,6 +845,7 @@ async function boot() {
     if (!dom.menu.hidden) {
       // Still poll so the pad-connected badge is live in the menu.
       game.input.poll();
+      game.holdNative();
     } else {
       game.update(dt);
     }

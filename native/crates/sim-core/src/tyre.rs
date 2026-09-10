@@ -26,6 +26,11 @@ pub struct TyreForces {
     pub fy: f64,
     /// Normalised slip magnitude: 1.0 is peak, above is past the limit.
     pub utilisation: f64,
+    /// Pneumatic trail (m): the lever arm behind the contact-patch centre
+    /// through which `fy` makes the self-aligning moment. Longest at zero
+    /// slip, zero once the patch is fully sliding. Models without an aligning
+    /// moment leave it at zero.
+    pub trail: f64,
 }
 
 impl TyreForces {
@@ -36,6 +41,12 @@ impl TyreForces {
 
 pub trait TyreModel: Send + Sync {
     fn name(&self) -> &'static str;
+
+    /// For a host that needs the concrete model back (to edit its constants
+    /// live). Models that do not care return `None`.
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        None
+    }
 
     /// Forces from one contact patch at vertical load `fz` (N).
     fn forces(&self, slip: Slip, fz: f64) -> TyreForces;
@@ -111,6 +122,7 @@ impl TyreModel for LinearTyre {
             fx: fx_lin * scale,
             fy: fy_lin * scale,
             utilisation: demand,
+            trail: 0.0,
         }
     }
 
@@ -136,7 +148,17 @@ pub struct MagicFormulaTyre {
     pub peak_alpha: f64,
     pub peak_kappa: f64,
     pub relaxation_m: f64,
+    /// Pneumatic trail at `trail_ref_load_n` and zero slip (m).
+    pub trail_m: f64,
+    /// Normalised slip at which the trail reaches zero.
+    pub trail_zero_slip: f64,
+    pub trail_ref_load_n: f64,
     by: f64,
+    /// Normalising scales so each fitted curve peaks at exactly mu*Fz. The
+    /// solved B puts the peak at the right slip; these put it at the right
+    /// height. Same scan as the JS build, so the two agree bit for bit.
+    ky: f64,
+    kx: f64,
     cy: f64,
     ey: f64,
     bx: f64,
@@ -147,7 +169,26 @@ pub struct MagicFormulaTyre {
 impl MagicFormulaTyre {
     /// Hoosier 16x7.5-10 R20 as run on SDM26.
     pub fn sdm26() -> Self {
-        Self::new(1.5, 1.573, 0.15, 654.8, 8.5_f64.to_radians(), 0.11, 0.35)
+        // Nominal load is the SDM26 static corner load, derived from the mass
+        // rather than typed in: a rounded 654.8 here put the Rust and JS
+        // models 4e-6 apart in force, which compounds into centimetres by the
+        // end of a lap.
+        Self::new(1.5, 1.573, 0.15, crate::vehicle::sdm26().nominal_tyre_load(), 8.5_f64.to_radians(), 0.11, 0.35)
+    }
+
+    /// Pneumatic trail (m) at normalised combined slip `s` and load `fz`.
+    ///
+    /// Brush-model shape: trail falls as (1 - s)^2 and is zero from full
+    /// sliding on, which is placed a little past the force peak because a
+    /// slick keeps some trail beyond it. Scale grows with the square root of
+    /// load, as contact-patch length does. Same constants as the JS build;
+    /// the 20 mm is an estimate until a direct Mz fit from TTC data exists.
+    pub fn pneumatic_trail(&self, s: f64, fz: f64) -> f64 {
+        if fz <= 0.0 {
+            return 0.0;
+        }
+        let x = (s.abs() / self.trail_zero_slip).min(1.0);
+        self.trail_m * (fz / self.trail_ref_load_n).sqrt() * (1.0 - x) * (1.0 - x)
     }
 
     pub fn new(
@@ -164,6 +205,8 @@ impl MagicFormulaTyre {
         // stiffness — to absurd values to keep the peak where it belongs.
         let (cy, ey) = (1.45, -0.35);
         let (cx, ex) = (1.55, -0.40);
+        let by = solve_b(peak_alpha, cy, ey);
+        let bx = solve_b(peak_kappa, cx, ex);
         Self {
             mu_x,
             mu_y,
@@ -172,10 +215,15 @@ impl MagicFormulaTyre {
             peak_alpha,
             peak_kappa,
             relaxation_m,
-            by: solve_b(peak_alpha, cy, ey),
+            trail_m: 0.020,
+            trail_zero_slip: 1.25,
+            trail_ref_load_n: 700.0,
+            by,
+            ky: 1.0 / peak_value(by, cy, ey, peak_alpha),
+            kx: 1.0 / peak_value(bx, cx, ex, peak_kappa),
             cy,
             ey,
-            bx: solve_b(peak_kappa, cx, ex),
+            bx,
             cx,
             ex,
         }
@@ -192,13 +240,17 @@ impl MagicFormulaTyre {
     /// Cornering stiffness (N/rad) at a given load — a headline tyre number.
     pub fn cornering_stiffness(&self, fz: f64) -> f64 {
         let (_, muy) = self.peak_mu(fz);
-        self.by * self.cy * muy * fz
+        self.by * self.cy * self.ky * muy * fz
     }
 }
 
 impl TyreModel for MagicFormulaTyre {
     fn name(&self) -> &'static str {
         "Magic Formula (fitted, combined slip)"
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn core::any::Any> {
+        Some(self)
     }
 
     fn forces(&self, slip: Slip, fz: f64) -> TyreForces {
@@ -213,16 +265,18 @@ impl TyreModel for MagicFormulaTyre {
         let sy = slip.alpha.tan() / self.peak_alpha.tan();
         let s = (sx * sx + sy * sy).sqrt();
         if s < 1e-9 {
-            return TyreForces::zero();
+            return TyreForces { trail: self.pneumatic_trail(0.0, fz), ..TyreForces::zero() };
         }
 
-        let fx0 = mux * fz * mf(s * self.peak_kappa, self.bx, self.cx, self.ex);
-        let fy0 = muy * fz * mf((s * self.peak_alpha.tan()).atan(), self.by, self.cy, self.ey);
+        let fx0 = mux * fz * self.kx * mf(s * self.peak_kappa, self.bx, self.cx, self.ex);
+        let fy0 =
+            muy * fz * self.ky * mf((s * self.peak_alpha.tan()).atan(), self.by, self.cy, self.ey);
 
         TyreForces {
             fx: (sx / s) * fx0,
             fy: (sy / s) * fy0,
             utilisation: s.min(3.0),
+            trail: self.pneumatic_trail(s, fz),
         }
     }
 
@@ -239,6 +293,20 @@ impl TyreModel for MagicFormulaTyre {
 fn mf(x: f64, b: f64, c: f64, e: f64) -> f64 {
     let bx = b * x;
     (c * (bx - e * (bx - bx.atan())).atan()).sin()
+}
+
+/// Largest value the fitted curve reaches inside 4x the peak slip, on the
+/// same 400-sample scan the JS build uses.
+fn peak_value(b: f64, c: f64, e: f64, x_peak: f64) -> f64 {
+    let mut best: f64 = 0.0;
+    for i in 1..=400 {
+        best = best.max(mf((i as f64 / 400.0) * x_peak * 4.0, b, c, e));
+    }
+    if best == 0.0 {
+        1.0
+    } else {
+        best
+    }
 }
 
 /// Solve the stiffness factor B that puts the MF peak exactly at `x_peak`.
