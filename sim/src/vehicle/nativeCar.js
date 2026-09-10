@@ -194,12 +194,16 @@ export class NativeCar {
       shiftUp: this._shiftUp,
       shiftDown: this._shiftDown,
     };
+    // One exchange in flight at a time. If the previous one has not come
+    // back yet, this frame's continuous inputs are simply superseded by the
+    // next frame's -- but the EVENTS (a shift, a cone) must not be: they
+    // stay pending until a frame actually goes out. Clearing them here
+    // before this check silently ate most gear changes, because a 60 Hz
+    // frame and an IPC round trip are about the same length.
+    if (this._inflight) return;
     this._shiftUp = false;
     this._shiftDown = false;
     f.coneHits = 0;
-    // One exchange in flight at a time. If the previous one has not come
-    // back (a hitch), this frame's inputs are simply the next ones sent.
-    if (this._inflight) return;
     this._inflight = true;
     rigNative.frame(msg).then((snap) => {
       this._inflight = false;

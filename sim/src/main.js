@@ -231,6 +231,12 @@ class Game {
     this.car = this.useNative
       ? new NativeCar(SDM26, this.powertrain)
       : new BicycleModel(SDM26, this.powertrain);
+    // Natively the gearbox lives in the rig: shift requests, canShift and
+    // the rest must go through the car's proxy, which also mirrors the
+    // JS instance's state for the HUD and audio. Pointing `powertrain` at
+    // the JS object here meant every gear change was written into a state
+    // the next snapshot overwrote -- the car never shifted.
+    if (this.useNative) this.powertrain = this.car.pt;
     this.track = track;
     if (this.useNative) {
       this.car.pushParams();
