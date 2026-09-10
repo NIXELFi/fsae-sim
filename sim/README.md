@@ -272,7 +272,7 @@ times. But that R20 TTC fit peaks at |μ| ≈ 2.32 and does not reach peak Fy un
 13–16° of slip. For a driving sim that produces vague, disconnected steering.
 Here the peaks are pinned to the numbers Helios validated against real runs, and
 the slip at which they arrive is set to what a driver feels through a 10" slick
-(8.5° lateral, 0.11 slip ratio, ~291 N/deg per tyre at static load).
+(8.5° lateral, 0.11 slip ratio, ~307 N/deg per tyre at static load).
 
 ### Where the constants come from
 
@@ -282,15 +282,30 @@ CdA 1.294 / ClA 3.146 at 55.3% front (2026 CFD aero map), Crr 0.02, driveline
 0.85, CBR600RR ratios with 2.111 primary and SDM's 3.0 final, 14 500 rpm limit,
 100 ms shift, roll-stiffness distribution 0.512 on a 262.6 mm roll arm.
 
-**One deliberate deviation.** `muLat` is 1.573 here, not the lap sim's 1.368.
+**One deliberate deviation.** `muLat` is 1.66 here, not the lap sim's 1.368.
 Helios pins 1.368 at the skidpad in a quasi-steady model that applies load
 sensitivity to the axle as a whole. This model *also* derates for the lateral
 transfer within the axle, which costs a further ~6% of μ. Reusing 1.368 would
 double-count that and give a 5.38 s skidpad against the 5.02 s SDM26 actually
-ran. 1.573 reproduces 5.02 s through *this* model — same measurement, different
-model, so a different constant. Oracle hit the same thing and solved it the same
-way with `mu_scale`. The original value is kept as `muLatHeliosQss` for
-traceability.
+ran. Same measurement, different model, so a different constant. Oracle hit the
+same thing and solved it the same way with `mu_scale`. The original value is
+kept as `muLatHeliosQss` for traceability.
+
+**And one estimate the balance needs: `frontGripFactor` 0.90.** `muLat` is the
+rear axle's peak; the front runs at 0.90 of it (1.49), and the pair is pinned
+so the skidpad still comes out at ~5.05 s. With one tyre character on both
+axles the limit balance is set only by load transfer and the aero split, which
+left this car neutral to within 1% of force: the rear reached its peak first
+at 10, 15 and 20 m/s, and a 12° steering step at 15 m/s spun it every time,
+because once both axles are past the peak the yaw moment `a·FyF − b·FyR` stays
+positive on a 48.5% front car and nothing arrests the yaw. Roll stiffness
+alone cannot fix that. A real front lets go first, through things a bicycle
+model cannot see — camber loss on the steered upright, inside-front drag at
+parallel steer, steering compliance. 0.90 puts the front at its peak with the
+rear holding ~5% in hand: a mild, recoverable push. Replace it with a measured
+understeer gradient. Above ~18 m/s the car is still loose to a step input:
+the 2026 aero map puts 55% of the downforce on the front of a 48.5%-front
+car, which is worth raising with the aero group.
 
 Estimates the team has not measured are marked `EST` in `params.js`, each with
 its basis: yaw inertia 105 kg·m², unsprung 11 kg/corner, wheel and driveline
@@ -458,11 +473,21 @@ physically command, so each gets its own steering dynamics:
 
 | | max steering speed | acceleration | deadzone | curve |
 |---|---|---|---|---|
-| keyboard | 180 °/s | 700 °/s² | 0 | linear |
+| keyboard | 180 °/s | 700 °/s² | 0 | linear, speed-limited lock |
 | gamepad | 300 °/s | 2200 °/s² | 0.10 | 1.7 expo |
 | wheel | 720 °/s | 12000 °/s² | **0** | **1.00** |
 
 All at the road wheel. Divide by the 4.0 steering ratio for rim figures.
+
+**On a keyboard the lock itself shrinks with speed**: Ackermann for 1.4 g plus
+the peak slip angle plus 3°, so all 28° below ~8 m/s, ~17° at 15 m/s, ~14.5° at
+20 m/s. A key has no position, and without this it went to full lock at any
+speed — at 15 m/s that is 10° past the front tyres' peak, and the car spun.
+The keyboard pedals are ramped too (throttle 0→1 in 0.4 s, brake in 0.25 s,
+both off in 0.1 s), and traction control and ABS are ticked by default for the
+keyboard profile, because a step to full throttle spins the rears within 20 ms
+and a step to full brake locks the fronts within 140 ms. The physics never sees
+any of this; it is the input layer standing in for a foot and a hand.
 
 **Steering is a rate- and acceleration-limited servo**, and both limits are
 adjustable per device. The acceleration limit matters most on a keyboard, where
@@ -686,12 +711,16 @@ the team has real numbers for.
 
 | Check | Result | Reference |
 |---|---|---|
-| Skidpad lap, 9.125 m radius | **4.96 s** | SDM26 ran 5.02 s |
-| Skidpad lateral | 1.49 g | above μ because 11.5 m/s is worth ~250 N of downforce |
+| Skidpad lap, 9.125 m radius | **5.05 s** | SDM26 ran 5.02 s |
+| Skidpad lateral | 1.44 g | above μ because 11.4 m/s is worth ~250 N of downforce |
+| Limit balance, 10/15/20 m/s | front peaks first, utilF − utilR = +0.29 / +0.29 / +0.20 | pushes, peak body slip 2–4° |
+| Yaw mode at 15 m/s | 3.3 Hz, ζ 0.99 | linear 2-DOF from the model's stiffnesses |
+| Keyboard key held to the lock, 10/15 m/s | 1.39 / 1.57 g, body slip < 7° | pushes, does not spin |
+| Tyre past the peak | 94% at 2×, 89% at 3× peak slip | a slick keeps most of its force |
 | 75 m accel, managed launch | 4.76 s | QSS says 4.2 s — see below |
 | 75 m accel, throttle pinned | 5.19 s | +0.43 s lost to wheelspin |
 | Braking from 25 m/s | 23.1 m, 1.74 g peak | — |
-| Cornering stiffness | 291 N/deg per tyre | 10" slick at 655 N |
+| Cornering stiffness | 307 N/deg per tyre (rear) | 10" slick at 655 N |
 | ETC map, 4000 random curves | 0 overshoot, 0 backwards steps | monotone guarantee |
 | Roll stiffness 40→70% front | radius 7.18 → 7.45 m | monotonic understeer |
 | Brake bias sweep 48→75% | rear-locks-first → front-locks-first | crossover ~57% |
