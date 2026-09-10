@@ -224,6 +224,13 @@ export class BicycleModel {
 
     const fF = tyreForces(this.aF, kF, FzF, muYF, muXF);
     const fR = tyreForces(this.aR, kR, FzR, muYR, muXR);
+    // The front axle's lateral peak relative to the rear (params.js,
+    // frontGripFactor). Applied to the force rather than to muYF because the
+    // fitted curve is exactly linear in mu at a given slip, so this IS a mu
+    // scaling -- and scaling the output keeps the Rust port bit-identical
+    // without threading a second mu through the tyre. Utilisation (where on
+    // the curve the tyre is) is unchanged by it, by construction.
+    fF.fy *= p.frontGripFactor ?? 1;
 
     // ---- resolve front tyre forces through the steer angle ----
     const cd = Math.cos(d), sd = Math.sin(d);
@@ -351,10 +358,19 @@ export class BicycleModel {
    * rolling wheel and brakes the rear axle to a stop on the first substep.
    */
   respawn(X, Y, psi, speed = 0) {
+    // `reset` puts the box in first for a standing start. Placed at speed the
+    // gear the caller chose has to survive it, or every rolling respawn is in
+    // first -- at 20 m/s that is 16 600 rpm, on the limiter, with engine
+    // braking through a 17:1 reduction, which is what the validation harness
+    // was unknowingly measuring above 15 m/s.
+    const gear = this.pt.gear;
     this.reset(X, Y, psi);
     this.u = speed;
     this.wF = this.wR = speed / this.p.tireRadiusM;
-    if (speed > 0) this.pt.syncToWheel(this.wR);
+    if (speed > 0) {
+      this.pt.gear = gear;
+      this.pt.syncToWheel(this.wR);
+    }
   }
 }
 

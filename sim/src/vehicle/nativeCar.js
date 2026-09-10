@@ -108,6 +108,7 @@ export class NativeCar {
       casterDeg: p.steering.casterDeg, kingpinOffsetTrailM: p.steering.kingpinOffsetTrailM,
       rackEfficiency: p.steering.rackEfficiency, torqueRatio: p.steering.torqueRatio ?? undefined,
       muLat: p.muLat, muLong: p.muLong, tireLoadSensitivity: p.tireLoadSensitivity, relaxLengthM: p.relaxLengthM,
+      frontGripFactor: p.frontGripFactor,
       gearRatios: p.gearRatios, primaryReduction: p.primaryReduction, finalDrive: p.finalDrive,
       drivetrainEff: p.drivetrainEff, revLimitRpm: p.revLimitRpm, idleRpm: p.idleRpm,
       idleThrottleFrac: p.idleThrottleFrac, shiftTimeS: p.shiftTimeS,

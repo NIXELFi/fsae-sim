@@ -143,6 +143,10 @@ impl Solver for BicycleSolver {
     }
 
     fn reset(&mut self, x: f64, y: f64, psi: f64, speed: f64) {
+        // The powertrain's reset puts the box in first for a standing start;
+        // placed at speed the caller's gear has to survive, or a rolling
+        // respawn at 20 m/s lands on the limiter in first.
+        let gear = self.c.powertrain.telemetry().gear;
         self.s = ChassisState { u: speed, v: 0.0, r: 0.0, x, y, psi };
         self.w_f = speed / self.c.params.tyre_radius_m;
         self.w_r = self.w_f;
@@ -155,6 +159,7 @@ impl Solver for BicycleSolver {
         self.tel = Telemetry::default();
         self.c.powertrain.reset();
         if speed > 0.0 {
+            self.c.powertrain.set_gear(gear);
             self.c.powertrain.sync_to_wheel(self.w_r);
         }
     }
@@ -225,8 +230,15 @@ impl BicycleSolver {
         let k_f = (self.w_f * radius - u) / k_den;
         let k_r = (self.w_r * radius - u) / k_den;
 
-        let af = self.axle_forces(Slip { alpha: self.a_f, kappa: k_f }, fz_f, d_fz_f);
+        let mut af = self.axle_forces(Slip { alpha: self.a_f, kappa: k_f }, fz_f, d_fz_f);
         let ar = self.axle_forces(Slip { alpha: self.a_r, kappa: k_r }, fz_r, d_fz_r);
+        // Front lateral peak relative to the rear (`front_grip_factor`). The
+        // fitted curve is linear in mu at a given slip, so scaling the force is
+        // exactly a mu scaling; the aligning moment is Fy through the trail and
+        // scales with it, utilisation does not. Same operation, same order as
+        // the JS build, so the two stay bit-identical.
+        af.fy *= self.c.params.front_grip_factor;
+        af.align_nm *= self.c.params.front_grip_factor;
         let (fx_f, fy_f, util_f, fzi_f, fzo_f) = (af.fx, af.fy, af.utilisation, af.inner_fz, af.outer_fz);
         let (fx_r, fy_r, util_r, fzi_r, fzo_r) = (ar.fx, ar.fy, ar.utilisation, ar.inner_fz, ar.outer_fz);
 

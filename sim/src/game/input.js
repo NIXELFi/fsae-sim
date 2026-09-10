@@ -33,8 +33,7 @@ import {
   ControlSettings,
   applyPedal,
   applySteeringCurve,
-  detectProfile,
-} from "./controlProfiles.js";
+  detectProfile, usableLockFrac, stepPedal } from "./controlProfiles.js";
 import { presetFor, presetPaths } from "./wheelPresets.js";
 
 // Only used to decide whether the pad is being touched at all; the real
@@ -72,6 +71,18 @@ export class Input {
     this._prevKeys = new Set();
 
     this.state = { steer: 0, throttle: 0, brake: 0, launch: false };
+    /**
+     * What the game tells the input layer about the car each frame, for the
+     * keyboard's speed-sensitive lock: speed and the numbers that turn a
+     * lateral g into a steer angle. Zero speed means full lock, so a fresh
+     * Input without a game behind it behaves as before.
+     */
+    this.carSpeed = 0;
+    this.carWheelbaseM = 1.53;
+    this.carPeakSlipDeg = 8.5;
+    /** Ramped keyboard pedals (see controlProfiles.stepPedal) and their clock. */
+    this.kbPedal = { throttle: 0, brake: 0 };
+    this._kbPedalAt = 0;
     /**
      * The rim, for force feedback: measured angle in degrees (right positive,
      * as the device reports it) and the car's lock at the rim. Only meaningful
@@ -355,21 +366,41 @@ export class Input {
     const kThrottle = k.has("ArrowUp") || k.has("KeyW") ? 1 : 0;
     const kBrake = k.has("ArrowDown") || k.has("KeyS") ? 1 : 0;
 
-    if (kSteer !== 0 && steer === 0) steer = kSteer;
+    // Digital steering only gets the lock the car can use at this speed; see
+    // controlProfiles.usableLockFrac. The same cap applies to the mouse, which
+    // has a position but no stop.
+    const lockFrac = usableLockFrac(prof.steering?.speedSensitive, this.carSpeed, {
+      wheelbaseM: this.carWheelbaseM,
+      maxSteerDeg: this.carLockDeg ?? 28,
+      peakSlipAngleDeg: this.carPeakSlipDeg,
+    });
+    if (kSteer !== 0 && steer === 0) steer = kSteer * lockFrac;
 
     // Mouse steering, when the keyboard profile has it switched on. It decays
     // back to centre like a self-centring wheel, otherwise the car holds a
     // steering angle forever after the mouse stops moving.
     const mouse = prof.mouse;
     if (mouse && mouse.enabled && steer === 0) {
-      steer = this.mouseSteer;
+      steer = this.mouseSteer * lockFrac;
       if (mouse.selfCentre) {
         const decay = (mouse.selfCentreRateDegPerS / Math.max(1, 28)) * (1 / 60);
         this.mouseSteer -= Math.sign(this.mouseSteer) * Math.min(Math.abs(this.mouseSteer), decay);
       }
     }
-    if (kThrottle && throttle === 0) throttle = 1;
-    if (kBrake && brake === 0) brake = 1;
+    // Keyboard pedals are ramped rather than stepped, at the rates the
+    // profile sets (no rates: a plain step, as before). Timed off the wall
+    // clock because poll() is called once per rendered frame.
+    {
+      const now = performance.now();
+      const dt = this._kbPedalAt ? Math.min(0.1, (now - this._kbPedalAt) / 1000) : 0;
+      this._kbPedalAt = now;
+      const thrCfg = prof.pedals?.throttle ?? {};
+      const brkCfg = prof.pedals?.brake ?? {};
+      this.kbPedal.throttle = stepPedal(this.kbPedal.throttle, kThrottle, thrCfg, dt);
+      this.kbPedal.brake = stepPedal(this.kbPedal.brake, kBrake, brkCfg, dt);
+    }
+    if (this.kbPedal.throttle > 0 && throttle === 0) throttle = this.kbPedal.throttle;
+    if (this.kbPedal.brake > 0 && brake === 0) brake = this.kbPedal.brake;
     if (k.has("Space")) launch = true;
 
     const kEdge = (code) => k.has(code) && !this._prevKeys.has(code);

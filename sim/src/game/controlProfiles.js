@@ -143,6 +143,51 @@ export function stepSteering(state, targetDeg, cfg, dt) {
   return state.angleDeg;
 }
 
+/**
+ * How much of the car's steering lock a digital input is allowed to command
+ * at a given speed, 0..1.
+ *
+ * A key has no position, only "on", so on a keyboard the software decides
+ * how far the wheel goes. Without this it went to full lock -- 28 degrees --
+ * at any speed, and at 15 m/s the useful steer for the car's whole 1.6 g is
+ * about 6 degrees of Ackermann plus 8.5 degrees of slip. Holding a key for
+ * 200 ms put the front tyres 10 degrees past their peak, and the car spun.
+ * No hand does that: a driver with a wheel winds on roughly what the corner
+ * needs. So the lock a key can reach is the Ackermann angle for `ayG` at this
+ * speed, plus the peak slip angle, plus `marginDeg` to leave room to provoke
+ * and correct a slide. It is the full lock below about 8 m/s, where the car
+ * really can use all of it.
+ *
+ * The physics is untouched by this -- it is the input layer standing in for
+ * a hand, exactly like the rate and acceleration limits above it.
+ *
+ * @param cfg  {ayG, marginDeg} from a profile's `steering.speedSensitive`
+ * @param speedMps
+ * @param car  {wheelbaseM, maxSteerDeg, peakSlipAngleDeg}
+ */
+export function usableLockFrac(cfg, speedMps, car) {
+  if (!cfg || !(car && car.maxSteerDeg > 0)) return 1;
+  const v2 = Math.max(speedMps, 0.1) ** 2;
+  const ackermannDeg = ((car.wheelbaseM * cfg.ayG * 9.81) / v2) * (180 / Math.PI);
+  const usable = ackermannDeg + (car.peakSlipAngleDeg ?? 8.5) + cfg.marginDeg;
+  return Math.min(1, usable / car.maxSteerDeg);
+}
+
+/**
+ * Advance a digital pedal toward its target at a bounded rate. A key is a
+ * step from 0 to 1; a foot is not. With 918 N.m at the wheels in first and
+ * 0.5 kg.m2 of wheel inertia, a step to full throttle puts the rears at a
+ * slip ratio of 3 within 20 ms; a step to full brake locks the fronts in
+ * 140 ms. Ramping the pedal over a few tenths of a second is what a foot
+ * does, and it gives the driver aids something they can actually catch.
+ */
+export function stepPedal(value, target, cfg, dt) {
+  const rate = target > value ? cfg.rampUpPerS : cfg.rampDownPerS;
+  if (!(rate > 0)) return target;
+  const maxDelta = rate * dt;
+  return value + Math.min(Math.max(target - value, -maxDelta), maxDelta);
+}
+
 // ---------------------------------------------------------------------------
 // Profiles
 // ---------------------------------------------------------------------------
@@ -161,9 +206,15 @@ export const PROFILES = {
       lagS: 0.10,
       deadzone: 0,
       expo: 1,
+      // The lock a key can reach shrinks with speed: Ackermann for 1.6 g plus
+      // the peak slip angle plus 5 degrees. Full lock up to ~8 m/s, ~20 deg
+      // at 15 m/s, ~17 deg at 20 m/s. See `usableLockFrac`.
+      speedSensitive: { ayG: 1.6, marginDeg: 5 },
     }),
     // Mouse steering: horizontal movement maps to steering angle. Off by
-    // default because it is a different skill, not a better one.
+    // default because it is a different skill, not a better one. The mouse
+    // has a position, so it is not ramped, but it has no stop either, so it
+    // gets the same speed-sensitive lock as the keys.
     mouse: {
       enabled: false,
       /** Screen pixels for full lock. */
@@ -173,10 +224,19 @@ export const PROFILES = {
       selfCentreRateDegPerS: 90,
     },
     pedals: {
-      throttle: pedal({ source: "KeyW", isAxis: false }),
-      brake: pedal({ source: "KeyS", isAxis: false }),
+      // Ramped: 0 to full in 0.4 s on the way down, off in 0.1 s. See
+      // `stepPedal`. The brake is quicker to full because a hard stop is
+      // still a hard stop; ABS (on by default for this profile) does the rest.
+      throttle: pedal({ source: "KeyW", isAxis: false, rampUpPerS: 2.5, rampDownPerS: 10 }),
+      brake: pedal({ source: "KeyS", isAxis: false, rampUpPerS: 4, rampDownPerS: 10 }),
       clutch: pedal({ source: null }),
     },
+    // A key is a step, so the driver aids are on by default here: traction
+    // control because a step to full throttle spins the rears within 20 ms,
+    // ABS because a step to full brake locks the fronts within 140 ms and a
+    // locked front does not steer. Both are still toggles on the home screen
+    // and on T.
+    assistDefaults: { traction: true, abs: true },
     forceFeedback: { enabled: false, supported: false },
   },
 

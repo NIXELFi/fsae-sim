@@ -84,6 +84,14 @@ pub struct VehicleParams {
     pub wheel_inertia_front_kg_m2: f64,
     pub wheel_inertia_rear_kg_m2: f64,
     pub crr: f64,
+    /// Front axle peak lateral grip relative to the rear. Applied to the
+    /// front tyres' lateral force by the solvers. With one tyre character for
+    /// both axles the limit balance is set only by load transfer and the aero
+    /// split, which leaves this car neutral to within 1% of force and spinning
+    /// from any step steer at the limit; a real front lets go first (camber
+    /// loss on the steered upright, inside-front drag, compliance). Estimate,
+    /// pinned together with the tyre's mu_y to the 5.02 s skidpad.
+    pub front_grip_factor: f64,
     pub aero: AeroParams,
     pub roll: RollParams,
     pub brakes: BrakeParams,
@@ -153,6 +161,7 @@ pub fn sdm26() -> VehicleParams {
         wheel_inertia_front_kg_m2: 0.22,
         wheel_inertia_rear_kg_m2: 0.25,
         crr: 0.02,
+        front_grip_factor: 0.90,
         aero: AeroParams {
             cda_m2: 1.294,
             cla_m2: 3.146,

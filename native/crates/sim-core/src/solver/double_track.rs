@@ -206,7 +206,9 @@ impl DoubleTrackSolver {
                 .c
                 .tyre
                 .forces(Slip { alpha: self.alpha_lag[i], kappa: kappa[i] }, fz[i]);
-            forces[i] = (f.fx, f.fy, f.utilisation);
+            // Front lateral peak relative to the rear, as in the bicycle solver.
+            let fy = if i == FL || i == FR { f.fy * p.front_grip_factor } else { f.fy };
+            forces[i] = (f.fx, fy, f.utilisation);
         }
 
         // ---- resolve into the body frame and sum ----

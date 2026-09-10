@@ -48,8 +48,9 @@ console.log("\nSKIDPAD  (steady 9.125 m radius, real SDM26 run = 5.02 s)");
   let bestV = 0;
   for (let vTarget = 8; vTarget <= 16; vTarget += 0.05) {
     const { car } = fresh();
-    // Gear before respawn: respawn syncs the crank to the wheels, and it can
-    // only do that against the gear it is actually in.
+    // Gear before respawn: respawn keeps it when placing the car at speed and
+    // syncs the crank to the wheels against it. (It used to be wiped by the
+    // reset inside respawn, which put every rolling test in first gear.)
     car.pt.gear = 1;
     car.respawn(0, 0, 0, vTarget);
     // PI on yaw rate around an Ackermann feed-forward. The output is the steer
@@ -169,6 +170,19 @@ console.log("\nTYRE");
   check("cornering stiffness / tyre", cs / 57.3, 200, 380, " N/deg");
   check("peak slip angle", TIRE_INFO.peakSlipAngleDeg, 6, 11, " deg");
 
+  // Past the peak a slick keeps most of its force -- a sharp drop would make
+  // every slide unrecoverable. The fit holds ~94% at twice the peak slip and
+  // ~89% at three times; these bands say it may not get much sharper.
+  {
+    const { tyreForces } = await import("../src/vehicle/tire.js");
+    const fy = (deg) => tyreForces((deg * Math.PI) / 180, 0, Fz, SDM26.muLat, SDM26.muLong).fy;
+    const fx = (k) => tyreForces(0, k, Fz, SDM26.muLat, SDM26.muLong).fx;
+    const pk = TIRE_INFO.peakSlipAngleDeg, pkK = TIRE_INFO.peakSlipRatio;
+    check("lateral force at 2x peak slip", (100 * fy(2 * pk)) / fy(pk), 85, 100, " %");
+    check("lateral force at 3x peak slip", (100 * fy(3 * pk)) / fy(pk), 80, 100, " %");
+    check("longitudinal force at 2x peak slip", (100 * fx(2 * pkK)) / fx(pkK), 80, 100, " %");
+  }
+
   // Aligning torque: the trail must be longest at zero slip, gone once the
   // tyre is sliding, and grow with load. These are the shape a driver feels
   // through force feedback, not numbers from a data sheet.
@@ -179,6 +193,128 @@ console.log("\nTYRE");
   check("trail at peak grip / trail at zero", tPeak / t0, 0.0, 0.25, "");
   check("trail once sliding", tSlide * 1000, 0, 1e-9, " mm");
   check("trail grows with load", TIRE_INFO.pneumaticTrail(0, 2 * Fz) / t0, 1.2, 1.6, "x");
+}
+
+// --------------------------------------------------------------- handling ---
+// Why the car felt like it was on ice. None of the stopwatch events above see
+// the limit BALANCE or the transient response, and both were wrong: with equal
+// tyres front and rear the model was neutral to within 1% of force, the rear
+// reached its peak first at every speed, and a 12 deg keyboard tap at 15 m/s
+// spun it. These pin the fixes: front-limited at 10-20 m/s, a well-damped yaw
+// mode, and a keyboard step to the speed-limited lock that pushes rather than
+// spins.
+console.log("\nHANDLING  (limit balance, yaw damping, keyboard inputs)");
+{
+  const { totalReduction } = await import("../src/vehicle/params.js");
+  const { PROFILES, usableLockFrac, stepPedal } = await import("../src/game/controlProfiles.js");
+  const { axleMu } = await import("../src/vehicle/tire.js");
+  const D2R = Math.PI / 180;
+
+  // Place the car at speed in whichever gear puts the engine near 9500 rpm --
+  // what a driver would be in -- rather than first on the limiter.
+  const place = (V) => {
+    const { car } = fresh();
+    car.respawn(0, 0, 0, V);
+    let best = 0, bd = 1e9;
+    for (let g = 0; g < SDM26.gearRatios.length; g++) {
+      const rpm = (V / SDM26.tireRadiusM) * totalReduction(SDM26, g) * (60 / (2 * Math.PI));
+      if (rpm < 14000 && Math.abs(rpm - 9500) < bd) { bd = Math.abs(rpm - 9500); best = g; }
+    }
+    car.pt.gear = best;
+    car.pt.syncToWheel(car.wR);
+    return car;
+  };
+  {
+    const c = place(20);
+    check("respawn at speed keeps the gear", c.pt.gear + 1, 3, 3, "");
+    check("and the engine is off the limiter", c.pt.engineRpm, 8000, 12000, " rpm");
+  }
+
+  // Steady-state limit balance: constant speed, steer ramped slowly to 60% of
+  // lock over 12 s. At the peak lateral acceleration the FRONT must be the
+  // axle at its limit, with the rear holding something in hand, and the car
+  // must push wide rather than spin as the steer keeps coming.
+  for (const V of [10, 15, 20]) {
+    const car = place(V);
+    car.steeringServo = { maxRateDegPerS: 1e6, accelDegPerS2: 1e9, lagS: 0.01 };
+    let t = 0, peakAy = 0, at = null, peakBeta = 0;
+    while (t < 12) {
+      const thr = Math.max(0, Math.min(1, 0.2 + (V - car.speed) * 0.8));
+      car.step(DT, { steer: (t / 12) * 0.6, throttle: thr, brake: 0 });
+      t += DT;
+      const tel = car.telemetry;
+      peakBeta = Math.max(peakBeta, Math.abs(tel.bodySlipDeg));
+      if (tel.ayG > peakAy) { peakAy = tel.ayG; at = { uF: tel.utilF, uR: tel.utilR }; }
+    }
+    check(`${V} m/s: peak lateral`, peakAy, 1.35, 1.9, " g");
+    check(`${V} m/s: front limits first (utilF - utilR)`, at.uF - at.uR, 0.08, 0.6, "");
+    check(`${V} m/s: pushes, does not spin`, peakBeta, 0, 12, " deg slip");
+  }
+
+  // Linear 2-DOF yaw mode from the model's own cornering stiffnesses at
+  // 15 m/s. An FSAE car is a stiff, light, low-inertia thing: a fast yaw mode
+  // (2-4.5 Hz) and well damped. Below ~0.6 the car would hunt after every
+  // input; this is the number that says the ice feel was NOT yaw damping.
+  {
+    const m = SDM26.massKg, I = SDM26.izzKgM2, L = SDM26.wheelbaseM, U = 15;
+    const a = L * (1 - SDM26.weightDistFront), b = L * SDM26.weightDistFront;
+    const Fz0 = (m * 9.81) / 4;
+    const FzF = (m * 9.81 * b) / L, FzR = (m * 9.81 * a) / L;
+    const Cf = 2 * TIRE_INFO.corneringStiffness(axleMu(SDM26.muLat * SDM26.frontGripFactor, FzF, 0, Fz0, SDM26.tireLoadSensitivity), FzF / 2);
+    const Cr = 2 * TIRE_INFO.corneringStiffness(axleMu(SDM26.muLat, FzR, 0, Fz0, SDM26.tireLoadSensitivity), FzR / 2);
+    const A = [[-(Cf + Cr) / (m * U), -(U + (a * Cf - b * Cr) / (m * U))],
+               [-(a * Cf - b * Cr) / (I * U), -(a * a * Cf + b * b * Cr) / (I * U)]];
+    const tr = A[0][0] + A[1][1], det = A[0][0] * A[1][1] - A[0][1] * A[1][0];
+    const wn = Math.sqrt(det), zeta = -tr / (2 * wn);
+    check("yaw natural frequency at 15 m/s", wn / (2 * Math.PI), 2.0, 4.5, " Hz");
+    check("yaw damping ratio at 15 m/s", zeta, 0.6, 1.4, "");
+    // Linear-range understeer gradient: near neutral, as the tyres are the
+    // same front and rear; the limit balance above is what makes it push.
+    check("linear understeer gradient", ((m / L) * (b / Cf - a / Cr) * 9.81) / D2R, -0.6, 1.5, " deg/g");
+  }
+
+  // A keyboard step. The key is held; the servo is the keyboard profile's
+  // (180 deg/s, 700 deg/s^2, 0.10 s) and the lock is what the profile allows
+  // at this speed. With the throttle held steady the car must reach the
+  // tyre's limit and push, not spin.
+  const kb = PROFILES.keyboard.steering;
+  const lockAt = (V) => usableLockFrac(kb.speedSensitive, V, {
+    wheelbaseM: SDM26.wheelbaseM, maxSteerDeg: SDM26.maxSteerDeg, peakSlipAngleDeg: TIRE_INFO.peakSlipAngleDeg,
+  });
+  check("keyboard lock at 5 m/s", lockAt(5), 1, 1, "");
+  check("keyboard lock at 15 m/s", lockAt(15) * SDM26.maxSteerDeg, 17, 23, " deg");
+  check("keyboard lock at 25 m/s", lockAt(25) * SDM26.maxSteerDeg, 13, 18, " deg");
+  for (const V of [10, 15, 20]) {
+    const car = place(V);
+    car.steeringServo = { maxRateDegPerS: kb.maxRateDegPerS, accelDegPerS2: kb.accelDegPerS2, lagS: kb.lagS };
+    let t = 0, peakAy = 0, peakBeta = 0, tLock = null;
+    while (t < 3) {
+      car.step(DT, { steer: lockAt(V), throttle: 0.25, brake: 0 });
+      t += DT;
+      const tel = car.telemetry;
+      peakAy = Math.max(peakAy, tel.ayG);
+      peakBeta = Math.max(peakBeta, Math.abs(tel.bodySlipDeg));
+      if (tLock == null && tel.steerDeg >= lockAt(V) * SDM26.maxSteerDeg - 0.1) tLock = t;
+    }
+    check(`${V} m/s: key held to the lock reaches it in`, tLock * 1000, 100, 600, " ms");
+    check(`${V} m/s: key held to the lock, peak lateral`, peakAy, 1.3, 1.9, " g");
+    check(`${V} m/s: key held to the lock does not spin`, peakBeta, 0, 12, " deg slip");
+  }
+
+  // Keyboard pedals ramp instead of stepping.
+  {
+    const thr = PROFILES.keyboard.pedals.throttle;
+    let v = 0, t = 0;
+    while (v < 0.999 && t < 2) { v = stepPedal(v, 1, thr, 1 / 120); t += 1 / 120; }
+    check("keyboard throttle 0 -> 1 in", t, 0.3, 0.6, " s");
+    let d = 1; t = 0;
+    while (d > 0.001 && t < 2) { d = stepPedal(d, 0, thr, 1 / 120); t += 1 / 120; }
+    check("keyboard throttle 1 -> 0 in", t, 0.05, 0.2, " s");
+    check("keyboard profile defaults traction control on", PROFILES.keyboard.assistDefaults?.traction ? 1 : 0, 1, 1, "");
+    check("keyboard profile defaults ABS on", PROFILES.keyboard.assistDefaults?.abs ? 1 : 0, 1, 1, "");
+    // A pad's trigger has a position: no ramp there.
+    check("gamepad pedals are not ramped", PROFILES["gamepad-xbox"].pedals.throttle.rampUpPerS ? 1 : 0, 0, 0, "");
+  }
 }
 
 // ------------------------------------------------------ Rust model parity ---
@@ -309,7 +445,10 @@ console.log("\nSTEERING FEEL  (rim torque for force feedback)");
   check("mixer: end stop pushes back from over-lock", -over.softLock, 4, 6, " N.m");
   const kicked = new ForceFeedback().update(1 / 60, cfg, straight, { deg: 0, halfLockDeg: 56 }, { ...feel, coneHit: 1 });
   check("mixer: a cone kicks", Math.abs(kicked.kickNm), 1, 6, " N.m");
-  const spun = new ForceFeedback().update(1 / 60, cfg, gentle, { deg: 0, halfLockDeg: 56 }, { ...feel, spin: 1 });
+  // On the straight-line telemetry: texture is limited to the headroom left
+  // under the aligning torque, and mid-corner on a 5.5 N.m base there is
+  // little of it, which is the motor's problem and not the mixer's.
+  const spun = new ForceFeedback().update(1 / 60, cfg, straight, { deg: 0, halfLockDeg: 56 }, { ...feel, spin: 1 });
   check("mixer: wheelspin makes texture", spun.textureNm, 0.2, 3, " N.m");
   const inv = new ForceFeedback().update(1 / 60, { ...cfg, invert: true }, gentle, { deg: -20, halfLockDeg: 56 }, feel);
   check("mixer: invert flips the command", inv.command / turned.command, -1.0001, -0.9999, "");

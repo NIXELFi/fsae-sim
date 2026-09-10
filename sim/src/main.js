@@ -1,6 +1,7 @@
 // Game bootstrap and main loop.
 
 import { SDM26 } from "./vehicle/params.js";
+import { TIRE_INFO } from "./vehicle/tire.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
 import { loadCarModel, loadWheelModel, loadBodyModel } from "./render/glbcar.js";
 import { AudioPanel } from "./game/audioPanel.js";
@@ -374,6 +375,10 @@ class Game {
     // be mapped through the real ratio rather than an assumed one.
     this.input.carLockDeg = SDM26.maxSteerDeg;
     this.input.carSteeringRatio = SDM26.steeringRatio;
+    // For the keyboard's speed-sensitive lock: last frame's speed is fine.
+    this.input.carSpeed = this.car.speed;
+    this.input.carWheelbaseM = SDM26.wheelbaseM;
+    this.input.carPeakSlipDeg = TIRE_INFO.peakSlipAngleDeg;
     this.car.steeringServo = this.input.steeringServo();
 
     // The pedal map is applied here, once, before anything else looks at
@@ -815,6 +820,16 @@ async function boot() {
     game.assists.autoShift = dom.autoToggle.checked;
     game.audio.setEnabled(dom.audioToggle.checked);
   };
+  // A control profile can ask for driver aids on by default -- the keyboard
+  // does, because its pedals are switches. Applied once at boot from whatever
+  // profile is active; the toggles stay the driver's after that.
+  {
+    const d = game.input.profile?.assistDefaults;
+    if (d) {
+      if (d.traction != null) dom.tcToggle.checked = d.traction;
+      if (d.abs != null) dom.absToggle.checked = d.abs;
+    }
+  }
   for (const el of [dom.tcToggle, dom.absToggle, dom.autoToggle, dom.audioToggle]) {
     el.addEventListener("change", sync);
   }

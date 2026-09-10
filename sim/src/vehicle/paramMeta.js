@@ -144,8 +144,11 @@ export function parameterGroups() {
     ]),
 
     rows("Tyres & grip", [
-      p("Peak lateral μ", v.muLat, "—", "calibrated",
-        "Reproduces SDM26's real 5.02 s skidpad THROUGH THIS MODEL. Differs from the lap sim's 1.368 because that figure already absorbs the axle load-transfer derate this model computes explicitly; reusing it would double-count and give 5.38 s."),
+      p("Peak lateral μ (rear axle)", v.muLat, "—", "calibrated",
+        "With the front grip factor below, reproduces SDM26's real 5.02 s skidpad THROUGH THIS MODEL. Differs from the lap sim's 1.368 because that figure already absorbs the axle load-transfer derate this model computes explicitly; reusing it would double-count and give 5.38 s."),
+      p("Front grip factor", v.frontGripFactor, "—", "estimate",
+        "Front axle peak lateral grip relative to the rear. With one tyre character on both axles the balance is neutral to within 1% of force and the car spins from any step steer at the limit; a real front lets go first (camber loss on the steered upright, inside-front drag, compliance). 0.90 gives a mild, recoverable push at 10-20 m/s. Replace with a measured understeer gradient.",
+        { path: "frontGripFactor", min: 0.75, max: 1.05, step: 0.005 }),
       p("Lap sim's peak lateral μ", v.muLatHeliosQss, "—", "team",
         "Helios' skidpad-pinned value, kept for traceability. Correct for a quasi-steady model, wrong for this one."),
       p("Peak longitudinal μ", v.muLong, "—", "calibrated",

@@ -30,11 +30,38 @@ export const SDM26 = {
   // splits each axle left/right and derates grip for the lateral load transfer
   // (see tire.axleMu), which costs a further ~6% of mu on a skidpad. Reusing
   // 1.368 here therefore double-counts the derate and yields a 5.38 s skidpad
-  // against the 5.02 s SDM26 actually ran. 1.573 reproduces 5.02 s through
-  // THIS model -- same measurement, different model, so a different constant.
-  // (Oracle hit the same thing and solved it the same way, with mu_scale.)
-  muLat: 1.573,
+  // against the 5.02 s SDM26 actually ran. Same measurement, different model,
+  // so a different constant. (Oracle hit the same thing and solved it the same
+  // way, with mu_scale.)
+  //
+  // This is the REAR axle's peak lateral mu; the front runs at
+  // muLat * frontGripFactor. Together they are pinned so that the skidpad
+  // comes out at 5.02 s through this model: 1.573 did that with equal axles,
+  // 1.66 x 0.90 = 1.49 at the front does it now that the front limits first.
+  muLat: 1.66,
   muLatHeliosQss: 1.368,  // kept for traceability to the lap sim
+  // EST: front axle peak lateral grip relative to the rear.
+  //
+  // With equal tyres front and rear, the only things that set this model's
+  // limit balance are weight distribution, load transfer and the aero split,
+  // and those leave it NEUTRAL to within 1% of force at every speed: with the
+  // team's roll-stiffness baseline the rear axle reached its peak first at
+  // 10, 15 and 20 m/s, and a steering input at the limit -- 12 deg at 15 m/s
+  // over 150 ms, a keyboard tap -- spun the car every time, because once both
+  // axles are past the peak the yaw moment a*FyF - b*FyR stays positive (a > b
+  // on a 48.5% front car) and nothing arrests the yaw. Roll stiffness alone
+  // cannot fix that: moving rsdFront to 0.63 only shifts the steady-state
+  // balance, and the same step steer still spun it.
+  //
+  // A real car's front lets go first by a clear margin, through things a
+  // bicycle model with one tyre character cannot see: the steered upright
+  // cannot carry as much camber as the rear and loses more in roll, the inside
+  // front drags at parallel steer, and steering compliance. 0.90 puts the front
+  // at its peak while the rear still has ~5% of force in hand (utilisation
+  // ~0.65 vs 0.93), which is a mild, recoverable push at 10-20 m/s and
+  // survives a keyboard step to the speed-limited lock. Replace with a
+  // measured understeer gradient when the team has one.
+  frontGripFactor: 0.90,
   muLong: 1.5,            // launch-traction estimate (75 m accel ~4.2 s)
   tireLoadSensitivity: 0.15, // Hoosier R20 slick: mu falls 15% per 100% load
 

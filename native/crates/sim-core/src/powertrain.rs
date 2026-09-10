@@ -66,6 +66,10 @@ pub trait PowertrainModel: Send + Sync {
     /// a stop on the first substep.
     fn sync_to_wheel(&mut self, _wheel_omega: f64) {}
 
+    /// Select a gear directly, no shift cut. For placing a car at speed;
+    /// single-speed drives ignore it.
+    fn set_gear(&mut self, _gear: usize) {}
+
     fn shift_up(&mut self) -> bool {
         false
     }
@@ -582,6 +586,12 @@ impl PowertrainModel for GearedEngine {
     fn sync_to_wheel(&mut self, wheel_omega: f64) {
         self.engine_rpm = (wheel_omega * self.ratio() * RADS_TO_RPM).max(self.idle_rpm);
         self.slipping = false;
+    }
+
+    fn set_gear(&mut self, gear: usize) {
+        self.gear = gear.min(self.gear_ratios.len().saturating_sub(1));
+        self.pending_gear = None;
+        self.shift_timer = 0.0;
     }
 
     fn shift_up(&mut self) -> bool {
