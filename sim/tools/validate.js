@@ -345,7 +345,10 @@ console.log("\nRUST PARITY  (sim-core golden vectors vs the JS model)");
   const script = (t) =>
     t < 3 ? [0, 0.55, 0] : t < 5 ? [0.15, 0.4, 0] : t < 5.5 ? [0.05, 0, 0.25] : t < 9 ? [-0.12, 0.5, 0] : [0.08, 0.8, 0];
   const { car } = fresh();
-  car.respawn(0, 0, 0, 0);
+  // Rolling start at 5 m/s in first, as in golden_vehicle.rs: from rest the
+  // clutch bites into wheelspin, which is the chattering regime the drive
+  // is meant to stay out of.
+  car.respawn(0, 0, 0, 5);
   const dt = golden.dt;
   const shifts = new Set(golden.shiftFrames);
   let worstPos = 0, worstVel = 0, worstRpm = 0, worstRim = 0, worstTrail = 0;

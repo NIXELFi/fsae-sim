@@ -164,11 +164,13 @@ pub fn sdm26() -> VehicleParams {
         track_front_m: 1.207,
         track_rear_m: 1.194,
         tyre_radius_m: 0.20,
-        izz_kg_m2: 105.0,
-        unsprung_front_kg: 11.0,
-        unsprung_rear_kg: 11.0,
-        wheel_inertia_front_kg_m2: 0.22,
-        wheel_inertia_rear_kg_m2: 0.25,
+        // Team workbook ('SDM26 Full-Vehicle Sim Parameters'): Izz, unsprung
+        // per corner and wheel spin inertia. See params.js for the sources.
+        izz_kg_m2: 93.66,
+        unsprung_front_kg: 7.56,
+        unsprung_rear_kg: 7.77,
+        wheel_inertia_front_kg_m2: 0.154,
+        wheel_inertia_rear_kg_m2: 0.152,
         crr: 0.02,
         front_grip_factor: 0.90,
         aero: AeroParams {

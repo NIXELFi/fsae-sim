@@ -15,7 +15,11 @@ fn main() {
         Fidelity::Bicycle,
         Chassis::new(sdm26(), Box::new(MagicFormulaTyre::sdm26()), Box::new(GearedEngine::sdm26())),
     );
-    car.reset(0.0, 0.0, 0.0, 0.0);
+    // Rolling start at 5 m/s in first. From rest the clutch bites into
+    // wheelspin (kappa > 1 with the measured 0.15 kg.m^2 wheels), and a
+    // chattering clutch is exactly the branch-flipping regime this drive is
+    // meant to avoid.
+    car.reset(0.0, 0.0, 0.0, 5.0);
     let dt = 1.0 / 60.0;
     let frames = 12 * 60;
     let mut rows = Vec::new();

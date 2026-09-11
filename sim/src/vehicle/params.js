@@ -114,19 +114,31 @@ export const SDM26 = {
   // DRIVING-SIM ADDITIONS -- estimates, not team measurements.
   // =====================================================================
 
-  // EST: yaw inertia. FSAE cars measured on a bifilar rig typically land
-  // 85-130 kg.m^2. 105 gives a dynamic index k^2/(ab) = 0.67, which is the
-  // mass-concentrated character of a small formula car (a road car is ~1.0).
-  izzKgM2: 105,
+  // TEAM: yaw inertia from the team's 'SDM26 Full-Vehicle Sim Parameters'
+  // workbook (Drive, BODY block: Izz 93 660 784 kg.mm^2 at 253.3 kg listed,
+  // with Ixx 24.8 and Iyy 85.3 kg.m^2). Not a bifilar measurement -- the
+  // workbook does not say how it was obtained and it reads like CAD mass
+  // properties -- but it is the team's number for this car, and it sits
+  // inside the 85-130 range a bifilar rig gives FSAE cars. Kept as listed
+  // rather than scaled to 267 kg: the 14 kg difference is driver and fuel,
+  // which sit near the CG and add little to Izz. Dynamic index k^2/(ab)
+  // = 0.60. See sim/tools/team_data.py.
+  izzKgM2: 93.66,
 
-  // EST: unsprung mass per corner (upright + hub + brake + wheel + tyre +
-  // half the arms). Split front/rear because they are not the same corner:
-  // the front carries the steering upright and the rear the driveshaft and
-  // sprocket. Used to split lateral load transfer and to find sprung mass.
-  unsprungFrontKg: 11,
-  unsprungRearKg: 11,
+  // TEAM: unsprung mass per corner from the same workbook (7.56 front,
+  // 7.77 rear). The team's Ride Roll Calc sheet says 33 lb front / 38 lb
+  // rear per axle (7.5 / 8.6 kg per corner) and the quarter-car script
+  // 36.5 / 38 lb; the workbook is the most recent and most detailed, and
+  // the spread is under 1 kg. Used to split lateral load transfer and to
+  // find sprung mass.
+  unsprungFrontKg: 7.56,
+  unsprungRearKg: 7.77,
 
-  // EST: rotational inertias. Wheel assemblies from a 10" wheel + slick.
+  // Rotational inertias. The WHEEL figures are TEAM data (workbook
+  // wheel_spin_inertia: 0.154 front, 0.152 rear kg.m^2 per corner; the
+  // brakes calculator's own build-up -- tyre 0.156, rim 0.042, rotor 0.001,
+  // spindle 0.0004 = 0.200 -- lands within 0.05 of them). The DRIVELINE
+  // figures are still EST.
   //
   // Driveline inertia is split at the primary because that is where the clutch
   // physically sits on a CBR600RR: crank -> primary gears -> clutch basket ->
@@ -138,10 +150,10 @@ export const SDM26 = {
   // biggest reason a bike-engined car is sluggish off the line, but the right
   // size. This is real physics the quasi-steady lap sim does not model at all,
   // and it is why the 75 m time here is honestly slower than the QSS 4.2 s.
-  wheelInertiaFrontKgM2: 0.22,
-  wheelInertiaRearKgM2: 0.25,   // + sprocket and disc
-  engineInertiaKgM2: 0.011,     // crank + primary drive gear (crank-referenced)
-  gearboxInertiaKgM2: 0.006,    // clutch basket + shafts + sprocket (post-primary)
+  wheelInertiaFrontKgM2: 0.154, // TEAM: workbook, per wheel
+  wheelInertiaRearKgM2: 0.152,  // TEAM: workbook, per wheel (disc is inboard)
+  engineInertiaKgM2: 0.011,     // EST: crank + primary drive gear (crank-referenced)
+  gearboxInertiaKgM2: 0.006,    // EST: clutch basket + shafts + sprocket (post-primary)
 
   // EST: steering. 28 deg of road-wheel lock clears the tightest 4.5 m radius
   // on the endurance course with slip angle to spare. The lag and rate limit
