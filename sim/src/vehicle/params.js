@@ -155,27 +155,37 @@ export const SDM26 = {
   engineInertiaKgM2: 0.011,     // EST: crank + primary drive gear (crank-referenced)
   gearboxInertiaKgM2: 0.006,    // EST: clutch basket + shafts + sprocket (post-primary)
 
-  // EST: steering. 28 deg of road-wheel lock clears the tightest 4.5 m radius
-  // on the endurance course with slip angle to spare. The lag and rate limit
-  // stand in for the driver's hands plus rack compliance.
+  // Steering lock: 28 deg at the road wheel. Originally an estimate (clears
+  // the tightest 4.5 m radius on the endurance course with slip angle to
+  // spare); the rack stops have not been measured, but three of the four
+  // 2026-04-01 MoTeC runs that exercise the wheel to the stop cap the
+  // STEERING channel at 121-124 deg at the rim, which through the measured
+  // 4.411 ratio is 27.4-28.1 deg. The fourth run reads 196 deg and is either
+  // uncalibrated or wrapped. Kept at 28; still not a rack measurement. The
+  // lag and rate limit remain EST for the driver's hands plus rack
+  // compliance.
   maxSteerDeg: 28,
   steerLagS: 0.06,
   steerRateDegS: 360,
-  // Steering-wheel turns per road-wheel angle. Visual only -- it sets how far
-  // the wheel rotates in the cockpit, not how the car responds.
-  steeringRatio: 4.0,
+  // TEAM: rim angle per road-wheel angle, 4.411 from the OptimumK 'SDM26
+  // Designed vs Actual Kinematics' export (2026-06-27). Sets how far the
+  // wheel rotates in the cockpit and the rim/kingpin torque ratio.
+  steeringRatio: 4.411,
 
-  // EST: steering geometry, for the force the driver feels. None of this
-  // affects how the car goes round a corner; all of it sets what comes back
-  // through the rim. Take caster and trail off the real uprights when known.
+  // Steering geometry, for the force the driver feels. None of this affects
+  // how the car goes round a corner; all of it sets what comes back through
+  // the rim. Caster and trail are TEAM data from the same OptimumK export
+  // (Actual column: caster 4.743 deg, KPI 8.745 deg, scrub 25.5 mm,
+  // mechanical trail 18.85 mm, Ackermann 0). See sim/tools/team_data.py.
   steering: {
     /** Caster angle, deg. Sets the mechanical trail with the tyre radius. */
-    casterDeg: 5.0,
+    casterDeg: 4.743,
     /**
      * Extra mechanical trail from the kingpin axis being ahead of the hub
-     * centre, m. Zero when the kingpin passes through the hub.
+     * centre, m. R tan(caster) at R = 0.2 m is 16.6 mm; OptimumK's 18.85 mm
+     * of mechanical trail leaves 2.25 mm for the kingpin offset.
      */
-    kingpinOffsetTrailM: 0.0,
+    kingpinOffsetTrailM: 0.00225,
     /**
      * Fraction of the kingpin moment that reaches the rim. Rack and column
      * friction eat the rest. 0.85 is a plain rack with rod ends.
@@ -189,10 +199,25 @@ export const SDM26 = {
     torqueRatio: null,
   },
 
-  // EST: brakes. 1500 N.m total at the wheels is enough to lock all four at
-  // low speed (a rules requirement), so threshold braking is a skill.
-  brakeTorqueMaxNm: 1500,
-  brakeBiasFront: 0.62,
+  // Brakes, from the workbook BRAKES block and the Drive 'SDM26 Brakes
+  // Calculator (Ideal Brake Bias)': Brembo P4.24 front (1809.6 mm^2 total
+  // piston area, 78.7 mm effective radius), P2.24 rear (904.8 mm^2, 69.5 mm),
+  // pad mu 0.45, Tilton 78-625 master cylinders, pedal ratio 3.5, bias bar
+  // 54% front by force (OptimumK 'Brake Bias 54.0'; "54% fr" on the car,
+  // 2026-04-11). See sim/tools/team_data.py.
+  //
+  // Max torque is the 70 bar max working pressure in the calculator: 1235
+  // N.m at the wheels, which is 916 N (206 lbf) on the pedal. The pedal
+  // force a driver actually reaches is not measured, so this is DERIVED, not
+  // measured, but it is bounded by the team's own system limit rather than
+  // the old 1500 N.m guess. All four still lock well before it (786 N.m at
+  // 1.5 g), so threshold braking is a skill.
+  brakeTorqueMaxNm: 1235,
+  // TEAM/derived: front TORQUE share from the calliper geometry and the 54%
+  // bias bar is 0.727 (the calculator's own sheet says 0.713 with slightly
+  // different radii). The bias bar figure alone is a pressure split, not a
+  // torque split; the front callipers are twice the rear.
+  brakeBiasFront: 0.72,
 
   // EST: tyre relaxation length -- the distance the tyre must roll to build
   // slip force. ~0.35 m is right for a 10" slick, and it is what makes the

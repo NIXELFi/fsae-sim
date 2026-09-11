@@ -210,15 +210,17 @@ export function parameterGroups() {
 
     rows("Steering & brakes", [
       p("Steering lock, road wheel", v.maxSteerDeg, "deg", "estimate",
-        "Clears the tightest 4.5 m radius on the endurance course with slip angle to spare. Should be taken off the real rack.", { path: "maxSteerDeg", min: 10, max: 45, step: 0.5 }),
-      p("Steering ratio", v.steeringRatio, ":1", "estimate",
-        "Steering-wheel turns per road-wheel angle. Visual only — it sets how far the wheel turns in the cockpit, not how the car responds.",
+        "Not a rack measurement, but three of four 2026-04-01 MoTeC runs cap the rim at 121-124 deg, which is 27.4-28.1 deg through the 4.411 ratio. Measure the rack stops to close it.", { path: "maxSteerDeg", min: 10, max: 45, step: 0.5 }),
+      p("Steering ratio", v.steeringRatio, ":1", "team",
+        "OptimumK 'Designed vs Actual Kinematics' export, 2026-06-27. Sets the cockpit wheel angle and the rim torque per kingpin torque.",
         { path: "steeringRatio", min: 2, max: 10, step: 0.1 }),
+      p("Caster", v.steering.casterDeg, "deg", "team", "OptimumK export; KPI 8.745 deg, scrub 25.5 mm, mechanical trail 18.85 mm (kingpin offset adds 2.25 mm to R tan(caster))."),
       p("Steering lag", v.steerLagS * 1000, "ms", "estimate", "Driver's hands plus rack compliance.", { path: "steerLagS", min: 10, max: 300, step: 1, factor: 1000 }),
       p("Steering rate limit", v.steerRateDegS, "deg/s", "estimate", "At the road wheel."),
       p("Max brake torque", v.brakeTorqueMaxNm, "N·m", "estimate",
-        "Total at the wheels. Enough to lock all four at low speed, which the rules require, so threshold braking is a skill."),
-      p("Brake bias, front", v.brakeBiasFront * 100, "%", "estimate"),
+        "Derived, not measured: the brakes calculator's 70 bar max working pressure through the P4.24/P2.24 callipers, pad mu 0.45 and the 54% bias bar. That is 206 lbf on the pedal; the force a driver reaches is the unmeasured part. All four lock at 786 N·m (1.5 g)."),
+      p("Brake bias, front", v.brakeBiasFront * 100, "%", "team",
+        "Torque share from the calliper geometry and the 54% bias bar on the car (calculator: 71.3%, workbook radii: 72.7%). The bias bar's 54% is a pressure split."),
     ]),
 
     rows("Driver & environment", [

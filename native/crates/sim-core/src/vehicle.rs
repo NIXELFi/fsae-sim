@@ -189,7 +189,9 @@ pub fn sdm26() -> VehicleParams {
             rc_front_m: 0.0186,
             rc_rear_m: 0.0251,
         },
-        brakes: BrakeParams { max_torque_nm: 1500.0, bias_front: 0.62 },
+        // 70 bar max working pressure through the measured callipers and
+        // 54% bias bar; see params.js.
+        brakes: BrakeParams { max_torque_nm: 1235.0, bias_front: 0.72 },
         steering: SteeringParams {
             max_steer_rad: 28.0_f64.to_radians(),
             lag_s: 0.06,
@@ -198,9 +200,11 @@ pub fn sdm26() -> VehicleParams {
             slip_cap_rad: 0.0,
             rate_speed_ref_mps: 0.0,
             rate_speed_exp: 1.5,
-            ratio: 4.0,
-            caster_rad: 5.0_f64.to_radians(),
-            kingpin_offset_trail_m: 0.0,
+            // OptimumK 'Designed vs Actual Kinematics' (2026-06-27): ratio
+            // 4.411, caster 4.743 deg, mechanical trail 18.85 mm.
+            ratio: 4.411,
+            caster_rad: 4.743_f64.to_radians(),
+            kingpin_offset_trail_m: 0.00225,
             rack_efficiency: 0.85,
             torque_ratio: None,
             ackermann: 0.0,
