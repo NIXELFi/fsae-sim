@@ -169,7 +169,7 @@ export function parameterGroups() {
     rows("Aerodynamics", [
       p("CdA", v.cdaM2, "m²", "cfd", "2026 CFD aero map at nominal ride height: Cd 1.200 × 1.078 m².", { path: "cdaM2", min: 0.4, max: 2.6, step: 0.005 }),
       p("ClA", v.claM2, "m²", "cfd", "2026 CFD aero map at nominal ride height: Cl 2.918 × 1.078 m².", { path: "claM2", min: 0, max: 5.5, step: 0.005 }),
-      p("Front downforce split", v.aeroFrontFrac * 100, "%", "cfd", "From the same aero map.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
+      p("Front downforce split", v.aeroFrontFrac * 100, "%", "estimate", "CFD map says 55.3%; run at 50% because 55.3% makes the rear the limit above ~20 m/s in this model (see params.js). For the aero group to settle.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
       p("Air density", v.airDensityKgM3, "kg/m³", "team", "Ambient used across Helios."),
       p("Rolling resistance", v.crr, "—", "team", "Helios model constant."),
     ]),

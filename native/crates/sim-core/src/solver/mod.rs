@@ -175,10 +175,44 @@ pub(crate) fn advance_steer(
     p: &VehicleParams,
     dt: f64,
 ) -> f64 {
+    advance_steer_capped(current, rate, demand, p, dt, None, 0.0)
+}
+
+/// `advance_steer` with the slip cap: `kin` is the front's kinematic slip
+/// term atan2(v + a r, u) (rad, left positive) when the caller can supply it.
+/// With a cap the target is held inside kin +- cap, so a key or a stick
+/// cannot command the front past the tyre's peak -- at 25 m/s the car's
+/// peak lateral comes at under 5 deg of steer, and a 13 deg "lock" threw the
+/// front three times past it and hooked the car round.
+pub(crate) fn advance_steer_capped(
+    current: f64,
+    rate: &mut f64,
+    demand: f64,
+    p: &VehicleParams,
+    dt: f64,
+    kin: Option<f64>,
+    u: f64,
+) -> f64 {
     let st = &p.steering;
-    let target = demand.clamp(-1.0, 1.0) * st.max_steer_rad;
-    let want = ((target - current) / st.lag_s.max(1e-4)).clamp(-st.rate_rad_s, st.rate_rad_s);
-    let max_delta = st.accel_rad_s2 * dt;
+    let mut target = demand.clamp(-1.0, 1.0) * st.max_steer_rad;
+    // Speed-sensitive rate: nobody flicks a wheel at 90 km/h the way they do
+    // at 30, and a key press is the same step at both.
+    let rate_scale = if st.rate_speed_ref_mps > 0.0 {
+        (st.rate_speed_ref_mps / u.abs().max(0.1)).powf(st.rate_speed_exp).min(1.0)
+    } else {
+        1.0
+    };
+    if let Some(k) = kin {
+        if st.slip_cap_rad > 0.0 {
+            // The band is centred on the car's motion, not on zero, so when
+            // the rear steps out the front follows the slide: the assist
+            // counter-steers for a driver who has no seat to feel it in.
+            target = target.clamp(k - st.slip_cap_rad, k + st.slip_cap_rad);
+        }
+    }
+    let want = ((target - current) / st.lag_s.max(1e-4))
+        .clamp(-st.rate_rad_s * rate_scale, st.rate_rad_s * rate_scale);
+    let max_delta = st.accel_rad_s2 * rate_scale * dt;
     *rate += (want - *rate).clamp(-max_delta, max_delta);
     let mut next = current + *rate * dt;
     // Do not coast past the target: overshoot here is a discretisation

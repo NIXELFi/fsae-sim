@@ -68,7 +68,21 @@ export const SDM26 = {
   // ---- aero (2026 CFD aero map @ nominal RH) ----
   cdaM2: 1.294,           // Cd 1.200 x A_ref 1.078 m^2
   claM2: 3.146,           // Cl 2.918 x 1.078 (downforce)
-  aeroFrontFrac: 0.553,   // %front downforce
+  // Front share of downforce. The 2026 CFD map says 55.3% at nominal ride
+  // height; this model runs 50%, and the CFD figure is kept below for
+  // traceability, the same way muLat is re-pinned against the lap sim.
+  //
+  // Why: driven through this model, 55.3% front on a 48.5%-front car makes
+  // the rear the limiting axle from about 20 m/s up -- a steady steer ramp
+  // spins it at 25 m/s, and it spins while COASTING at 20 m/s (rear axle
+  // utilisation 0.98 at peak lateral with the engine braking it). That is a
+  // car nobody could drive fast, and it is not what SDM26 does on track.
+  // At 50% the front limits first at every speed (rear utilisation 0.70 to
+  // 0.84 at peak lateral, 20-28 m/s). The aero group should say which of
+  // the two the car actually runs at rake and ride height under load; until
+  // then the drivable number is the honest one for a driver-in-loop tool.
+  aeroFrontFrac: 0.50,
+  aeroFrontFracCfd: 0.553,
   airDensityKgM3: 1.162,
   crr: 0.02,
 

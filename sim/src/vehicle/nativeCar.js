@@ -76,7 +76,9 @@ export class NativeCar {
     // The game sets this every frame; only a real change is worth a message.
     const old = this._servo;
     if (old && cfg && old.maxRateDegPerS === cfg.maxRateDegPerS &&
-        old.accelDegPerS2 === cfg.accelDegPerS2 && old.lagS === cfg.lagS) return;
+        old.accelDegPerS2 === cfg.accelDegPerS2 && old.lagS === cfg.lagS &&
+        (old.slipCapDeg ?? 0) === (cfg.slipCapDeg ?? 0) &&
+        (old.rateSpeedRefMps ?? 0) === (cfg.rateSpeedRefMps ?? 0)) return;
     if (!old && !cfg) return;
     this._servo = cfg;
     this.pushParams();
@@ -104,6 +106,9 @@ export class NativeCar {
       steerLagS: servo ? servo.lagS : p.steerLagS,
       steerRateDegS: servo ? servo.maxRateDegPerS : p.steerRateDegS,
       steerAccelDegS2: servo ? servo.accelDegPerS2 : 1e9,
+      steerSlipCapDeg: servo ? (servo.slipCapDeg ?? 0) : 0,
+      steerRateSpeedRefMps: servo ? (servo.rateSpeedRefMps ?? 0) : 0,
+      steerRateSpeedExp: servo ? (servo.rateSpeedExp ?? 1.5) : 1.5,
       steeringRatio: p.steeringRatio,
       casterDeg: p.steering.casterDeg, kingpinOffsetTrailM: p.steering.kingpinOffsetTrailM,
       rackEfficiency: p.steering.rackEfficiency, torqueRatio: p.steering.torqueRatio ?? undefined,

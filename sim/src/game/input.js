@@ -173,6 +173,9 @@ export class Input {
       maxRateDegPerS: st.maxRateDegPerS,
       accelDegPerS2: st.accelDegPerS2,
       lagS: st.lagS,
+      slipCapDeg: st.slipCapDeg ?? 0,
+      rateSpeedRefMps: st.rateSpeedRefMps ?? 0,
+      rateSpeedExp: st.rateSpeedExp ?? 1.5,
     };
   }
 

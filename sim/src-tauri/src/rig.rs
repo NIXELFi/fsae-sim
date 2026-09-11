@@ -212,6 +212,9 @@ pub struct ParamSet {
     pub steer_lag_s: Option<f64>,
     pub steer_rate_deg_s: Option<f64>,
     pub steer_accel_deg_s2: Option<f64>,
+    pub steer_slip_cap_deg: Option<f64>,
+    pub steer_rate_speed_ref_mps: Option<f64>,
+    pub steer_rate_speed_exp: Option<f64>,
     pub steering_ratio: Option<f64>,
     pub caster_deg: Option<f64>,
     pub kingpin_offset_trail_m: Option<f64>,
@@ -705,6 +708,9 @@ impl Loop {
             if let Some(x) = p.max_steer_deg { v.steering.max_steer_rad = x.to_radians(); }
             if let Some(x) = p.steer_rate_deg_s { v.steering.rate_rad_s = x.to_radians(); }
             if let Some(x) = p.steer_accel_deg_s2 { v.steering.accel_rad_s2 = x.to_radians(); }
+            if let Some(x) = p.steer_slip_cap_deg { v.steering.slip_cap_rad = x.to_radians(); }
+            if let Some(x) = p.steer_rate_speed_ref_mps { v.steering.rate_speed_ref_mps = x; }
+            if let Some(x) = p.steer_rate_speed_exp { v.steering.rate_speed_exp = x; }
             if let Some(x) = p.caster_deg { v.steering.caster_rad = x.to_radians(); }
             if p.torque_ratio.is_some() { v.steering.torque_ratio = p.torque_ratio; }
         }

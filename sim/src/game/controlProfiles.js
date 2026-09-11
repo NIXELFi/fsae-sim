@@ -40,6 +40,21 @@ const STORAGE_KEY = "fsae-sim.controls.v1";
  */
 function steering(over) {
   return {
+    /**
+     * Front slip-angle cap, deg, or 0 for none. With it, the road wheel is
+     * never commanded past the angle that puts the front tyre this far
+     * into slip against the car's actual motion. The tyre peaks at 8.5 deg;
+     * 10 lets a keyboard driver lean on the front without being able to
+     * throw it away. A wheel gets 0: the driver has force feedback.
+     */
+    slipCapDeg: 0,
+    /**
+     * Above this speed (m/s) the rate and acceleration limits scale by
+     * (ref / speed)^exp, so a key or stick steers gently at speed the way a
+     * hand does. 0 = off (wheels: the hand IS the input).
+     */
+    rateSpeedRefMps: 0,
+    rateSpeedExp: 1.5,
     /** Fastest the road wheel can be moved, deg/s. */
     maxRateDegPerS: 360,
     /** How fast that rate can change, deg/s^2. Bounds the snap of a step input. */
@@ -204,6 +219,8 @@ export const PROFILES = {
       maxRateDegPerS: 180,
       accelDegPerS2: 700,
       lagS: 0.10,
+      slipCapDeg: 8,
+      rateSpeedRefMps: 12,
       deadzone: 0,
       expo: 1,
       // The lock a key can reach shrinks with speed: Ackermann for 1.4 g plus
@@ -254,6 +271,8 @@ export const PROFILES = {
       maxRateDegPerS: 300,
       accelDegPerS2: 2200,
       lagS: 0.06,
+      slipCapDeg: 10,
+      rateSpeedRefMps: 14,
       deadzone: 0.10,
       // Full lock is 28 degrees and the tyre peaks at 8.5 degrees of slip, so a
       // linear stick puts the useful travel in the first third. Squaring it
@@ -286,6 +305,8 @@ export const PROFILES = {
       maxRateDegPerS: 300,
       accelDegPerS2: 2200,
       lagS: 0.06,
+      slipCapDeg: 10,
+      rateSpeedRefMps: 14,
       deadzone: 0.08,
       expo: 1.7,
     }),

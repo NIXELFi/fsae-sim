@@ -14,7 +14,7 @@
 //! is driven by the previous substep's measured accelerations so it settles
 //! rather than teleporting.
 
-use super::{advance_steer, Chassis, ChassisState, Controls, Fidelity, Solver, Telemetry, SUBSTEP};
+use super::{advance_steer_capped, Chassis, ChassisState, Controls, Fidelity, Solver, Telemetry, SUBSTEP};
 use crate::powertrain::PowertrainModel;
 use crate::tyre::{Slip, TyreModel};
 use crate::vehicle::{VehicleParams, G};
@@ -187,8 +187,10 @@ impl Solver for BicycleSolver {
 
 impl BicycleSolver {
     fn substep(&mut self, dt: f64, controls: Controls) {
-        self.delta =
-            advance_steer(self.delta, &mut self.steer_rate, controls.steer, &self.c.params, dt);
+        let kin = (self.s.v + self.c.params.a() * self.s.r).atan2(self.s.u.abs().max(0.6));
+        self.delta = advance_steer_capped(
+            self.delta, &mut self.steer_rate, controls.steer, &self.c.params, dt, Some(kin), self.s.u,
+        );
         let d = self.delta;
 
         let (u, v, r) = (self.s.u, self.s.v, self.s.r);

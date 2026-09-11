@@ -150,13 +150,41 @@ export class BicycleModel {
       maxRateDegPerS: p.steerRateDegS,
       accelDegPerS2: 1e9,
       lagS: p.steerLagS,
+      slipCapDeg: 0,
+      rateSpeedRefMps: 0,
+      rateSpeedExp: 1.5,
     };
-    const targetDeg = clamp(input.steer, -1, 1) * p.maxSteerDeg;
+    let targetDeg = clamp(input.steer, -1, 1) * p.maxSteerDeg;
+    // Slip-capped steering, for devices with no feel. A key or a stick
+    // commands an ANGLE, and past the tyre's peak more angle is less grip
+    // and more yaw -- at 25 m/s the car's peak lateral comes at under 5 deg
+    // of steer, and a keyboard "lock" of 13 deg threw the front three times
+    // past it and hooked the car round. The cap holds the front slip angle
+    // at or below `slipCapDeg`, measured against the car's actual velocity
+    // and yaw rate, so at the limit the wheel angle follows the car (a
+    // built-in easing off as the rear slides) instead of fighting it. The
+    // band is centred on the car's motion, not on zero, so when the rear
+    // steps out the front follows the slide: the assist counter-steers for
+    // a driver who has no seat to feel it in. Off for a wheel: there the
+    // driver has the tyre's own signal in their hands.
+    if (cfg.slipCapDeg > 0) {
+      const kinDeg = (Math.atan2(this.v + this.a * this.r, Math.max(Math.abs(this.u), 0.6)) * 180) / Math.PI;
+      const lo = kinDeg - cfg.slipCapDeg, hi = kinDeg + cfg.slipCapDeg;
+      targetDeg = clamp(targetDeg, lo, hi);
+    }
     const angleDeg = (this.delta * 180) / Math.PI;
 
+    // Speed-sensitive rate for devices with no feel: nobody flicks a wheel
+    // at 90 km/h the way they do at 30, and a key press is the same step at
+    // both. Scales the rate and acceleration limits by (ref / u)^exp above
+    // the reference speed. Zero reference = off (wheels).
+    let rateScale = 1;
+    if (cfg.rateSpeedRefMps > 0) {
+      rateScale = Math.min(1, Math.pow(cfg.rateSpeedRefMps / Math.max(Math.abs(this.u), 0.1), cfg.rateSpeedExp ?? 1.5));
+    }
     let wantRate = (targetDeg - angleDeg) / Math.max(cfg.lagS, 1e-4);
-    wantRate = clamp(wantRate, -cfg.maxRateDegPerS, cfg.maxRateDegPerS);
-    const maxDelta = cfg.accelDegPerS2 * dt;
+    wantRate = clamp(wantRate, -cfg.maxRateDegPerS * rateScale, cfg.maxRateDegPerS * rateScale);
+    const maxDelta = cfg.accelDegPerS2 * rateScale * dt;
     this.steerRateDegPerS += clamp(wantRate - this.steerRateDegPerS, -maxDelta, maxDelta);
 
     let nextDeg = angleDeg + this.steerRateDegPerS * dt;

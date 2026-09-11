@@ -47,6 +47,15 @@ pub struct SteeringParams {
     /// profile lowers it so a step input (a key) cannot become a step in
     /// steering velocity.
     pub accel_rad_s2: f64,
+    /// Front slip-angle cap (rad) for devices with no feel, or 0 for none:
+    /// the road wheel is never commanded past the angle that puts the front
+    /// tyre this far into slip against the car's actual motion. See the
+    /// bicycle solver.
+    pub slip_cap_rad: f64,
+    /// Above this speed (m/s) the servo's rate and acceleration limits scale
+    /// by (ref / u)^exp. 0 = off. Devices with no feel only.
+    pub rate_speed_ref_mps: f64,
+    pub rate_speed_exp: f64,
     /// Rim angle per road-wheel angle. With force feedback it is also the
     /// torque ratio the other way: rim torque = kingpin torque / ratio.
     pub ratio: f64,
@@ -165,7 +174,11 @@ pub fn sdm26() -> VehicleParams {
         aero: AeroParams {
             cda_m2: 1.294,
             cla_m2: 3.146,
-            front_frac: 0.553,
+            // 50%, not the CFD map's 55.3%: see params.js `aeroFrontFrac`.
+            // At 55.3% the rear limits first above ~20 m/s and the car spins
+            // through a steady steer ramp; at 50% the front limits first at
+            // every speed. Kept identical to the JS build for parity.
+            front_frac: 0.50,
             air_density: 1.162,
         },
         roll: RollParams {
@@ -180,6 +193,9 @@ pub fn sdm26() -> VehicleParams {
             lag_s: 0.06,
             rate_rad_s: 360.0_f64.to_radians(),
             accel_rad_s2: 1e9,
+            slip_cap_rad: 0.0,
+            rate_speed_ref_mps: 0.0,
+            rate_speed_exp: 1.5,
             ratio: 4.0,
             caster_rad: 5.0_f64.to_radians(),
             kingpin_offset_trail_m: 0.0,
