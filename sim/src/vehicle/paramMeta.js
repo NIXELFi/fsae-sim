@@ -147,7 +147,7 @@ export function parameterGroups() {
       p("Peak lateral μ (rear axle)", v.muLat, "—", "calibrated",
         "With the front grip factor below, reproduces SDM26's real 5.02 s skidpad THROUGH THIS MODEL. Differs from the lap sim's 1.368 because that figure already absorbs the axle load-transfer derate this model computes explicitly; reusing it would double-count and give 5.38 s."),
       p("Front grip factor", v.frontGripFactor, "—", "estimate",
-        "Front axle peak lateral grip relative to the rear. With one tyre character on both axles the balance is neutral to within 1% of force and the car spins from any step steer at the limit; a real front lets go first (camber loss on the steered upright, inside-front drag, compliance). 0.90 gives a mild, recoverable push at 10-20 m/s. Replace with a measured understeer gradient.",
+        "Front axle peak lateral grip relative to the rear. With one tyre character on both axles the balance is neutral to within 1% of force and the car spins from any step steer at the limit; a real front lets go first (camber loss on the steered upright, inside-front drag, compliance). 0.88 gives a mild, recoverable push at every speed with the 2026 CFD aero split. The one knob standing in for the unmodelled front end; replace with a measured understeer gradient.",
         { path: "frontGripFactor", min: 0.75, max: 1.05, step: 0.005 }),
       p("Lap sim's peak lateral μ", v.muLatHeliosQss, "—", "team",
         "Helios' skidpad-pinned value, kept for traceability. Correct for a quasi-steady model, wrong for this one."),
@@ -169,9 +169,9 @@ export function parameterGroups() {
     ]),
 
     rows("Aerodynamics", [
-      p("CdA", v.cdaM2, "m²", "cfd", "2026 CFD aero map at nominal ride height: Cd 1.200 × 1.078 m².", { path: "cdaM2", min: 0.4, max: 2.6, step: 0.005 }),
-      p("ClA", v.claM2, "m²", "cfd", "2026 CFD aero map at nominal ride height: Cl 2.918 × 1.078 m².", { path: "claM2", min: 0, max: 5.5, step: 0.005 }),
-      p("Front downforce split", v.aeroFrontFrac * 100, "%", "estimate", "CFD map says 55.3%; run at 50% because 55.3% makes the rear the limit above ~20 m/s in this model (see params.js). For the aero group to settle.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
+      p("CdA", v.cdaM2, "m²", "cfd", "2026 full-car CFD ride-height map at nominal ride height: 42.72 lbf of drag at 15.65 m/s.", { path: "cdaM2", min: 0.4, max: 2.6, step: 0.005 }),
+      p("ClA", v.claM2, "m²", "cfd", "2026 full-car CFD ride-height map at nominal ride height: 105.64 lbf of downforce at 15.65 m/s. The Aero Design Binder's Cl 3.064 × 1.0224 m² agrees.", { path: "claM2", min: 0, max: 5.5, step: 0.005 }),
+      p("Front downforce split", v.aeroFrontFrac * 100, "%", "cfd", "2026 CFD map at nominal ride height (both the ride-height and pitch sweeps give 52.42%). Read where the car sits on its measured springs it is 52% at 10-15 m/s and 54-57% at 20-30 m/s, at the coarse edge of the map. The 55.3% previously quoted was the 2025 half-car sheet.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
       p("Air density", v.airDensityKgM3, "kg/m³", "team", "Ambient used across Helios."),
       p("Rolling resistance", v.crr, "—", "team", "Helios model constant."),
     ]),
@@ -184,7 +184,7 @@ export function parameterGroups() {
       p("Roll centre, front", v.roll.rcFrontM * 1000, "mm", "team", "", { path: "roll.rcFrontM", min: -60, max: 160, step: 0.5, factor: 1000 }),
       p("Roll centre, rear", v.roll.rcRearM * 1000, "mm", "team", "", { path: "roll.rcRearM", min: -60, max: 160, step: 0.5, factor: 1000 }),
       p("Roll gradient", v.rollGradientDegG, "deg/g", "team", "Validated with-tyre figure from the Helios Setup module.", { path: "rollGradientDegG", min: 0, max: 3, step: 0.005 }),
-      p("Pitch gradient", v.pitchGradientDegG, "deg/g", "estimate", "Used for camera attitude and dive under braking.", { path: "pitchGradientDegG", min: 0, max: 2, step: 0.005 }),
+      p("Pitch gradient", v.pitchGradientDegG, "deg/g", "team", "Team 'SDM26 Ride Roll Calc' sheet, with tyre (0.596 springs only, reproduced from the workbook springs and motion ratios). Calculated, not measured. Camera attitude only.", { path: "pitchGradientDegG", min: 0, max: 2, step: 0.005 }),
       p("Heave", v.heaveMmG, "mm/g", "estimate", "Camera motion only."),
     ]),
 

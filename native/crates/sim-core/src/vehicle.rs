@@ -172,15 +172,13 @@ pub fn sdm26() -> VehicleParams {
         wheel_inertia_front_kg_m2: 0.154,
         wheel_inertia_rear_kg_m2: 0.152,
         crr: 0.02,
-        front_grip_factor: 0.90,
+        front_grip_factor: 0.88,
         aero: AeroParams {
-            cda_m2: 1.294,
-            cla_m2: 3.146,
-            // 50%, not the CFD map's 55.3%: see params.js `aeroFrontFrac`.
-            // At 55.3% the rear limits first above ~20 m/s and the car spins
-            // through a steady steer ramp; at 50% the front limits first at
-            // every speed. Kept identical to the JS build for parity.
-            front_frac: 0.50,
+            // 2026 full-car CFD ride-height map at nominal ride height
+            // ('Ride Height Data (BW)'); see params.js `aeroFrontFrac`.
+            cda_m2: 1.267,
+            cla_m2: 3.132,
+            front_frac: 0.524,
             air_density: 1.162,
         },
         roll: RollParams {

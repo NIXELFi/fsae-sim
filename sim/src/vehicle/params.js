@@ -38,11 +38,12 @@ export const SDM26 = {
   // muLat * frontGripFactor. Together they are pinned so that the skidpad
   // comes out at 5.02 s through this model: 1.573 did that with equal axles,
   // 1.66 x 0.90 = 1.49 at the front did it once the front limited first, and
-  // 1.67 x 0.90 = 1.50 does it with the team's own unsprung masses, yaw
-  // inertia and TTC load sensitivity (0.12) in place: 11.40 m/s sustained on
-  // the 9.125 m circle = 5.03 s, the harness's 0.05 m/s resolution. The TTC
-  // belt peak for this tyre is 1.51 at 700 N, unscaled.
-  muLat: 1.67,
+  // 1.72 x 0.88 = 1.51 does it with the team's own unsprung masses, yaw
+  // inertia, TTC load sensitivity (0.12) and the 2026 CFD aero split in
+  // place: 11.40 m/s sustained on the 9.125 m circle = 5.03 s, the harness's
+  // 0.05 m/s resolution. The TTC belt peak for this tyre is 1.51 at 700 N,
+  // unscaled, which the front now happens to match.
+  muLat: 1.72,
   muLatHeliosQss: 1.368,  // kept for traceability to the lap sim
   // EST: front axle peak lateral grip relative to the rear.
   //
@@ -60,12 +61,19 @@ export const SDM26 = {
   // A real car's front lets go first by a clear margin, through things a
   // bicycle model with one tyre character cannot see: the steered upright
   // cannot carry as much camber as the rear and loses more in roll, the inside
-  // front drags at parallel steer, and steering compliance. 0.90 puts the front
-  // at its peak while the rear still has ~5% of force in hand (utilisation
-  // ~0.65 vs 0.93), which is a mild, recoverable push at 10-20 m/s and
-  // survives a keyboard step to the speed-limited lock. Replace with a
-  // measured understeer gradient when the team has one.
-  frontGripFactor: 0.90,
+  // front drags at parallel steer, and steering compliance. 0.90 put the front
+  // at its peak while the rear still had ~5% of force in hand, a mild,
+  // recoverable push at 10-20 m/s that survived a keyboard step to the
+  // speed-limited lock -- with the aero split held at 50%. With the 2026 CFD
+  // split (52.4% front) 0.90 leaves the rear limiting at 28 m/s (utilF - utilR
+  // 0.07) and a held keyboard lock at 20 m/s spins the car (18 deg of body
+  // slip); 0.88 restores the margin at every speed (0.19-0.36) and the 20 m/s
+  // keyboard case pushes at 10.6 deg. This is the one knob that stands in for
+  // everything the bicycle model cannot see about the front end, so it is the
+  // one that moves when measured data replaces an estimate elsewhere. Replace
+  // with a measured understeer gradient when the team has one (the 2026-04-08
+  // test plan lists one; no result is on Drive).
+  frontGripFactor: 0.88,
   muLong: 1.5,            // launch-traction estimate (75 m accel ~4.2 s)
   // TEAM (TTC): the team's PAC2002 fit of the R20 (workbook TIRES block,
   // FNOMIN 700 N) has PDY1 1.2169, PDY2 -0.14729, so peak lateral mu falls
@@ -73,24 +81,32 @@ export const SDM26 = {
   // uses. Longitudinal is 10.5% (PDX2/PDX1). Was Helios' 0.15 estimate.
   tireLoadSensitivity: 0.12,
 
-  // ---- aero (2026 CFD aero map @ nominal RH) ----
-  cdaM2: 1.294,           // Cd 1.200 x A_ref 1.078 m^2
-  claM2: 3.146,           // Cl 2.918 x 1.078 (downforce)
-  // Front share of downforce. The 2026 CFD map says 55.3% at nominal ride
-  // height; this model runs 50%, and the CFD figure is kept below for
-  // traceability, the same way muLat is re-pinned against the lap sim.
+  // ---- aero (2026 full-car CFD ride-height map, nominal RH) ----
+  // Drive: Aero/Aero Map/Ride Height/'Ride Height Data (BW)' (2026-04):
+  // 105.64 lbf down, 42.72 lbf drag at 15.65 m/s, rho 1.225, 52.42% front.
+  // The Cl 2.918 / Cd 1.200 / 55.3% this file used to carry as the "2026
+  // map" is the 2025-01 half-car 'Aero Map Data' sheet; the Aero Design
+  // Binder's own headline (Cl 3.064 x 1.0224 m^2 = 3.13, CoP 53% front at
+  // 15.64 m/s) agrees with the 2026 map, not the 2025 one. See
+  // sim/tools/team_data.py.
+  cdaM2: 1.267,           // 42.72 lbf / q at 15.65 m/s
+  claM2: 3.132,           // 105.64 lbf / q
+  // Front share of downforce: 0.524 at nominal ride height, CFD. Two
+  // independent 2026 sweeps (ride-height and pitch maps) both give 52.42%
+  // at the nominal point. Read where the car actually sits on its measured
+  // springs (27.1 / 35.0 N/mm wheel rates, springs only), the map gives
+  // 0.52 at 10-15 m/s rising to 0.54-0.57 at 20-30 m/s as the front wing
+  // nears the ground; that edge of the map is coarse and the tyre and bump
+  // stops are not in the ride-height estimate, so the nominal figure is
+  // used as the single constant this model takes.
   //
-  // Why: driven through this model, 55.3% front on a 48.5%-front car makes
-  // the rear the limiting axle from about 20 m/s up -- a steady steer ramp
-  // spins it at 25 m/s, and it spins while COASTING at 20 m/s (rear axle
-  // utilisation 0.98 at peak lateral with the engine braking it). That is a
-  // car nobody could drive fast, and it is not what SDM26 does on track.
-  // At 50% the front limits first at every speed (rear utilisation 0.70 to
-  // 0.84 at peak lateral, 20-28 m/s). The aero group should say which of
-  // the two the car actually runs at rake and ride height under load; until
-  // then the drivable number is the honest one for a driver-in-loop tool.
-  aeroFrontFrac: 0.50,
-  aeroFrontFracCfd: 0.553,
+  // History: this ran at 0.50 because 55.3% (the 2025 sheet) made the rear
+  // the limiting axle above 20 m/s through this model. With the 2026 map's
+  // 52.4% the front still limits first at every speed once frontGripFactor
+  // is 0.88 (utilF - utilR 0.19-0.36 at 10-28 m/s), so the CFD number is
+  // drivable and the estimate, not the data, is what moved.
+  aeroFrontFrac: 0.524,
+  aeroFrontFrac2025Sheet: 0.553, // superseded half-car map, for traceability
   airDensityKgM3: 1.162,
   crr: 0.02,
 
@@ -232,11 +248,18 @@ export const SDM26 = {
   // car's response to a steering input transient rather than instantaneous.
   relaxLengthM: 0.35,
 
-  // EST: attitude gradients for the camera and the visual body motion.
-  // rollGradientDegG is the Setup module's validated with-tyre figure.
+  // Attitude gradients for the camera and the visual body motion (no ride
+  // DOF in the physics). rollGradientDegG is the Setup module's validated
+  // with-tyre figure; the team's 'SDM26 Ride Roll Calc' sheet (Drive)
+  // computes 0.602 deg/g with tyre for the same car. pitchGradientDegG is
+  // TEAM (calculated, not measured): the same sheet's 'Pitch Gradient w/
+  // Tire' 0.888 deg/g (0.596 springs only, which sim/tools/team_data.py
+  // reproduces from the workbook springs and motion ratios). Braking dive is
+  // ~13% less than that through OptimumK's anti-dive; camera only, so the
+  // undiluted figure is used. Was 0.35 EST.
   rollGradientDegG: 0.595,
-  pitchGradientDegG: 0.35,
-  heaveMmG: 6,
+  pitchGradientDegG: 0.89,
+  heaveMmG: 6,             // EST
 
   // EST: how much surface texture comes through the seat. 1.0 is the baseline
   // that felt right for a 267 kg car on a lot; 0 is a perfectly smooth world.

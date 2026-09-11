@@ -84,7 +84,7 @@ impl LinearTyre {
     pub fn sdm26() -> Self {
         Self {
             mu_x: 1.5,
-            mu_y: 1.67,
+            mu_y: 1.72,
             load_sensitivity: 0.12,
             nominal_load: 654.8,
             cornering_stiffness_per_n: 25.0,
@@ -175,8 +175,8 @@ impl MagicFormulaTyre {
         // end of a lap.
         // mu_y is the REAR axle's peak; the front runs at mu_y times
         // `VehicleParams::front_grip_factor`. The pair is pinned to the 5.02 s
-        // skidpad through the bicycle solver (1.67 x 0.90 at the front).
-        Self::new(1.5, 1.67, 0.12, crate::vehicle::sdm26().nominal_tyre_load(), 8.5_f64.to_radians(), 0.11, 0.35)
+        // skidpad through the bicycle solver (1.72 x 0.88 at the front).
+        Self::new(1.5, 1.72, 0.12, crate::vehicle::sdm26().nominal_tyre_load(), 8.5_f64.to_radians(), 0.11, 0.35)
     }
 
     /// Pneumatic trail (m) at normalised combined slip `s` and load `fz`.
