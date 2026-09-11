@@ -40,3 +40,28 @@ scaling with the square root of load, gone at 1.25x the peak slip. Those are
 estimates and are labelled as such in `tire.js`. The right next step is a
 direct Mz-vs-alpha fit from the TTC round 8 raw data at 12-14 psi, not from
 these exports.
+
+## Update 2026-09-11: trail fitted from the raw TTC data
+
+The raw Calspan data for this exact tyre is on the team's Drive (FSAE TTC
+Round 9, `B2356run6.mat`: Hoosier 43075 16x7.5-10 R20 on the 7 in rim), and
+`sim/tools/ttc_trail.py` now fits the simulator's trail model straight to its
+Mz channel at 12 psi, zero camber and 25 mph, no .tir in between. Trail is
+taken sample by sample as -Mz/Fy where |Fy| is clear of the noise floor.
+
+Near-zero-slip trail by load: 16 / 21 / 27 / 35 / 43 mm at 222 / 445 / 667 /
+890 / 1112 N. It falls to about a fifth of that by 8-9 deg and is gone
+between 12 and 13 deg.
+
+Least squares of `t = t0 (Fz/700)^n (1 - min(s/s0, 1))^2`, with `s`
+normalised to the model's 8.5 deg peak, over 7359 samples: `t0 = 39.2 mm`
+with the model's square-root load law (a free exponent fits 0.60; the rms is
+the same to 0.03 mm), `s0 = 1.845` (zero trail at 15.4 deg). The rms is 8 mm,
+which is the (1 - x)^2 shape being an approximation, not noise: the fit sits
+~15% above the data in the 0-2 deg linear range and matches from 3 deg out.
+
+So the 20 mm / 1.25 estimate is replaced by 39.2 mm / 1.845 in `tire.js` and
+`tyre.rs`. The measured trail is nearly double the guess, and it survives
+well past the force peak, so the wheel goes light more gradually than the
+model previously assumed. The .mat files stay off the repo (consortium data);
+only the fitted constants are committed.

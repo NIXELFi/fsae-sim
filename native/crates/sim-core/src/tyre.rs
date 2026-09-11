@@ -84,8 +84,8 @@ impl LinearTyre {
     pub fn sdm26() -> Self {
         Self {
             mu_x: 1.5,
-            mu_y: 1.66,
-            load_sensitivity: 0.15,
+            mu_y: 1.67,
+            load_sensitivity: 0.12,
             nominal_load: 654.8,
             cornering_stiffness_per_n: 25.0,
             slip_stiffness_per_n: 22.0,
@@ -175,8 +175,8 @@ impl MagicFormulaTyre {
         // end of a lap.
         // mu_y is the REAR axle's peak; the front runs at mu_y times
         // `VehicleParams::front_grip_factor`. The pair is pinned to the 5.02 s
-        // skidpad through the bicycle solver (1.66 x 0.90 at the front).
-        Self::new(1.5, 1.66, 0.15, crate::vehicle::sdm26().nominal_tyre_load(), 8.5_f64.to_radians(), 0.11, 0.35)
+        // skidpad through the bicycle solver (1.67 x 0.90 at the front).
+        Self::new(1.5, 1.67, 0.12, crate::vehicle::sdm26().nominal_tyre_load(), 8.5_f64.to_radians(), 0.11, 0.35)
     }
 
     /// Pneumatic trail (m) at normalised combined slip `s` and load `fz`.
@@ -184,8 +184,8 @@ impl MagicFormulaTyre {
     /// Brush-model shape: trail falls as (1 - s)^2 and is zero from full
     /// sliding on, which is placed a little past the force peak because a
     /// slick keeps some trail beyond it. Scale grows with the square root of
-    /// load, as contact-patch length does. Same constants as the JS build;
-    /// the 20 mm is an estimate until a direct Mz fit from TTC data exists.
+    /// load, as contact-patch length does. Same constants as the JS build,
+    /// fitted to the TTC Round 9 Mz data for the R20.
     pub fn pneumatic_trail(&self, s: f64, fz: f64) -> f64 {
         if fz <= 0.0 {
             return 0.0;
@@ -218,8 +218,10 @@ impl MagicFormulaTyre {
             peak_alpha,
             peak_kappa,
             relaxation_m,
-            trail_m: 0.020,
-            trail_zero_slip: 1.25,
+            // Fitted to the raw TTC Round 9 Mz channel for this tyre by
+            // sim/tools/ttc_trail.py; see tire.js for the numbers.
+            trail_m: 0.0392,
+            trail_zero_slip: 1.845,
             trail_ref_load_n: 700.0,
             by,
             ky: 1.0 / peak_value(by, cy, ey, peak_alpha),

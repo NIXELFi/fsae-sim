@@ -282,7 +282,7 @@ CdA 1.294 / ClA 3.146 at 55.3% front (2026 CFD aero map), Crr 0.02, driveline
 0.85, CBR600RR ratios with 2.111 primary and SDM's 3.0 final, 14 500 rpm limit,
 100 ms shift, roll-stiffness distribution 0.512 on a 262.6 mm roll arm.
 
-**One deliberate deviation.** `muLat` is 1.66 here, not the lap sim's 1.368.
+**One deliberate deviation.** `muLat` is 1.67 here, not the lap sim's 1.368.
 Helios pins 1.368 at the skidpad in a quasi-steady model that applies load
 sensitivity to the axle as a whole. This model *also* derates for the lateral
 transfer within the axle, which costs a further ~6% of μ. Reusing 1.368 would

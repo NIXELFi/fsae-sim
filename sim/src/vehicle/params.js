@@ -37,8 +37,12 @@ export const SDM26 = {
   // This is the REAR axle's peak lateral mu; the front runs at
   // muLat * frontGripFactor. Together they are pinned so that the skidpad
   // comes out at 5.02 s through this model: 1.573 did that with equal axles,
-  // 1.66 x 0.90 = 1.49 at the front does it now that the front limits first.
-  muLat: 1.66,
+  // 1.66 x 0.90 = 1.49 at the front did it once the front limited first, and
+  // 1.67 x 0.90 = 1.50 does it with the team's own unsprung masses, yaw
+  // inertia and TTC load sensitivity (0.12) in place: 11.40 m/s sustained on
+  // the 9.125 m circle = 5.03 s, the harness's 0.05 m/s resolution. The TTC
+  // belt peak for this tyre is 1.51 at 700 N, unscaled.
+  muLat: 1.67,
   muLatHeliosQss: 1.368,  // kept for traceability to the lap sim
   // EST: front axle peak lateral grip relative to the rear.
   //
@@ -63,7 +67,11 @@ export const SDM26 = {
   // measured understeer gradient when the team has one.
   frontGripFactor: 0.90,
   muLong: 1.5,            // launch-traction estimate (75 m accel ~4.2 s)
-  tireLoadSensitivity: 0.15, // Hoosier R20 slick: mu falls 15% per 100% load
+  // TEAM (TTC): the team's PAC2002 fit of the R20 (workbook TIRES block,
+  // FNOMIN 700 N) has PDY1 1.2169, PDY2 -0.14729, so peak lateral mu falls
+  // PDY2/PDY1 = 12.1% per 100% of load -- the same linear law this model
+  // uses. Longitudinal is 10.5% (PDX2/PDX1). Was Helios' 0.15 estimate.
+  tireLoadSensitivity: 0.12,
 
   // ---- aero (2026 CFD aero map @ nominal RH) ----
   cdaM2: 1.294,           // Cd 1.200 x A_ref 1.078 m^2

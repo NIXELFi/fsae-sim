@@ -184,13 +184,15 @@ console.log("\nTYRE");
   }
 
   // Aligning torque: the trail must be longest at zero slip, gone once the
-  // tyre is sliding, and grow with load. These are the shape a driver feels
-  // through force feedback, not numbers from a data sheet.
+  // tyre is sliding, and grow with load. The constants are fitted to the raw
+  // TTC Round 9 Mz channel for the R20 (sim/tools/ttc_trail.py): ~39 mm at
+  // zero slip and 700 N, a fifth of that at the force peak, zero by 15 deg
+  // (2x the model's peak slip), and the square root of load.
   const t0 = TIRE_INFO.pneumaticTrail(0, Fz);
   const tPeak = TIRE_INFO.pneumaticTrail(1, Fz);
-  const tSlide = TIRE_INFO.pneumaticTrail(1.5, Fz);
-  check("pneumatic trail at zero slip", t0 * 1000, 10, 35, " mm");
-  check("trail at peak grip / trail at zero", tPeak / t0, 0.0, 0.25, "");
+  const tSlide = TIRE_INFO.pneumaticTrail(2.0, Fz);
+  check("pneumatic trail at zero slip", t0 * 1000, 25, 50, " mm");
+  check("trail at peak grip / trail at zero", tPeak / t0, 0.1, 0.3, "");
   check("trail once sliding", tSlide * 1000, 0, 1e-9, " mm");
   check("trail grows with load", TIRE_INFO.pneumaticTrail(0, 2 * Fz) / t0, 1.2, 1.6, "x");
 }
@@ -246,7 +248,10 @@ console.log("\nHANDLING  (limit balance, yaw damping, keyboard inputs)");
       peakBeta = Math.max(peakBeta, Math.abs(tel.bodySlipDeg));
       if (tel.ayG > peakAy) { peakAy = tel.ayG; at = { uF: tel.utilF, uR: tel.utilR }; }
     }
-    check(`${V} m/s: peak lateral`, peakAy, 1.35, 1.9, " g");
+    // Upper bound is a sanity cap, not a measurement: at 28 m/s the aero
+    // package adds ~55% of the car's weight, and the TTC load sensitivity
+    // (0.12, was 0.15 EST) leaves a little more of that as grip, 1.95 g.
+    check(`${V} m/s: peak lateral`, peakAy, 1.35, 2.0, " g");
     check(`${V} m/s: front limits first (utilF - utilR)`, at.uF - at.uR, 0.08, 0.6, "");
     check(`${V} m/s: pushes, does not spin`, peakBeta, 0, 12, " deg slip");
   }

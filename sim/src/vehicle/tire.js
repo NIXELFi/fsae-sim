@@ -146,15 +146,23 @@ export function tyreForces(slipAngle, slipRatio, Fz, muY, muX) {
 //
 // Shape is the brush model's: trail falls as (1 - s)^2 in normalised slip and
 // is zero from full sliding on. The brush model actually puts full sliding at
-// the force peak; a real slick keeps a little trail past the peak, so full
-// sliding is placed a bit beyond it (TRAIL_ZERO_SLIP). The scale grows with the
-// square root of load because contact-patch length does.
+// the force peak; the TTC data says this slick keeps trail well past it (a
+// fifth of the zero-slip value at the force peak, gone near 15 deg), so full
+// sliding is placed beyond the peak (TRAIL_ZERO_SLIP). The scale grows with
+// the square root of load because contact-patch length does.
 //
-// EST: t0 = 20 mm at static load. Trail data for the 10" R20 is in the TTC Mz
-// channel and this constant should be fitted from it when that fit is done.
+// TEAM (TTC): fitted to the raw FSAE TTC Round 9 Mz channel for this exact
+// tyre (Hoosier 43075 16x7.5-10 R20, 7 in rim, run 6: 12 psi, zero camber,
+// 25 mph) by sim/tools/ttc_trail.py. Least squares of this shape over 7359
+// samples at 222-1112 N gives t0 = 39.2 mm at 700 N with the square-root
+// load law (a free exponent fits 0.60) and zero trail at 1.845 x the peak
+// slip, i.e. 15.4 deg; rms 8 mm, the shape being an approximation. The
+// measured near-zero-slip trail is 16 / 21 / 27 / 35 / 43 mm at 222 / 445 /
+// 667 / 890 / 1112 N. Belt-to-road scaling is a force effect and does not
+// touch a contact-patch length, so the trail is used unscaled.
 
-const PNEUMATIC_TRAIL_M = 0.020;
-const TRAIL_ZERO_SLIP = 1.25;         // normalised slip at which trail hits zero
+const PNEUMATIC_TRAIL_M = 0.0392;
+const TRAIL_ZERO_SLIP = 1.845;        // normalised slip at which trail hits zero
 const TRAIL_REF_LOAD_N = 700;         // load at which t0 applies (~ one SDM26 corner)
 
 /**
