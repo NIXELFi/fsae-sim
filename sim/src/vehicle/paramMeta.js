@@ -160,7 +160,7 @@ export function parameterGroups() {
       p("Nominal tyre load (Fz0)", Math.round(nominalTyreLoad(v)), "N", "team", "Static corner load, the reference for load sensitivity."),
       p("Loaded radius", v.tireRadiusM, "m", "team", "Hoosier 16x7.5-10."),
       p("Peak slip angle", n(TIRE_INFO.peakSlipAngleDeg, 1), "deg", "estimate",
-        "Model shape choice. The real MF6.1.2 fit in Oracle does not peak until 13–16°, which is fine for a peak-grip lap sim but makes steering feel vague to drive."),
+        "Model shape choice. The team's TTC fit of this tyre peaks at 12.4–12.9° (222–1112 N) and Oracle's MF6.1.2 at 13–16°, which is fine for a peak-grip lap sim but makes steering feel vague to drive."),
       p("Peak slip ratio", TIRE_INFO.peakSlipRatio, "—", "estimate", "Model shape choice."),
       p("Cornering stiffness / tyre", Math.round(TIRE_INFO.corneringStiffness(v.muLat, nominalTyreLoad(v)) / 57.3), "N/deg", "estimate",
         "Falls out of the fitted Magic Formula shape at static load."),

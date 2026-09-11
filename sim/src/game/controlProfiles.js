@@ -355,15 +355,15 @@ export const PROFILES = {
        * important setting for a wheel and the one most often got wrong.
        *
        * "match-car" is the honest option: the rim turns through the car's real
-       * ratio, so SDM26's 28 degrees of lock through a 4.0 ratio is 112 degrees
-       * rim, lock to lock. Set `rotationDeg` to 112 in the driver and the wheel
+       * ratio, so SDM26's 28 degrees of lock through its measured 4.411 ratio is
+       * 247 degrees rim, lock to lock. Set `rotationDeg` to 247 in the driver and the wheel
        * and the car agree exactly -- what you feel is what the front tyres are
        * doing.
        *
        * "scale-to-lock" maps whatever rotation the wheel is set to onto full
        * lock. More forgiving on a 900-degree wheel nobody wants to reconfigure,
-       * but the ratio is then a fiction: a 900-degree rim on a 112-degree car
-       * is eight times slower than the real steering.
+       * but the ratio is then a fiction: a 900-degree rim on a 247-degree car
+       * is nearly four times slower than the real steering.
        */
       mapping: "match-car",
 

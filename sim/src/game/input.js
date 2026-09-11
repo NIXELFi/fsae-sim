@@ -266,10 +266,11 @@ export class Input {
    *
    * "match-car" is the honest one: the rim turns through the car's real
    * steering ratio, so a driver's hand position corresponds to an actual front
-   * wheel angle. For SDM26 that is 28 degrees of lock through a 4.0 ratio, or
-   * 112 degrees at the rim lock to lock -- set the wheel's driver software to
-   * 112 and what you feel is what the tyres are doing. Leave a 900-degree wheel
-   * on 900 and this mapping correctly uses only the first 12% of its travel,
+   * wheel angle. For SDM26 that is 28 degrees of lock through the measured
+   * 4.411 ratio, or 247 degrees at the rim lock to lock -- set the wheel's
+   * driver software to 247 and what you feel is what the tyres are doing.
+   * Leave a 900-degree wheel on 900 and this mapping correctly uses only the
+   * first 27% of its travel,
    * which feels wrong because the *wheel* is configured wrong.
    *
    * "scale-to-lock" spreads whatever rotation the wheel is set to across full

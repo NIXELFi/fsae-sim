@@ -73,22 +73,28 @@ those two bars *is* the map.
 ## What the model is standing on
 
 The home screen lists the model, its degrees of freedom, and **every parameter
-tagged with where it came from**. That distinction is the point: 55 parameters
+tagged with where it came from**. That distinction is the point: 61 parameters
 run this simulator, and they are not equally trustworthy.
 
 | Tag | Meaning | Count |
 |---|---|---|
-| `TEAM` | Measured, specified or validated by SDM, carried in Helios | 27 |
-| `CFD` | Output of a Helios CFD model the team built (aero map, engine sweep) | 5 |
+| `TEAM` | Measured, specified or validated by SDM: Helios, the team's Drive (sim-parameters workbook, OptimumK export, brakes calculator, ride/roll sheet) and the raw TTC tyre data | 39 |
+| `CFD` | Output of a team CFD model (2026 ride-height aero map, engine sweep) | 5 |
 | `CAL` | Fitted so **this** model reproduces a measured SDM26 result | 2 |
-| `EST` | An engineering estimate I generated. Nobody has measured it | 21 |
+| `EST` | An engineering estimate I generated. Nobody has measured it | 15 |
 
-So 34 of 55 trace back to the team, and **21 (38%) are estimates**. Those are
-the ones to replace first, and the big ones are the yaw inertia (105 kg·m², not
-measured — put the car on a bifilar rig), the rotational inertias, the steering
-lock and rate, and the brake torque and bias. Each carries its reasoning in
-`params.js` and as a tooltip on the home screen, so you can judge whether the
-guess is good enough for what you are asking of it.
+So 46 of 61 trace back to the team, and **15 (25%) are estimates**. The
+2026-09-11 data pass (`sim/tools/team_data.py`, `sim/tools/ttc_trail.py`)
+replaced the yaw inertia, unsprung masses, wheel inertias, steering ratio,
+caster and trail, brake bias, tyre load sensitivity, pneumatic trail and
+pitch gradient with the team's own numbers, and moved the aero map to the
+2026 full-car sweep. What is still estimated: `frontGripFactor` (the one
+balance knob, waiting on a measured understeer gradient), the driveline
+inertias, the steering lock (consistent with the MoTeC steering channel but
+not a rack measurement), the steering lag and rate, the pedal force behind
+the max brake torque, the tyre's peak slip angle and relaxation length, and
+the camera-only eye point, heave and vibration. Each carries its reasoning
+in `params.js` and as a tooltip on the home screen.
 
 The two calibrated values are the interesting ones — see the μ note above.
 
@@ -149,7 +155,7 @@ is where the car's corners actually are.
 
 - **Front wheels steer and spin.** Steer rotates about the kingpin, spin about
   the hub axis *after* the steer, so a steered wheel rolls about its own axis.
-  28° of lock gives 112° of steering-wheel rotation (4:1).
+  28° of lock gives 247° of steering-wheel rotation (4.411:1, measured).
 - **The steering wheel is the team's own**, laid out from the asset in
   `packages/widgets/src/steering-wheel`: a carbon plate with two kidney
   cut-outs, grips wrapping their outer edge, gold buttons in the top corners,
@@ -167,7 +173,7 @@ is where the car's corners actually are.
   Chase damps roll and pitch, because a chase camera that rolls with the car is
   unwatchable.
 
-There are no hands on the wheel. At 112° of lock a glove modelled at 3 o'clock
+There are no hands on the wheel. At 247° of lock a glove modelled at 3 o'clock
 swings round to 10 o'clock, high enough to break the horizon in the middle of
 the frame; without modelled arms that reads as a floating black box sitting on
 the road.
@@ -277,10 +283,24 @@ the slip at which they arrive is set to what a driver feels through a 10" slick
 ### Where the constants come from
 
 Lifted verbatim from Helios `SDM26_VEHICLE` / `SDM26_ROLL`: mass 267 kg, 48.5%
-front, CG 284.5 mm, wheelbase 1.53 m, tracks 1.207/1.194, tyre radius 0.20 m,
-CdA 1.294 / ClA 3.146 at 55.3% front (2026 CFD aero map), Crr 0.02, driveline
+front, CG 284.5 mm, wheelbase 1.53 m, tracks 1.207/1.194, tyre radius 0.20 m
+(the TTC loaded radius at 12 psi and 667 N is 196.5 mm), Crr 0.02, driveline
 0.85, CBR600RR ratios with 2.111 primary and SDM's 3.0 final, 14 500 rpm limit,
 100 ms shift, roll-stiffness distribution 0.512 on a 262.6 mm roll arm.
+
+Aero is the 2026 full-car CFD ride-height map from the team's Drive ('Ride
+Height Data (BW)'): CdA 1.267 / ClA 3.132 at 52.4% front at nominal ride
+height. The Cl 2.918 / Cd 1.200 / 55.3% Helios carries is the 2025 half-car
+sheet. From the team's Drive as well, via the AC mod's transcription
+(`sdm26-assetto-corsa/data/sdm26_team_data.json`) and `sim/tools/team_data.py`:
+Izz 93.7 kg·m², unsprung 7.56 / 7.77 kg per corner, wheel inertia 0.154 /
+0.152 kg·m² ('SDM26 Full-Vehicle Sim Parameters'); steering ratio 4.411,
+caster 4.743°, 18.85 mm mechanical trail ('SDM26 Designed vs Actual
+Kinematics', OptimumK); brake torque share 0.72 and the 70 bar system limit
+('SDM26 Brakes Calculator'); tyre load sensitivity 0.12 (the team's PAC2002
+TTC fit); pitch gradient 0.89 deg/g ('SDM26 Ride Roll Calc'). Pneumatic trail
+is fitted straight to the raw TTC Round 9 Mz data for the R20 by
+`sim/tools/ttc_trail.py` (see `docs/tyre-models-review.md`).
 
 **One deliberate deviation.** `muLat` is 1.72 here, not the lap sim's 1.368.
 Helios pins 1.368 at the skidpad in a quasi-steady model that applies load
@@ -291,9 +311,9 @@ ran. Same measurement, different model, so a different constant. Oracle hit the
 same thing and solved it the same way with `mu_scale`. The original value is
 kept as `muLatHeliosQss` for traceability.
 
-**And one estimate the balance needs: `frontGripFactor` 0.90.** `muLat` is the
-rear axle's peak; the front runs at 0.90 of it (1.49), and the pair is pinned
-so the skidpad still comes out at ~5.05 s. With one tyre character on both
+**And one estimate the balance needs: `frontGripFactor` 0.88.** `muLat` is the
+rear axle's peak; the front runs at 0.88 of it (1.51), and the pair is pinned
+so the skidpad still comes out at ~5.03 s. With one tyre character on both
 axles the limit balance is set only by load transfer and the aero split, which
 left this car neutral to within 1% of force: the rear reached its peak first
 at 10, 15 and 20 m/s, and a 12° steering step at 15 m/s spun it every time,
@@ -301,16 +321,21 @@ because once both axles are past the peak the yaw moment `a·FyF − b·FyR` sta
 positive on a 48.5% front car and nothing arrests the yaw. Roll stiffness
 alone cannot fix that. A real front lets go first, through things a bicycle
 model cannot see — camber loss on the steered upright, inside-front drag at
-parallel steer, steering compliance. 0.90 puts the front at its peak with the
-rear holding ~5% in hand: a mild, recoverable push. Replace it with a measured
-understeer gradient. Above ~18 m/s the car is still loose to a step input:
-the 2026 aero map puts 55% of the downforce on the front of a 48.5%-front
-car, which is worth raising with the aero group.
+parallel steer, steering compliance. 0.88 puts the front at its peak with the
+rear holding 17-36% of its force in hand from 10 to 28 m/s: a mild,
+recoverable push. It was 0.90 while the aero split was held at 50%; with the
+2026 map's 52.4% front the rear limited at 28 m/s and a held keyboard lock at
+20 m/s spun the car, so the estimate moved and the data did not. Replace it
+with a measured understeer gradient (on the team's 2026-04-08 test plan; no
+result on Drive).
 
 Estimates the team has not measured are marked `EST` in `params.js`, each with
-its basis: yaw inertia 105 kg·m², unsprung 11 kg/corner, wheel and driveline
-inertias, 28° lock, 1500 N·m of brake torque at 62% front, 0.35 m relaxation
-length. Those are the numbers to replace first when real data exists.
+its basis: driveline inertias, 28° lock (consistent with the MoTeC steering
+channel's 121-124° rim cap through the 4.411 ratio, but not a rack
+measurement), the 206 lbf pedal force behind the 1235 N·m max brake torque,
+0.35 m relaxation length, the 8.5° peak slip angle (the TTC fit peaks at
+12.4-12.9°, deliberately not used: see `tire.js`). Those are the numbers to
+replace first when real data exists.
 
 ## Powertrain
 
@@ -477,7 +502,7 @@ physically command, so each gets its own steering dynamics:
 | gamepad | 300 °/s | 2200 °/s² | 0.10 | 1.7 expo |
 | wheel | 720 °/s | 12000 °/s² | **0** | **1.00** |
 
-All at the road wheel. Divide by the 4.0 steering ratio for rim figures.
+All at the road wheel. Divide by the 4.411 steering ratio for rim figures.
 
 **On a keyboard the lock itself shrinks with speed**: Ackermann for 1.4 g plus
 the peak slip angle plus 3°, so all 28° below ~8 m/s, ~17° at 15 m/s, ~14.5° at
@@ -499,9 +524,9 @@ steering motor can produce.
 
 The mapping from rim angle to road wheel is the setting that matters most:
 
-- **Match the car** — the rim turns through SDM26's real 4.0 ratio, so its 28°
-  of lock is **112° at the rim, lock to lock**. Set your wheel's driver software
-  to 112° and hand position *is* front-wheel angle. Leaving a 900° wheel at 900
+- **Match the car** — the rim turns through SDM26's measured 4.411 ratio, so
+  its 28° of lock is **247° at the rim, lock to lock**. Set your wheel's driver
+  software to 247° and hand position *is* front-wheel angle. Leaving a 900° wheel at 900
   makes this mapping use only the first 12% of its travel: correct, and it feels
   wrong, because the wheel is configured wrong.
 - **Scale to lock** — whatever rotation the wheel is set to becomes full lock.
@@ -528,10 +553,10 @@ effect. The signal is the **self-aligning torque of the front tyres**:
   and collapses to zero as the contact patch starts to slide (`tire.js`,
   brush-model shape). This collapse is why the rim goes light *before* the
   front lets go, and it is the signal a driver actually reads;
-- plus the **mechanical trail** from caster (`params.steering`, estimated at
-  5 deg until the real uprights are measured);
+- plus the **mechanical trail** from caster (`params.steering`: 4.743° caster
+  and 18.85 mm of trail from the team's OptimumK export);
 - summed per tyre with the axle's load split, so the outside tyre dominates as
-  the car rolls; through the 4.0 steering ratio and a rack efficiency to the
+  the car rolls; through the 4.411 steering ratio and a rack efficiency to the
   rim. The vehicle model reports it as `telemetry.rimTorqueNm`.
 
 `forceFeedback.js` adds what a real column has that the model does not --
