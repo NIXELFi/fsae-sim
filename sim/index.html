@@ -427,6 +427,8 @@
     position: absolute; inset: 0; z-index: 5; display: flex; align-items: center;
     justify-content: center; background: rgba(6,8,11,0.45);
   }
+  /* The id rule above outranks the UA's [hidden] { display: none }. */
+  #pauseMenu[hidden], #pauseMenu button[hidden] { display: none; }
   #pauseMenu .pause-card {
     display: flex; flex-direction: column; gap: 8px; min-width: 260px;
     background: rgba(12,15,20,0.92); border: 1px solid var(--line); border-radius: 10px;
