@@ -27,6 +27,11 @@ function toWheel(crankNm, n, eff) {
   return crankNm > 0 ? crankNm * n * eff : (crankNm * n) / eff;
 }
 
+function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
+
+/** Width of the soft rev limiter, rpm below the limit. */
+const LIMITER_BAND_RPM = 300;
+
 export class Powertrain {
   /**
    * @param {object} v      vehicle params (SDM26)
@@ -164,9 +169,6 @@ export class Powertrain {
   /** Net crankshaft torque for a throttle demand 0..1. */
   engineTorque(rpm, throttle) {
     if (this.shiftTimer > 0) return -this.motoringTorque(rpm) * 0.5; // ignition cut
-    if (rpm >= this.v.revLimitRpm) this.limiterCut = true;
-    if (this.limiterCut && rpm < this.v.revLimitRpm - 350) this.limiterCut = false;
-    if (this.limiterCut) return -this.motoringTorque(rpm);
 
     const wot = this.wotTorque(rpm);
     const drag = this.motoringTorque(rpm);
@@ -175,7 +177,19 @@ export class Powertrain {
     // is both closer to what the ETC does and self-correcting: the engine
     // settles wherever that opening balances friction.
     const plate = this.platePosition(rpm, throttle);
-    return plate * (wot + drag) - drag;
+    let t = plate * (wot + drag) - drag;
+
+    // Soft limiter. A hard cut with 350 rpm of hysteresis bounced the car
+    // between full torque and full motoring drag at ~8 Hz whenever a gear
+    // was held on the limiter, and that pulse went straight into the pitch
+    // camera. Over the last LIMITER_BAND_RPM the net torque blends toward
+    // pure drag, so the engine settles where torque meets load instead of
+    // cycling. At the limit itself it is the same full cut as before.
+    const soft = clamp((rpm - (this.v.revLimitRpm - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM, 0, 1);
+    if (soft > 0) t -= soft * (t + drag);
+    // For the audio: the ignition is being cut once we are deep in the band.
+    this.limiterCut = soft >= 0.5;
+    return t;
   }
 
   ratio() { return totalReduction(this.v, this.gear); }

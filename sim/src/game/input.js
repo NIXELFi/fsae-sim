@@ -443,7 +443,11 @@ export class Input {
     // it stays where you put it, at speed it comes back on its own. Keys
     // win while one is held.
     const mouse = prof.mouse;
-    this.usingMouse = !!(mouse && mouse.enabled && !keySteering && now - this._mouseAt < 1500);
+    // The mouse owns the servo whenever it is enabled and no key is held.
+    // Switching back to the capped key servo after a quiet second made the
+    // wheel jump from full lock to the slip-cap band the moment the hand
+    // stopped moving in a tight low-speed turn.
+    this.usingMouse = !!(mouse && mouse.enabled && !keySteering);
     if (mouse && mouse.enabled && steer === 0 && !keySteering) {
       const idle = now - this._mouseAt > 60;
       if (mouse.selfCentre && idle && dt > 0) {

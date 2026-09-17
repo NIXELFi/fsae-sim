@@ -7,6 +7,9 @@
 
 use crate::vehicle::VehicleParams;
 
+/// Width of the soft rev limiter, rpm below the limit.
+const LIMITER_BAND_RPM: f64 = 300.0;
+
 /// Crank torque to wheel torque through the ratio and the driveline
 /// efficiency. Losses always oppose motion: drive is reduced by them, engine
 /// braking is increased by them.
@@ -428,15 +431,6 @@ impl GearedEngine {
         if self.shift_timer > 0.0 {
             return -self.motoring_torque(rpm) * 0.5; // ignition cut
         }
-        if rpm >= self.rev_limit_rpm {
-            self.limiter_cut = true;
-        }
-        if self.limiter_cut && rpm < self.rev_limit_rpm - 350.0 {
-            self.limiter_cut = false;
-        }
-        if self.limiter_cut {
-            return -self.motoring_torque(rpm);
-        }
         let wot = self.wot_torque(rpm);
         let drag = self.motoring_torque(rpm);
         // The idle plate floor replaces what used to be an ad-hoc torque added
@@ -445,7 +439,14 @@ impl GearedEngine {
         // that opening balances friction, which for SDM26 measures out at
         // 2005 rpm against a real idle of about 2000.
         let plate = self.plate_position(rpm, throttle);
-        let t = plate * (wot + drag) - drag;
+        let mut t = plate * (wot + drag) - drag;
+        // Soft limiter (see powertrain.js): blend to pure drag over the last
+        // LIMITER_BAND_RPM so a held gear settles instead of bouncing.
+        let soft = ((rpm - (self.rev_limit_rpm - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM).clamp(0.0, 1.0);
+        if soft > 0.0 {
+            t -= soft * (t + drag);
+        }
+        self.limiter_cut = soft >= 0.5;
         t
     }
 
