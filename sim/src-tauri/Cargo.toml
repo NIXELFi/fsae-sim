@@ -2,7 +2,7 @@
 name = "fsae-sim"
 version = "0.1.0"
 edition = "2021"
-description = "SDM26 Driver-in-Loop — first-person FSAE simulator"
+description = "SDM26 Driver-in-Loop: first-person FSAE simulator"
 authors = ["Sun Devil Motorsports"]
 rust-version = "1.77"
 
@@ -11,13 +11,17 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+# A second launch (Helios, a double-click) focuses the running window and hands
+# it the new arguments instead of starting a second process that fights the
+# first for the exclusive DirectInput acquire on the wheel.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 # The vehicle model. The same crate the JS build is checked against
 # (sim/data/vehicle-golden.json); the desktop build runs it natively at 1 kHz.
 sim-core = { path = "../../native/crates/sim-core" }
 
 [target.'cfg(windows)'.dependencies]
-# DirectInput for the steering-wheel force feedback (src/ffb.rs).
+# DirectInput for the steering-wheel force feedback (src/wheel.rs).
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Devices_HumanInterfaceDevice",

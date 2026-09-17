@@ -959,8 +959,11 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
   check("wheel centred on its own origin", offCentre, 0, 1e-6, " m");
 
   // Material colours reach the vertices, or everything renders default grey.
-  check("wheel takes its material colour", car.tire.color[0], 0.059, 0.061, "");
-  check("body takes its material colour", car.body.color[1], 0.109, 0.111, "");
+  // glTF base colour is linear; the loader encodes it to display space
+  // (pow 1/2.2) because the renderer decodes vertex colour on the way in.
+  const enc = (v) => Math.pow(v, 1 / 2.2);
+  check("wheel takes its material colour", car.tire.color[0], enc(0.06) - 0.001, enc(0.06) + 0.001, "");
+  check("body takes its material colour", car.body.color[1], enc(0.11) - 0.001, enc(0.11) + 0.001, "");
 
   // A wheel whose geometry is NOT centred on its node must still spin about
   // its own axle rather than orbiting the car.

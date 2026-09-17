@@ -679,8 +679,6 @@ export function stepCylinder(spec, tables, cyl, crankDeg, dt, cal, op, backPress
     // separates and the effective discharge coefficient drops. 0.7 is the usual
     // ballpark. This only matters on a closed throttle, which is exactly where
     // reverse flow dominates -- idle and the overrun.
-    if (uTarget < 0) uTarget *= 0.7;
-
     // Choke it. A port cannot pass gas faster than the local speed of sound
     // however large the pressure ratio, and at blowdown the ratio is enormous.
     // Unchoked, the incompressible orifice equation returns about 930 m/s,
@@ -688,6 +686,8 @@ export function stepCylinder(spec, tables, cyl, crankDeg, dt, cal, op, backPress
     // enough that the next pulse comes back inverted.
     const cCyl = Math.sqrt(gas.gamma * gas.rSpecific * Math.max(cyl.temperatureK, 1));
     uTarget = Math.min(Math.max(uTarget, -cCyl), cCyl);
+    // Reverse flow, after the choke (same order as the Rust reference).
+    if (uTarget < 0) uTarget *= 0.7;
 
     // Port inertance: the slug of gas in the port has mass, so its velocity
     // cannot change instantaneously. A short first-order lag is what that
@@ -1209,6 +1209,8 @@ export class EngineAudio {
     this.running = true;
     /** Output trim for the current operating point; see setOperatingPoint. */
     this.level = 0.3;
+    /** Slewed toward per sample (15 ms); a step here clicked on every shift. */
+    this.levelTarget = 0.3;
     this.op = {
       rpm: spec.idleRpm,
       throttle: 0,
@@ -1264,7 +1266,7 @@ export class EngineAudio {
     const firingPerSecond = (this.op.rpm / 120) * this.cylinders.length;
     const chemicalPowerW = this.cal.heatReleaseJ * firingPerSecond;
     const rel = Math.min(chemicalPowerW / this.referencePowerW, 1);
-    this.level = p.levelFloor + (1 - p.levelFloor) * Math.pow(rel, p.levelExponent);
+    this.levelTarget = p.levelFloor + (1 - p.levelFloor) * Math.pow(rel, p.levelExponent);
   }
 
   /**
@@ -1292,6 +1294,9 @@ export class EngineAudio {
   render(out) {
     const dt = 1 / this.config.sampleRate;
     const degPerSample = this.op.rpm * 6 * dt;
+    // 15 ms one-pole on the level (see setOperatingPoint); same constant as
+    // the Rust reference.
+    const levelK = 1 - Math.exp(-dt / 0.015);
     const ambient = this.spec.gas.ambientPa;
     const load = this.op.throttle;
 
@@ -1317,6 +1322,7 @@ export class EngineAudio {
       }
 
       this.exhaust.step(this.flow, this.valveArea);
+      this.level += (this.levelTarget - this.level) * levelK;
       out[s] = this.synth.render(this.exhaust.outputs, load, this.level);
 
       this.crankDeg += degPerSample;

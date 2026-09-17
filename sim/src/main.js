@@ -16,7 +16,7 @@ import { EngineAudio } from "./game/audio.js";
 import { Timing, fmt } from "./game/timing.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
-import { isDesktop, installDesktopBehaviour, rigNative } from "./game/desktop.js";
+import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, toggleFullscreen } from "./game/desktop.js";
 import { ForceFeedback } from "./game/forceFeedback.js";
 import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet } from "./game/specSheet.js";
@@ -932,7 +932,7 @@ async function boot() {
   dom.startBtn.disabled = false;
 
   let loadSeq = 0;
-  dom.trackSel.addEventListener("change", async () => {
+  const loadCourse = async () => {
     const seq = ++loadSeq;
     dom.startBtn.disabled = true;
     dom.loadNote.textContent = "Loading course...";
@@ -947,10 +947,12 @@ async function boot() {
       console.error(err);
       dom.loadNote.textContent = `Could not load that course: ${err.message ?? err}`;
       dom.loadNote.classList.add("error");
-      return;
+      return false;
     }
     dom.startBtn.disabled = false;
-  });
+    return true;
+  };
+  dom.trackSel.addEventListener("change", loadCourse);
 
   // Losing the window (alt-tab, minimise, another app grabbing focus) pauses
   // the run: keyboard state is already cleared on blur, but the rig would
@@ -1001,6 +1003,38 @@ async function boot() {
 
   dom.startBtn.addEventListener("click", () => enterSim(!game.started));
   dom.restartBtn.addEventListener("click", () => enterSim(true));
+
+  // ---- launch requests: `?track=mis&profile=wheel&autostart=1` in a browser,
+  // `fsae-sim --track mis --profile wheel --autostart` on the desktop, and the
+  // same again if a running app is launched a second time (Helios, a shortcut).
+  const onOff = (v) => (v == null ? undefined : /^(1|on|true|yes)$/i.test(String(v)) ? true : /^(0|off|false|no)$/i.test(String(v)) ? false : undefined);
+  const applyLaunch = async (o) => {
+    if (!o) return;
+    if (o.track && TRACKS.some((t) => t.id === o.track) && o.track !== dom.trackSel.value) {
+      dom.trackSel.value = o.track;
+      if (!(await loadCourse())) return;
+    }
+    if (o.profile && game.input.settings.ids().includes(o.profile)) game.input.setProfile(o.profile);
+    if (o.traction != null) dom.tcToggle.checked = o.traction;
+    if (o.abs != null) dom.absToggle.checked = o.abs;
+    if (o.autoShift != null) dom.autoToggle.checked = o.autoShift;
+    if (o.fullscreen) toggleFullscreen();
+    updateSession();
+    // An autostart from a launcher is not a user gesture; the audio context
+    // may open suspended and resumes on the first key or button.
+    if (o.autostart) enterSim(true);
+  };
+  const fromQuery = () => {
+    const q = new URLSearchParams(location.search);
+    if (![...q.keys()].length) return null;
+    return {
+      track: q.get("track"), profile: q.get("profile"),
+      traction: onOff(q.get("tc")), abs: onOff(q.get("abs")), autoShift: onOff(q.get("auto")),
+      autostart: onOff(q.get("autostart")) === true, fullscreen: onOff(q.get("fullscreen")) === true,
+    };
+  };
+  await applyLaunch({ ...(fromQuery() ?? {}), ...((isDesktop && (await launchOptions())) || {}) });
+  onLaunchOptions((o) => { applyLaunch(o); });
 
   // Debug handle: lets you poke at the model from the console, e.g.
   //   __sim.car.telemetry, __sim.powertrain.wotTorque(9000)

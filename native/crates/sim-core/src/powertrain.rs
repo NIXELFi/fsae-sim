@@ -417,6 +417,10 @@ impl GearedEngine {
     /// an engine idling at zero net torque is still burning fuel and still
     /// making noise.
     pub fn indicated_torque(&self, rpm: f64, demand: f64) -> f64 {
+        // On the limiter the ignition is cut: no combustion, no note.
+        if self.limiter_cut {
+            return 0.0;
+        }
         self.plate_position(rpm, demand) * (self.wot_torque(rpm) + self.motoring_torque(rpm))
     }
 

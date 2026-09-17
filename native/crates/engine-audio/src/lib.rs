@@ -102,7 +102,10 @@ pub struct EngineAudio {
     flow: Vec<f32>,
     valve_area: Vec<f32>,
     /// Output trim for the current operating point; see `set_operating_point`.
+    /// Slewed toward `level_target` per sample: applied as a step it clicked
+    /// on every shift (a ~29 dB drop between two samples, twice per shift).
     level: f32,
+    level_target: f32,
     /// Combustion power at the limiter, the reference for `level`.
     reference_power_w: f32,
     inputs: Vec<f32>,
@@ -154,6 +157,7 @@ impl EngineAudio {
             flow: vec![0.0; n_cyl],
             valve_area: vec![0.0; n_cyl],
             level: 0.3,
+            level_target: 0.3,
             reference_power_w: Self::reference_power(&spec_for_ref),
             inputs: vec![0.0; n_tail],
             running: true,
@@ -235,7 +239,7 @@ impl EngineAudio {
         let firing_per_second = (self.op.rpm / 120.0) * self.cylinders.len() as f32;
         let chemical_power_w = self.cal.heat_release_j * firing_per_second;
         let rel = (chemical_power_w / self.reference_power_w).clamp(0.0, 1.0);
-        self.level = p.level_floor + (1.0 - p.level_floor) * rel.powf(p.level_exponent);
+        self.level_target = p.level_floor + (1.0 - p.level_floor) * rel.powf(p.level_exponent);
     }
 
     /// Combustion power at the limiter on full throttle, W.
@@ -263,8 +267,12 @@ impl EngineAudio {
         let deg_per_sample = self.op.rpm * 6.0 * dt;
         let ambient = self.spec.gas.ambient_pa;
         let load = self.op.throttle;
+        // 15 ms one-pole on the level: fast enough to follow a blip, slow
+        // enough that a cut is a fall, not a click.
+        let level_k = 1.0 - (-dt / 0.015_f32).exp();
 
         for sample in out.iter_mut() {
+            self.level += (self.level_target - self.level) * level_k;
             // Cylinders, each seeing the pressure its own primary presents.
             for (i, cyl) in self.cylinders.iter_mut().enumerate() {
                 let area = self.tables.valve_area(cyl.theta(self.crank_deg));

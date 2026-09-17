@@ -68,6 +68,20 @@ function invoke(cmd, args) {
 
 const NO_RIG = { running: false, ffbSupported: false, wheelPresent: false, wheelName: "", wheelError: "" };
 
+/**
+ * What the process was started with (`fsae-sim --track mis --autostart ...`),
+ * for a launcher such as Helios. In a browser the same fields come from the
+ * page's query string instead, so `main.js` merges both.
+ */
+export const launchOptions = () => invoke("launch_options").then((o) => o ?? null).catch(() => null);
+
+/** A second launch while running: the shell forwards its arguments here. */
+export function onLaunchOptions(cb) {
+  const ev = window.__TAURI__?.event;
+  if (!ev?.listen) return;
+  ev.listen("launch-options", (e) => cb(e.payload)).catch(() => {});
+}
+
 export const rigNative = {
   /** True only in the desktop shell. */
   available: () => !!window.__TAURI__?.core?.invoke,

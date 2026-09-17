@@ -154,6 +154,9 @@ export class Powertrain {
    * still making noise.
    */
   indicatedTorque(rpm, demand) {
+    // On the limiter the ignition is cut: no combustion, no note. Without
+    // this the audio heard full-throttle combustion at 14,500 rpm.
+    if (this.limiterCut) return 0;
     const plate = this.platePosition(rpm, demand);
     return plate * (this.wotTorque(rpm) + this.motoringTorque(rpm));
   }

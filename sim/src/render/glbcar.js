@@ -123,7 +123,9 @@ function nodeTranslations(doc) {
     return [x, y, z];
   };
   const out = new Map();
-  (doc.nodes ?? []).forEach((n, i) => out.set(n.name ?? `node${i}`, world(i)));
+  // Keyed by node index, not name: CAD exports repeat names ("Solid",
+  // "Body") and a name-keyed map gave every duplicate the last one's offset.
+  (doc.nodes ?? []).forEach((_n, i) => out.set(i, world(i)));
   return out;
 }
 
@@ -133,7 +135,11 @@ function materialColour(doc, index) {
   // Default grey rather than white: an untextured white car in bright sun is
   // an unreadable silhouette, and a missing material should look obviously
   // unfinished rather than plausibly deliberate.
-  return c ? [c[0], c[1], c[2]] : [0.55, 0.56, 0.58];
+  // glTF baseColorFactor is linear; the renderer takes vertex colour as
+  // display-space and decodes it, so encode here or CAD colours come out
+  // gamma-darkened twice (0.5 rendered as 0.22). The default stays a raw
+  // literal: it is the "no colour" sentinel the body loader checks for.
+  return c ? [c[0], c[1], c[2]].map((v) => Math.pow(Math.max(0, v), 1 / 2.2)) : [0.55, 0.56, 0.58];
 }
 
 /**
@@ -175,6 +181,13 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
     }
   }
 
+  // Only triangle lists (mode 4, the default). Strips, fans, lines and
+  // points came out as spikes with nothing said.
+  if ((prim.mode ?? 4) !== 4) {
+    problems?.push(`a mesh uses primitive mode ${prim.mode}; export as triangle lists`);
+    return;
+  }
+
   for (let i = 0; i < count; i += 3) {
     const tri = [0, 1, 2].map((k) => (idx ? idx[i + k] : i + k));
 
@@ -194,7 +207,8 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
       fnx = uy * vz - uz * vy;
       fny = uz * vx - ux * vz;
       fnz = ux * vy - uy * vx;
-      const len = Math.hypot(fnx, fny, fnz) || 1;
+      const len = Math.hypot(fnx, fny, fnz);
+      if (len < 1e-12) continue; // sliver: no area, no normal, nothing to draw
       fnx /= len;
       fny /= len;
       fnz /= len;
@@ -412,7 +426,7 @@ export function buildCarFromGlb(buffer, geo = null) {
     const node = doc.nodes[i];
     if (node.mesh === undefined) continue;
     const name = node.name ?? `node${i}`;
-    const at = places.get(name) ?? [0, 0, 0];
+    const at = places.get(i) ?? [0, 0, 0];
     const prims = doc.meshes[node.mesh].primitives ?? [];
 
     if (WHEEL_NAMES.includes(name)) {
@@ -628,7 +642,7 @@ export function buildWheelFromGlb(buffer, geo = null) {
     const node = doc.nodes[i];
     if (node.mesh === undefined) continue;
     const name = node.name ?? `node${i}`;
-    const at = places.get(name) ?? [0, 0, 0];
+    const at = places.get(i) ?? [0, 0, 0];
     const acc = empty();
     for (const prim of doc.meshes[node.mesh].primitives ?? []) {
       expandPrimitive(doc, bin, prim, at, acc, problems);
@@ -840,7 +854,7 @@ export function buildBodyFromGlb(buffer, geo = null, opts = {}) {
   for (let i = 0; i < (doc.nodes ?? []).length; i++) {
     const node = doc.nodes[i];
     if (node.mesh === undefined) continue;
-    const at = places.get(node.name ?? `node${i}`) ?? [0, 0, 0];
+    const at = places.get(i) ?? [0, 0, 0];
     for (const prim of doc.meshes[node.mesh].primitives ?? []) {
       expandPrimitive(doc, bin, prim, at, acc, problems);
     }

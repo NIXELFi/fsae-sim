@@ -507,7 +507,10 @@ in vec3 vWorld;
 ${COMMON_FS}
 out vec4 frag;
 void main() {
-  vec3 n = normalize(vNormal);
+  // A degenerate triangle (CAD slivers are routine) has a zero normal, and
+  // normalize(0) is NaN: a black or undefined pixel. Fall back to up.
+  float nl = length(vNormal);
+  vec3 n = nl > 1e-6 ? vNormal / nl : vec3(0.0, 1.0, 0.0);
   float sh = shadowAt(vWorld, n);
   // The base of a cone sits in its own contact shadow.
   float ao = 0.72 + 0.28 * clamp(vWorld.y / 0.35, 0.0, 1.0);
@@ -545,7 +548,10 @@ out vec4 frag;
 void main() {
   // Two-sided: inside a cockpit you are looking at the back of half the
   // bodywork, and an unlit black shell there ruins the whole effect.
-  vec3 n = normalize(vNormal);
+  // A degenerate triangle (CAD slivers are routine) has a zero normal, and
+  // normalize(0) is NaN: a black or undefined pixel. Fall back to up.
+  float nl = length(vNormal);
+  vec3 n = nl > 1e-6 ? vNormal / nl : vec3(0.0, 1.0, 0.0);
   if (!gl_FrontFacing) n = -n;
 
   vec3 base = toLinear(mix(vColor, uOverride.rgb, uOverride.a));
@@ -610,8 +616,9 @@ function coneMesh() {
   // Square base plate.
   const B = 0.155;
   const plate = [
-    [-B, 0.012, -B], [B, 0.012, -B], [B, 0.012, B],
-    [-B, 0.012, -B], [B, 0.012, B], [-B, 0.012, B],
+    // Wound counter-clockwise seen from above, or culling removes it.
+    [-B, 0.012, -B], [B, 0.012, B], [B, 0.012, -B],
+    [-B, 0.012, -B], [-B, 0.012, B], [B, 0.012, B],
   ];
   for (const P of plate) { pos.push(...P); nrm.push(0, 1, 0); col.push(...baseCol); }
 
@@ -673,6 +680,16 @@ export class Renderer {
     if (!gl) throw new Error("WebGL2 is required and is not available in this browser.");
     this.gl = gl;
     this.canvas = canvas;
+    // A GPU reset kills the context. Everything here (programs, VAOs, shadow
+    // maps, the track ribbon) would need rebuilding; a reload is the honest
+    // way to get all of it back, and the rig's watchdog holds the car meanwhile.
+    this.lost = false;
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      this.lost = true;
+      console.error("WebGL context lost; reloading when it is restored");
+    });
+    canvas.addEventListener("webglcontextrestored", () => location.reload());
 
     gl.enable(gl.DEPTH_TEST);
     gl.cullFace(gl.BACK);
@@ -747,6 +764,7 @@ export class Renderer {
     this._a = mat4(); this._b = mat4();
     this._t = [mat4(), mat4(), mat4(), mat4(), mat4()];
     this._hubXZ = new Float32Array(8);
+    this._wheelMirrored = [false, false, false, false];
     this._wheelMats = [mat4(), mat4(), mat4(), mat4()];
     this.fovDeg = 78;
     this.time = 0;
@@ -1137,6 +1155,7 @@ export class Renderer {
    *   heaveM, fovBoost
    */
   draw(s) {
+    if (this.lost) return;
     const gl = this.gl;
     const aspect = this.resize();
     const T = this._t;
@@ -1217,21 +1236,6 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.shadow[1].tex);
 
-    // --- sky ---
-    gl.depthMask(false);
-    gl.useProgram(this.progSky);
-    const us = this.u.sky;
-    const right = normalize(cross3(forward, up));
-    const tanH = Math.tan(fovRad / 2);
-    gl.uniform3f(us.uRight, right[0], right[1], right[2]);
-    gl.uniform3f(us.uUp, up[0], up[1], up[2]);
-    gl.uniform3f(us.uFwd, forward[0], forward[1], forward[2]);
-    gl.uniform2f(us.uTan, tanH * aspect, tanH);
-    gl.uniform1f(us.uTime, this.time);
-    this.setCommon(us, eye);
-    gl.bindVertexArray(this.quad);
-    this.drawArrays(gl.TRIANGLES, 0, 6);
-    gl.depthMask(true);
 
     // --- ground ---
     gl.useProgram(this.progGround);
@@ -1301,6 +1305,24 @@ export class Renderer {
 
     this.drawCar(s, eye);
 
+    // --- sky, last: its quad sits at z = 0.9999, so wherever anything was
+    // drawn the depth test rejects it before the (expensive) sky shader runs.
+    // Drawn first it ran on every pixel the ground and car then covered. ---
+    gl.depthMask(false);
+    gl.useProgram(this.progSky);
+    const us = this.u.sky;
+    const right = normalize(cross3(forward, up));
+    const tanH = Math.tan(fovRad / 2);
+    gl.uniform3f(us.uRight, right[0], right[1], right[2]);
+    gl.uniform3f(us.uUp, up[0], up[1], up[2]);
+    gl.uniform3f(us.uFwd, forward[0], forward[1], forward[2]);
+    gl.uniform2f(us.uTan, tanH * aspect, tanH);
+    gl.uniform1f(us.uTime, this.time);
+    this.setCommon(us, eye);
+    gl.bindVertexArray(this.quad);
+    this.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.depthMask(true);
+
     gl.bindVertexArray(null);
   }
 
@@ -1353,6 +1375,10 @@ export class Renderer {
       multiply(this._a, this._b, rotZ(T[2], -(hub.front ? w.spinFront : w.spinRear)));
       if (mirrored) multiply(m, this._a, scale(T[3], 1, 1, -1));
       else m.set(this._a);
+      // A reflection reverses the winding, so gl_FrontFacing inverts and the
+      // two-sided shader would flip these normals inward; drawCar swaps the
+      // front-face rule for the mirrored pair.
+      this._wheelMirrored[i] = mirrored;
       this._hubXZ[i * 2] = m[12];
       this._hubXZ[i * 2 + 1] = m[14];
     }
@@ -1455,12 +1481,14 @@ export class Renderer {
 
     const w = s.wheels;
     for (let i = 0; i < 4; i++) {
+      gl.frontFace(this._wheelMirrored[i] ? gl.CW : gl.CCW);
       part(this.car.tire, this._wheelMats[i], null, MAT.tyre);
       // Fade the gold spokes toward the tyre as the wheel speeds up. Five
       // spokes at 20 rev/s would otherwise strobe into a stationary-looking
       // mess at 60 Hz; this reads as motion blur instead.
       part(this.car.rim, this._wheelMats[i], this._rimOverride(w.rimFade), MAT.rim);
     }
+    gl.frontFace(gl.CCW);
 
     // Steering wheel: its own frame has the rotation axis on +Z, so tilt that
     // frame onto the column before spinning it.
