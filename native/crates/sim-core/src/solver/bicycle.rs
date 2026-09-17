@@ -19,6 +19,9 @@ use crate::powertrain::PowertrainModel;
 use crate::tyre::{Slip, TyreModel};
 use crate::vehicle::{VehicleParams, G};
 
+/// Finite-difference step in slip ratio for the wheel update's implicit term.
+const KAPPA_H: f64 = 1e-4;
+
 pub struct BicycleSolver {
     c: Chassis,
     s: ChassisState,
@@ -265,9 +268,17 @@ impl BicycleSolver {
         let iw_f = 2.0 * self.c.params.wheel_inertia_front_kg_m2;
         let iw_r = 2.0 * self.c.params.wheel_inertia_rear_kg_m2 + drive.added_wheel_inertia;
 
-        let mut dw_f = (-fx_f * radius - self.w_f.signum() * tb_f) / iw_f;
+        // Implicit in the tyre's longitudinal stiffness; see bicycle.js for
+        // why (explicit Euler is unstable under ~4.5 m/s at 500 Hz). Same
+        // finite difference, same order of operations, so the two stay
+        // bit-identical.
+        let dfx_f = ((self.axle_forces(Slip { alpha: self.a_f, kappa: k_f + KAPPA_H }, fz_f, d_fz_f).fx - fx_f) / KAPPA_H).max(0.0);
+        let dfx_r = ((self.axle_forces(Slip { alpha: self.a_r, kappa: k_r + KAPPA_H }, fz_r, d_fz_r).fx - fx_r) / KAPPA_H).max(0.0);
+        let stiff_f = dt * radius * radius * dfx_f / k_den;
+        let stiff_r = dt * radius * radius * dfx_r / k_den;
+        let mut dw_f = (-fx_f * radius - self.w_f.signum() * tb_f) / (iw_f + stiff_f);
         let mut dw_r =
-            (drive.wheel_torque_nm - fx_r * radius - self.w_r.signum() * tb_r) / iw_r;
+            (drive.wheel_torque_nm - fx_r * radius - self.w_r.signum() * tb_r) / (iw_r + stiff_r);
         if self.w_f > 0.0 && self.w_f + dw_f * dt < 0.0 && tb_f > 0.0 {
             dw_f = -self.w_f / dt;
         }

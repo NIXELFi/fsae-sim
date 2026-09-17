@@ -7,6 +7,13 @@
 
 use crate::vehicle::VehicleParams;
 
+/// Crank torque to wheel torque through the ratio and the driveline
+/// efficiency. Losses always oppose motion: drive is reduced by them, engine
+/// braking is increased by them.
+fn to_wheel(crank_nm: f64, n: f64, eff: f64) -> f64 {
+    if crank_nm > 0.0 { crank_nm * n * eff } else { (crank_nm * n) / eff }
+}
+
 const RPM_TO_RADS: f64 = core::f64::consts::TAU / 60.0;
 const RADS_TO_RPM: f64 = 60.0 / core::f64::consts::TAU;
 
@@ -260,6 +267,10 @@ pub struct GearedEngine {
     pub crank_inertia_kg_m2: f64,
     pub gearbox_inertia_kg_m2: f64,
     pub clutch_capacity_nm: f64,
+    /// Rear wheel pair inertia at the wheel, for the clutch's landing torque.
+    /// Mirrors 2 x VehicleParams::wheel_inertia_rear_kg_m2; the rig keeps it
+    /// in step when that parameter is edited.
+    pub wheel_side_inertia_kg_m2: f64,
 
     gear: usize,
     engine_rpm: f64,
@@ -288,6 +299,7 @@ impl GearedEngine {
             crank_inertia_kg_m2: 0.011,
             gearbox_inertia_kg_m2: 0.006,
             clutch_capacity_nm: 220.0,
+            wheel_side_inertia_kg_m2: 2.0 * 0.152,
             gear: 0,
             engine_rpm: 1600.0,
             shift_timer: 0.0,
@@ -433,8 +445,13 @@ impl GearedEngine {
         t
     }
 
-    fn clutch_capacity(&self, throttle: f64, speed: f64) -> f64 {
+    fn clutch_capacity(&self, throttle: f64, speed: f64, clutch_side_rpm: f64) -> f64 {
         if self.shift_timer > 0.0 {
+            return 0.0;
+        }
+        // Off the throttle below idle speed the clutch comes in (driver or
+        // slipper clutch); see powertrain.js.
+        if throttle < 0.05 && clutch_side_rpm < self.idle_rpm * 0.95 {
             return 0.0;
         }
         if speed > 4.0 {
@@ -524,10 +541,10 @@ impl PowertrainModel for GearedEngine {
         }
 
         let n = self.ratio();
-        let cap = self.clutch_capacity(throttle, speed);
         let mut omega_e = self.engine_rpm * RPM_TO_RADS;
         let clutch_side = wheel_omega * n;
         let slip = omega_e - clutch_side;
+        let cap = self.clutch_capacity(throttle, speed, clutch_side * RADS_TO_RPM);
         let te = self.engine_torque(self.engine_rpm, throttle);
 
         // A clutch cannot be locked below idle speed. That is not a detail -- it
@@ -543,7 +560,7 @@ impl PowertrainModel for GearedEngine {
             self.engine_rpm = (clutch_side * RADS_TO_RPM).max(self.idle_rpm);
             let n_gbox = n / self.primary;
             return DriveOutput {
-                wheel_torque_nm: te * n * self.efficiency,
+                wheel_torque_nm: to_wheel(te, n, self.efficiency),
                 added_wheel_inertia: self.crank_inertia_kg_m2 * n * n
                     + self.gearbox_inertia_kg_m2 * n_gbox * n_gbox,
                 locked: true,
@@ -560,7 +577,21 @@ impl PowertrainModel for GearedEngine {
         } else {
             0.0
         };
-        let passed = if dir == 0.0 { te.clamp(-cap, cap) } else { dir * cap };
+        // Stiction first: the torque that lands the engine exactly on the
+        // clutch-side speed this step (see powertrain.js). Only a slip that
+        // needs more than the clutch has slips at capacity.
+        // Both sides move (see powertrain.js): crank at Ie, wheel side at
+        // IwSide, coupled through n. Same expression, same order.
+        let n_gbox = n / self.primary;
+        let iw_side = self.wheel_side_inertia_kg_m2 + self.gearbox_inertia_kg_m2 * n_gbox * n_gbox;
+        let stick = (slip / dt + te / self.crank_inertia_kg_m2) / (1.0 / self.crank_inertia_kg_m2 + (n * n) / iw_side);
+        let passed = if stick.abs() <= cap {
+            stick
+        } else if dir == 0.0 {
+            te.clamp(-cap, cap)
+        } else {
+            dir * cap
+        };
         omega_e += (te - passed) / self.crank_inertia_kg_m2 * dt;
         self.engine_rpm = (omega_e * RADS_TO_RPM).max(0.0);
         if self.engine_rpm < 700.0 && speed < 1.0 {
@@ -568,7 +599,7 @@ impl PowertrainModel for GearedEngine {
         }
 
         DriveOutput {
-            wheel_torque_nm: passed * n * self.efficiency,
+            wheel_torque_nm: to_wheel(passed, n, self.efficiency),
             added_wheel_inertia: 0.0,
             locked: false,
         }

@@ -820,6 +820,7 @@ impl Loop {
             if let Some(x) = p.shift_time_s { e.shift_time_s = x; }
             if let Some(x) = p.engine_inertia_kg_m2 { e.crank_inertia_kg_m2 = x; }
             if let Some(x) = p.gearbox_inertia_kg_m2 { e.gearbox_inertia_kg_m2 = x; }
+            if let Some(x) = p.wheel_inertia_rear_kg_m2 { e.wheel_side_inertia_kg_m2 = 2.0 * x; }
         }
     }
 

@@ -113,10 +113,11 @@ fn seventy_five_metre_accel() {
 #[test]
 fn braking_from_25_ms() {
     let mut car = bicycle();
-    car.powertrain_mut().shift_up();
-    car.powertrain_mut().shift_up();
-    car.powertrain_mut().shift_up();
+    // shift_up() refuses while a shift is in progress, so three calls in a
+    // row queued one; the test then ran in first gear at 20,800 rpm.
+    car.powertrain_mut().set_gear(3);
     car.reset(0.0, 0.0, 0.0, 25.0);
+    assert_eq!(car.powertrain_mut().telemetry().gear, 3);
     let x0 = car.state().x;
     let mut peak = 0.0f64;
     let mut t = 0.0;
@@ -211,9 +212,7 @@ fn brake_bias_moves_the_lockup() {
     let lock_order = |bias: f64| -> (Option<f64>, Option<f64>) {
         let mut car = bicycle();
         car.params_mut().brakes.bias_front = bias;
-        for _ in 0..4 {
-            car.powertrain_mut().shift_up();
-        }
+        car.powertrain_mut().set_gear(4);
         car.reset(0.0, 0.0, 0.0, 26.0);
         let (mut lf, mut lr) = (None, None);
         for i in 0..3000 {

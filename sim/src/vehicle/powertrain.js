@@ -17,6 +17,16 @@ import { totalReduction } from "./params.js";
 const RPM_TO_RADS = (2 * Math.PI) / 60;
 const RADS_TO_RPM = 60 / (2 * Math.PI);
 
+/**
+ * Crank torque to wheel torque through the ratio and the driveline
+ * efficiency. Losses always oppose motion: drive is reduced by them, engine
+ * braking is increased by them. Applying `eff` symmetrically made the car
+ * coast 15% freer than it should.
+ */
+function toWheel(crankNm, n, eff) {
+  return crankNm > 0 ? crankNm * n * eff : (crankNm * n) / eff;
+}
+
 export class Powertrain {
   /**
    * @param {object} v      vehicle params (SDM26)
@@ -206,9 +216,14 @@ export class Powertrain {
    * with throttle at low speed so the driver can slip it off the line; solid
    * once the car is rolling.
    */
-  clutchCapacity(throttle, speed) {
+  clutchCapacity(throttle, speed, clutchSideRpm) {
     if (this.shiftTimer > 0) return 0;
     const full = 220; // EST: well above peak torque, so it locks when rolling
+    // Off the throttle with the driveline turning slower than the engine can
+    // idle, the clutch comes in: that is what a driver does instead of
+    // letting the engine stall, and what a slipper clutch does for them.
+    // Without it a tall-gear roll-down dragged the engine to zero rpm.
+    if (throttle < 0.05 && clutchSideRpm < this.v.idleRpm * 0.95) return 0;
     if (speed > 4) return full;
     // Below walking pace the clutch is being managed, and with the driver off
     // the pedal it is fully in. The old floor of 0.1 meant it always carried
@@ -240,11 +255,10 @@ export class Powertrain {
     const v = this.v;
     const n = this.ratio();
     const eff = v.drivetrainEff;
-    const cap = this.clutchCapacity(throttle, speed);
-
     let omegaE = this.engineRpm * RPM_TO_RADS;
     const omegaClutchSide = rearWheelOmega * n;
     const slip = omegaE - omegaClutchSide;
+    const cap = this.clutchCapacity(throttle, speed, omegaClutchSide * RADS_TO_RPM);
 
     const Te = this.engineTorque(this.engineRpm, throttle);
 
@@ -280,7 +294,7 @@ export class Powertrain {
       // primary only `n / primaryReduction`.
       const nGbox = n / v.primaryReduction;
       return {
-        wheelTorqueNm: Te * n * eff,
+        wheelTorqueNm: toWheel(Te, n, eff),
         addedWheelInertia:
           v.engineInertiaKgM2 * n * n + v.gearboxInertiaKgM2 * nGbox * nGbox,
         locked: true,
@@ -291,7 +305,24 @@ export class Powertrain {
     // the slip. The engine accelerates on its own inertia with the remainder.
     this.slipping = true;
     const dir = slip > 0 ? 1 : slip < 0 ? -1 : 0;
-    const passed = dir === 0 ? Math.max(-cap, Math.min(cap, Te)) : dir * cap;
+    // Stiction first: the torque that lands the engine exactly on the
+    // clutch-side speed this step. Passing the full capacity whenever the
+    // slip was non-zero yanked the engine hundreds of rpm in one substep on
+    // every upshift and made a tall-gear coast-down flip the drive force
+    // sign every step. Only when the slip needs more than the clutch has
+    // does it slip at capacity.
+    // Both sides move: the crank at Ie and the wheel side at IwSide (the
+    // rear wheels plus the post-primary gearbox, at the wheel), coupled
+    // through n. Ignoring the tyre reaction for this one step is fine; the
+    // next step corrects it. Treating the wheel side as fixed is not: in
+    // first, n^2 Ie is ten times the wheel inertia and the landing torque
+    // would stop the wheel dead every step.
+    const nGbox = n / v.primaryReduction;
+    const IwSide = 2 * v.wheelInertiaRearKgM2 + v.gearboxInertiaKgM2 * nGbox * nGbox;
+    const stick = (slip / dt + Te / v.engineInertiaKgM2) / (1 / v.engineInertiaKgM2 + (n * n) / IwSide);
+    const passed = Math.abs(stick) <= cap
+      ? stick
+      : dir === 0 ? Math.max(-cap, Math.min(cap, Te)) : dir * cap;
 
     const domegaE = (Te - passed) / v.engineInertiaKgM2;
     omegaE += domegaE * dt;
@@ -301,7 +332,7 @@ export class Powertrain {
     if (this.stalled) this.engineRpm = v.idleRpm * 0.85; // auto-restart, this is a game
 
     return {
-      wheelTorqueNm: passed * n * eff,
+      wheelTorqueNm: toWheel(passed, n, eff),
       addedWheelInertia: 0,
       locked: false,
     };

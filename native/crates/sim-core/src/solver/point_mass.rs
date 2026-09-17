@@ -74,8 +74,10 @@ impl Solver for PointMassSolver {
         self.ax = 0.0;
         self.ay = 0.0;
         self.tel = Telemetry::default();
+        let gear = self.c.powertrain.telemetry().gear;
         self.c.powertrain.reset();
         if speed > 0.0 {
+            self.c.powertrain.set_gear(gear);
             self.c.powertrain.sync_to_wheel(speed / self.c.params.tyre_radius_m);
         }
     }

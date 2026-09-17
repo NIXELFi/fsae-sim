@@ -20,6 +20,9 @@ use crate::powertrain::PowertrainModel;
 use crate::tyre::{Slip, TyreModel};
 use crate::vehicle::{VehicleParams, G};
 
+/// Finite-difference step in slip ratio for the wheel update's implicit term.
+const KAPPA_H: f64 = 1e-4;
+
 pub struct DoubleTrackSolver {
     c: Chassis,
     s: ChassisState,
@@ -106,8 +109,11 @@ impl Solver for DoubleTrackSolver {
         self.ax = 0.0;
         self.ay = 0.0;
         self.tel = Telemetry::default();
+        // Keep the caller's gear through a rolling reset (see bicycle.rs).
+        let gear = self.c.powertrain.telemetry().gear;
         self.c.powertrain.reset();
         if speed > 0.0 {
+            self.c.powertrain.set_gear(gear);
             self.c.powertrain.sync_to_wheel(w);
         }
     }
@@ -190,6 +196,7 @@ impl DoubleTrackSolver {
         let radius = p.tyre_radius_m;
 
         let mut kappa = [0.0f64; 4];
+        let mut stiff = [0.0f64; 4];
         let mut forces = [(0.0f64, 0.0f64, 0.0f64); 4];
         for i in 0..4 {
             // Velocity of this contact patch in the body frame.
@@ -206,6 +213,9 @@ impl DoubleTrackSolver {
                 .c
                 .tyre
                 .forces(Slip { alpha: self.alpha_lag[i], kappa: kappa[i] }, fz[i]);
+            // Linearised reaction for the implicit wheel update below.
+            let f2 = self.c.tyre.forces(Slip { alpha: self.alpha_lag[i], kappa: kappa[i] + KAPPA_H }, fz[i]);
+            stiff[i] = dt * radius * radius * ((f2.fx - f.fx) / KAPPA_H).max(0.0) / k_den;
             // Front lateral peak relative to the rear, as in the bicycle solver.
             let fy = if i == FL || i == FR { f.fy * p.front_grip_factor } else { f.fy };
             forces[i] = (f.fx, fy, f.utilisation);
@@ -252,7 +262,7 @@ impl DoubleTrackSolver {
                 p.wheel_inertia_front_kg_m2
             };
             let drive_t = if i == RL || i == RR { per_rear_torque } else { 0.0 };
-            let mut dw = (drive_t - forces[i].0 * radius - self.w[i].signum() * tb[i]) / inertia;
+            let mut dw = (drive_t - forces[i].0 * radius - self.w[i].signum() * tb[i]) / (inertia + stiff[i]);
             if self.w[i] > 0.0 && self.w[i] + dw * dt < 0.0 && tb[i] > 0.0 && drive_t <= 0.0 {
                 dw = -self.w[i] / dt;
             }

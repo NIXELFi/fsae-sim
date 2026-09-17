@@ -38,6 +38,9 @@ import { axleMu, muAtLoad, pneumaticTrail, tyreForces } from "./tire.js";
 const G = 9.81;
 const SUBSTEP = 1 / 500;
 
+/** Finite-difference step in slip ratio for the wheel update's implicit term. */
+const KAPPA_H = 1e-4;
+
 export class BicycleModel {
   constructor(params, powertrain) {
     this.p = params;
@@ -283,8 +286,20 @@ export class BicycleModel {
     const tbR = brakeTotal * (1 - p.brakeBiasFront);
 
     const IwR = this.IwR + drive.addedWheelInertia;
-    let dwF = (-fF.fx * p.tireRadiusM - Math.sign(this.wF) * tbF) / this.IwF;
-    let dwR = (drive.wheelTorqueNm - fR.fx * p.tireRadiusM - Math.sign(this.wR) * tbR) / IwR;
+    // Implicit in the tyre's longitudinal stiffness. Explicit Euler on
+    // dw = -R Fx(kappa(w)) / I is only stable while dt < 2 I kDen / (R^2 dFx/dkappa),
+    // which at 500 Hz is everything under about 4.5 m/s: the front wheels
+    // chattered every substep at walking pace, +-0.33 in slip ratio, and ABS
+    // read the chatter. Dividing by the linearised reaction as well is
+    // unconditionally stable and lands on the same steady state. The slope is
+    // taken numerically so the Rust port can do the identical operation.
+    const R = p.tireRadiusM;
+    const dFxF = Math.max(0, (tyreForces(this.aF, kF + KAPPA_H, FzF, muYF, muXF).fx - fF.fx) / KAPPA_H);
+    const dFxR = Math.max(0, (tyreForces(this.aR, kR + KAPPA_H, FzR, muYR, muXR).fx - fR.fx) / KAPPA_H);
+    const stiffF = dt * R * R * dFxF / kDen;
+    const stiffR = dt * R * R * dFxR / kDen;
+    let dwF = (-fF.fx * R - Math.sign(this.wF) * tbF) / (this.IwF + stiffF);
+    let dwR = (drive.wheelTorqueNm - fR.fx * R - Math.sign(this.wR) * tbR) / (IwR + stiffR);
 
     // Clamp so braking stops a wheel instead of reversing it inside one step.
     if (this.wF > 0 && this.wF + dwF * dt < 0 && tbF > 0) dwF = -this.wF / dt;
