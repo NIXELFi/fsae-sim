@@ -1,6 +1,6 @@
 """Generate the Michigan International Speedway venue.
 
-PROVENANCE — read this before trusting the output.
+PROVENANCE -- read this before trusting the output.
 
 There is no survey of MIS in this project or in helios-dev, so this is NOT
 traced geometry like the autocross and endurance courses. It is built to the

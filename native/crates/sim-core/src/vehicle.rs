@@ -1,16 +1,16 @@
 //! Vehicle parameters.
 //!
 //! A "vehicle" here is nothing but data. Every solver, tyre and powertrain
-//! reads from this struct, so a new car — SDM25, an EV concept, next year's
-//! chassis — is a new `VehicleParams` value and not a line of new physics.
+//! reads from this struct, so a new car -- SDM25, an EV concept, next year's
+//! chassis -- is a new `VehicleParams` value and not a line of new physics.
 
 pub const G: f64 = 9.81;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AeroParams {
-    /// Drag area, Cd·A (m²).
+    /// Drag area, Cd.A (m^2).
     pub cda_m2: f64,
-    /// Lift area, Cl·A (m²), positive downward.
+    /// Lift area, Cl.A (m^2), positive downward.
     pub cla_m2: f64,
     /// Fraction of total downforce carried by the front axle.
     pub front_frac: f64,
@@ -29,7 +29,7 @@ pub struct RollParams {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrakeParams {
-    /// Total brake torque at the wheels at full pedal (N·m).
+    /// Total brake torque at the wheels at full pedal (N.m).
     pub max_torque_nm: f64,
     pub bias_front: f64,
 }
@@ -118,7 +118,7 @@ impl VehicleParams {
         self.wheelbase_m * self.weight_dist_front
     }
 
-    /// Static load on one tyre (N) — the reference for load sensitivity.
+    /// Static load on one tyre (N) -- the reference for load sensitivity.
     pub fn nominal_tyre_load(&self) -> f64 {
         self.mass_kg * G / 4.0
     }
@@ -149,7 +149,7 @@ impl VehicleParams {
     }
 }
 
-/// SDM26 — Sun Devil Motorsports' 2026 car.
+/// SDM26 -- Sun Devil Motorsports' 2026 car.
 ///
 /// Provenance is the same as the JS build it is ported from: mass, geometry,
 /// gearing, aero map and roll config are team data out of Helios; the
@@ -210,7 +210,7 @@ pub fn sdm26() -> VehicleParams {
     }
 }
 
-/// SDM25 — same chassis family, heavier, shorter final drive.
+/// SDM25 -- same chassis family, heavier, shorter final drive.
 pub fn sdm25() -> VehicleParams {
     VehicleParams {
         name: "SDM25".into(),

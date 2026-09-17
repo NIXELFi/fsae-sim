@@ -30,7 +30,7 @@ fn skidpad_speed(car: &mut dyn Solver) -> f64 {
     while target <= 16.0 {
         car.reset(0.0, 0.0, 0.0, target);
         // PI on yaw rate around an Ackermann feed-forward. The output is the
-        // steer angle itself, not an increment — accumulating on top of an
+        // steer angle itself, not an increment -- accumulating on top of an
         // integral term makes a double integrator that spins the car and
         // reports a grip limit it never reached.
         let ff = car.params().wheelbase_m / R / car.params().steering.max_steer_rad;

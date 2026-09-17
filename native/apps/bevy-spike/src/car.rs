@@ -5,7 +5,7 @@
 //! look different from the flat-shaded WebGL build: the carbon reads as carbon,
 //! the wheel rims catch a highlight, the tyres stay matte.
 //!
-//! Real SDM26 dimensions throughout — front axle at +0.788 m, rear at -0.742 m,
+//! Real SDM26 dimensions throughout -- front axle at +0.788 m, rear at -0.742 m,
 //! 1.207/1.194 m tracks, 0.20 m loaded radius.
 //!
 //! Every mesh handle is created up front, before anything is spawned. That is

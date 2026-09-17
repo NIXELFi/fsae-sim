@@ -1,4 +1,4 @@
-//! Level 1 — grip-limited point mass.
+//! Level 1 -- grip-limited point mass.
 //!
 //! No yaw dynamics and no slip angles: steering commands a path curvature and
 //! the car follows it up to whatever the friction ellipse allows, then washes

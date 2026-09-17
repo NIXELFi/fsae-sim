@@ -8,8 +8,8 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PW = "/Users/nmurray/.npm/_npx/e41f203b7505f1fb/node_modules/playwright/index.mjs";
-const { chromium } = await import(PW);
+// `npm i -D playwright` in sim/, or point $PLAYWRIGHT at an installed copy.
+const { chromium } = await import(process.env.PLAYWRIGHT ?? "playwright");
 
 const here = dirname(fileURLToPath(import.meta.url));
 const out = join(here, "..", "docs", "screenshots");

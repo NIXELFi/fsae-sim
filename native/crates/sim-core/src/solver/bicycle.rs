@@ -1,15 +1,15 @@
-//! Level 2 — transient bicycle model.
+//! Level 2 -- transient bicycle model.
 //!
 //! Each axle is one steering/driving unit, but grip is still evaluated on two
 //! contact patches: the axle's load is split by the lateral transfer it is
 //! carrying and the tyre is called for the inner and outer patch separately.
-//! Because μ falls with load, those two never sum to what an evenly loaded
-//! pair would make — which is the mechanism that turns roll-stiffness
+//! Because mu falls with load, those two never sum to what an evenly loaded
+//! pair would make -- which is the mechanism that turns roll-stiffness
 //! distribution into understeer balance, and why this model responds to the
 //! ARB setting at all.
 //!
 //! "Transient" is meant literally, in four places: the lateral equation keeps
-//! m·u·r so yaw response overshoots; wheel speeds are states so slip ratio is
+//! m.u.r so yaw response overshoots; wheel speeds are states so slip ratio is
 //! dynamic; slip angles pass through a relaxation-length lag; and load transfer
 //! is driven by the previous substep's measured accelerations so it settles
 //! rather than teleporting.

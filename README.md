@@ -7,14 +7,14 @@ oval.
 Everything that can come from real team data does. The vehicle model is the
 Helios lap sim's SDM26. The engine torque curve is the Helios CFD module's 1-D
 finite-volume engine sweep. The courses are the same traced geometry the Oracle
-lap sim times. Nothing here is a guess dressed up as a measurement — where a
+lap sim times. Nothing here is a guess dressed up as a measurement -- where a
 number is invented, the code says so.
 
 ## Two programs, one repository
 
 ```
-sim/      the app you drive — Tauri v2 desktop, WebGL2 renderer, zero deps
-native/   Rust workspace — the solver, the audio model, the Bevy build
+sim/      the app you drive -- Tauri v2 desktop, WebGL2 renderer, zero deps
+native/   Rust workspace -- the solver, the audio model, the Bevy build
 ```
 
 They are genuinely separate programs with different renderers, and neither
@@ -25,7 +25,7 @@ sample-for-sample against golden vectors the Rust crate emits. A change to the
 model that lands in one but not the other is a broken build. Keeping them in
 one repository makes that change one commit instead of two.
 
-### `sim/` — the simulator
+### `sim/` -- the simulator
 
 The one to run. A Tauri v2 window with the entire game embedded in the
 executable: no server, no install, nothing to keep alive in a terminal.
@@ -37,11 +37,11 @@ cargo build --release --manifest-path sim/src-tauri/Cargo.toml
 That writes `sim/src-tauri/target/release/fsae-sim.exe`. Double-click it.
 
 You need the Rust toolchain and VS Build Tools. You do **not** need Node, pnpm,
-or the Tauri CLI — `build.rs` stages the frontend into `dist/` on every build,
+or the Tauri CLI -- `build.rs` stages the frontend into `dist/` on every build,
 so a plain `cargo build` can never ship a stale bundle.
 
 The frontend is plain ES modules and WebGL2 with no dependencies and no build
-step, so it also runs in a browser — and that is the loop to use while working,
+step, so it also runs in a browser -- and that is the loop to use while working,
 because `generate_context!` embeds the frontend at compile time and any `.js`
 edit forces a recompile and relink of the whole crate.
 
@@ -53,7 +53,7 @@ Use that server rather than `python -m http.server`: the stdlib one sends no
 `Cache-Control`, so a reload serves a fresh `index.html` beside a stale
 `main.js` and the page looks updated while the behaviour is yesterday's.
 
-### `native/` — solver, audio model, Bevy build
+### `native/` -- solver, audio model, Bevy build
 
 ```bash
 cargo test -p sim-core     --release   # the vehicle dynamics solver
@@ -68,8 +68,8 @@ model, the steering wheel and the force feedback on one native 1 kHz thread.
 The JS model in `sim/src/vehicle` is the browser's copy and is checked against
 it to floating-point noise (`sim/data/vehicle-golden.json`).
 
-`bevy-spike` exists to answer one question — does Bevy look better than the
-hand-written WebGL2 renderer? — and is a spike, not a product.
+`bevy-spike` exists to answer one question -- does Bevy look better than the
+hand-written WebGL2 renderer? -- and is a spike, not a product.
 
 ## Checks
 
@@ -80,8 +80,8 @@ python sim/tools/prepare_data.py    # regenerate data/ from the Helios source of
 ```
 
 `validate.js` is the one that matters. It re-derives the numbers that must not
-move — skidpad, acceleration, the ETC map's monotonicity, the audio model's
-output against the Rust reference — and it has caught every regression worth
+move -- skidpad, acceleration, the ETC map's monotonicity, the audio model's
+output against the Rust reference -- and it has caught every regression worth
 catching so far, including one where a stray `git checkout` reverted a fix that
 had already been committed.
 
@@ -118,9 +118,9 @@ origin   the centre of gravity, projected onto the ground
 units    metres
 ```
 
-`+Z` right is not a preference: forward × up = right is the only right-handed
+`+Z` right is not a preference: forward x up = right is the only right-handed
 choice, and it is what the procedural geometry already uses. Get it backwards
-and the car is silently mirrored — invisible on a symmetric model, baffling on
+and the car is silently mirrored -- invisible on a symmetric model, baffling on
 a real one.
 
 Check an export before trusting it:
@@ -131,7 +131,7 @@ node sim/tools/check_car_glb.mjs your-model.glb
 
 That runs the real loader rather than a re-implementation of it, so a file it
 passes is a file the simulator can draw. `python sim/tools/make_reference_car.py`
-writes a model that is correct by construction — open it beside your assembly in
+writes a model that is correct by construction -- open it beside your assembly in
 Blender and the required frame, scale and node names are visible rather than
 described.
 
@@ -151,7 +151,7 @@ old paths, which means `git log -- src/main.js` reaches them where
 `git log -- sim/src/main.js` stops at the import. `git log --full-history` sees
 everything.
 
-Neither has an honest "before" commit — both were initialised partway through
+Neither has an honest "before" commit -- both were initialised partway through
 the session that added the engine audio, and both baseline commits say so.
 
 ## Credits and licence
@@ -163,4 +163,4 @@ law drives a digital waveguide exhaust, through a synthesiser chain of jitter,
 DC removal, differentiation, noise, convolution and levelling. There are no
 recordings anywhere in this repository.
 
-This project is MIT licensed — see [LICENSE](LICENSE).
+This project is MIT licensed -- see [LICENSE](LICENSE).

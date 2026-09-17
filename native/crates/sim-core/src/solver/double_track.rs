@@ -1,4 +1,4 @@
-//! Level 3 — double-track (four-corner) model.
+//! Level 3 -- double-track (four-corner) model.
 //!
 //! Same three chassis degrees of freedom as the bicycle, but every contact
 //! patch is its own: four vertical loads, four slip angles, four slip ratios,
@@ -11,7 +11,7 @@
 //!   * Load transfer is applied per corner rather than reconstructed per axle,
 //!     so combined longitudinal + lateral transfer diagonalises properly.
 //!
-//! The rear differential is open — equal torque to both wheels. A locked or
+//! The rear differential is open -- equal torque to both wheels. A locked or
 //! limited-slip diff is the obvious next step and would go here.
 
 use super::{advance_steer, Chassis, ChassisState, Controls, Fidelity, Solver, Telemetry, SUBSTEP,
@@ -230,7 +230,7 @@ impl DoubleTrackSolver {
             fx_body += fxb;
             fy_body += fyb;
             // Lateral force about the CG, plus longitudinal force through its
-            // lateral offset — the term a bicycle model cannot have.
+            // lateral offset -- the term a bicycle model cannot have.
             mz += arm[i] * fyb - half_t[i] * fxb;
         }
 

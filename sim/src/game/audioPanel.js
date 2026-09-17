@@ -15,7 +15,7 @@ const NOTES = {
   master: "Everything, including the fallback synth.",
   engine:
     "The physical exhaust model. Level already tracks how hard the engine is " +
-    "working — idle sits about 20 dB below the limiter on its own.",
+    "working -- idle sits about 20 dB below the limiter on its own.",
   tyres: "Scrub and wheelspin. Turn it up to hear the limit approaching.",
   wind: "Rises with the square of speed.",
   cones: "The clatter when you knock one over. Worth +2 s, so worth hearing.",

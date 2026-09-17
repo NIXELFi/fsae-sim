@@ -12,10 +12,10 @@
 //! materials and a node hierarchy, and it is the one interchange format that is
 //! actually well specified. SolidWorks will not write it directly, so:
 //!
-//! 1. **SolidWorks → STEP AP214.** Not STL. STL is triangles with no structure:
+//! 1. **SolidWorks -> STEP AP214.** Not STL. STL is triangles with no structure:
 //!    no part names, no materials, no hierarchy, so there is no way to find the
 //!    front wheels afterwards in order to steer them.
-//! 2. **STEP → Blender**, via the free `STEPper` importer add-on, or through
+//! 2. **STEP -> Blender**, via the free `STEPper` importer add-on, or through
 //!    FreeCAD (import STEP, export glTF). Tessellate at a visual tolerance --
 //!    0.1 mm chord height is CAD-accurate and produces a model far too heavy to
 //!    render; 1-2 mm is invisible at cockpit distance.
@@ -118,7 +118,7 @@ pub fn spawn_if_present(
     let path = asset_root().join(CAR_MODEL);
     if !path.exists() {
         info!(
-            "no {} — using the procedural body. See cadmodel.rs for the \
+            "no {} -- using the procedural body. See cadmodel.rs for the \
              SolidWorks export recipe.",
             path.display()
         );

@@ -37,7 +37,7 @@ export function parseGlb(buffer) {
   const view = new DataView(buffer);
   if (buffer.byteLength < 12 || view.getUint32(0, true) !== MAGIC) {
     throw new Error(
-      "not a binary glTF. A .gltf (JSON) file is a different thing — export .glb.",
+      "not a binary glTF. A .gltf (JSON) file is a different thing -- export .glb.",
     );
   }
   const version = view.getUint32(4, true);
@@ -100,7 +100,7 @@ export function readAccessor(doc, bin, index) {
 }
 
 /** World translation of every node, by name. Rotation and scale are reported
- *  by `tools/check_car_glb.py` rather than applied — a CAD export carrying them
+ *  by `tools/check_car_glb.py` rather than applied -- a CAD export carrying them
  *  usually means the model was not baked into the right frame. */
 function nodeTranslations(doc) {
   const parentOf = new Map();
@@ -172,7 +172,7 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
     for (let i = 0; i < idx.length; i++) {
       if (idx[i] >= vertexCount) {
         problems?.push(
-          `a mesh indexes vertex ${idx[i]} of ${vertexCount} — the file is ` +
+          `a mesh indexes vertex ${idx[i]} of ${vertexCount} -- the file is ` +
           `corrupt, or its indices are relative to the buffer rather than to ` +
           `the accessor`,
         );
@@ -378,7 +378,7 @@ function solveFrame(hubs, geo) {
       const moved = Math.hypot(originForward, originUp, originRight);
       const parts = [];
       if (scale !== 1) parts.push(`scaled from ${units}`);
-      if (deg > 1) parts.push(`rotated ${deg.toFixed(0)}°`);
+      if (deg > 1) parts.push(`rotated ${deg.toFixed(0)} deg`);
       if (moved > 0.01) parts.push(`origin moved ${moved.toFixed(3)} m`);
       return parts.length ? `fitted: ${parts.join(", ")}` : "already in the simulator's frame";
     },
@@ -530,7 +530,7 @@ export function buildCarFromGlb(buffer, geo = null) {
         problems.push(
           `the model's wheelbase is ${frame.modelWheelbase.toFixed(3)} m against ` +
           `${(g.frontAxle - g.rearAxle).toFixed(3)} m in the vehicle parameters, ` +
-          `and that is not a unit conversion — check the export scale, or the ` +
+          `and that is not a unit conversion -- check the export scale, or the ` +
           `wheelbase parameter`,
         );
       }
@@ -538,7 +538,7 @@ export function buildCarFromGlb(buffer, geo = null) {
   } else {
     problems.push(
       `only ${hubs.length} of 4 wheel nodes found, so the model's frame cannot ` +
-      `be solved — it is being used exactly as exported`,
+      `be solved -- it is being used exactly as exported`,
     );
   }
 
@@ -671,7 +671,7 @@ export function buildWheelFromGlb(buffer, geo = null) {
   const kept = [];
   for (const part of parts) {
     if (Math.max(...part.size) < biggest * 0.25) {
-      notes.push(`ignored '${part.name}' — ${Math.max(...part.size).toFixed(3)} ` +
+      notes.push(`ignored '${part.name}' -- ${Math.max(...part.size).toFixed(3)} ` +
                  `units across, far too small to be part of a wheel`);
     } else {
       kept.push(part);
@@ -732,7 +732,7 @@ export function buildWheelFromGlb(buffer, geo = null) {
   kept.forEach((part, i) => {
     const isTyre = reaches[i] > maxReach * 0.9;
     const target = isTyre ? tyreAcc : rimAcc;
-    notes.push(`'${part.name}' → ${isTyre ? "tyre" : "rim"} ` +
+    notes.push(`'${part.name}' -> ${isTyre ? "tyre" : "rim"} ` +
                `(${(part.acc.position.length / 9).toFixed(0)} triangles)`);
 
     // Most CAD exports carry no base colour, so the loader's neutral grey would
@@ -764,7 +764,7 @@ export function buildWheelFromGlb(buffer, geo = null) {
   const tire = finish(tyreAcc);
   const rim = finish(rimAcc);
   if (rim.count === 0) {
-    notes.push("no separate rim — the whole wheel will fade together at speed");
+    notes.push("no separate rim -- the whole wheel will fade together at speed");
   }
 
   return {
@@ -1007,7 +1007,7 @@ export function buildBodyFromGlb(buffer, geo = null, opts = {}) {
                  `(${(100 * (span / expected - 1)).toFixed(1)}%)`);
     } else {
       notes.push(`wheel bays not found (candidates ${span.toFixed(2)} m apart, ` +
-                 `wheelbase is ${expected.toFixed(2)} m) — placing by mid-length`);
+                 `wheelbase is ${expected.toFixed(2)} m) -- placing by mid-length`);
     }
   }
 
@@ -1043,7 +1043,7 @@ export function buildBodyFromGlb(buffer, geo = null, opts = {}) {
   }
 
   if ((doc.materials ?? []).length <= 1) {
-    notes.push("one material or none — the whole car renders in a single shade");
+    notes.push("one material or none -- the whole car renders in a single shade");
   }
 
   return {

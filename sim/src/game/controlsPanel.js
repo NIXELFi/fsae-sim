@@ -28,7 +28,7 @@ const PROFILE_NOTES = {
     "the button names differ and the triggers are longer.",
   wheel:
     "Your hands are the input, so the software should get out of the way. " +
-    "Deadzone 0 and response curve 1.00 are correct here — anything else is " +
+    "Deadzone 0 and response curve 1.00 are correct here -- anything else is " +
     "smoothing away real information.",
 };
 
@@ -181,7 +181,7 @@ export class ControlsPanel {
 
     const sel = document.createElement("select");
     for (const [v, text] of [
-      ["match-car", `Match the car (${carRim}° rim, lock to lock)`],
+      ["match-car", `Match the car (${carRim} deg rim, lock to lock)`],
       ["scale-to-lock", "Scale my wheel's rotation to full lock"],
     ]) {
       const o = document.createElement("option");
@@ -200,13 +200,13 @@ export class ControlsPanel {
 
     const explain =
       profile.wheel.mapping === "match-car"
-        ? `Set your wheel's driver software to ${carRim}° rotation. Then a given ` +
+        ? `Set your wheel's driver software to ${carRim} deg rotation. Then a given ` +
           `hand position is a given front wheel angle, and what you feel is what ` +
-          `the tyres are doing. Leaving a 900° wheel at 900 makes this mapping ` +
-          `use only the first ${((100 * carRim) / 900).toFixed(0)}% of its travel — ` +
+          `the tyres are doing. Leaving a 900 deg wheel at 900 makes this mapping ` +
+          `use only the first ${((100 * carRim) / 900).toFixed(0)}% of its travel -- ` +
           `which is correct, and feels wrong, because the wheel is set up wrong.`
-        : `Your wheel's full ${profile.wheel.rotationDeg}° becomes the car's ` +
-          `${lock}° of lock. Nothing to reconfigure, but the steering is then ` +
+        : `Your wheel's full ${profile.wheel.rotationDeg} deg becomes the car's ` +
+          `${lock} deg of lock. Nothing to reconfigure, but the steering is then ` +
           `${(profile.wheel.rotationDeg / carRim).toFixed(1)}x slower than the real ` +
           `car's and the ratio is a fiction.`;
     box.append(el("small", "ctl-hint", explain));
@@ -376,7 +376,7 @@ export class ControlsPanel {
       el(
         "small",
         "ctl-hint",
-        "Press a pedal and watch which number moves — that is its axis. " +
+        "Press a pedal and watch which number moves -- that is its axis. " +
           "Wheels do not use a standard mapping, so there is no table that is " +
           "right for every device.",
       ),
@@ -390,7 +390,7 @@ export class ControlsPanel {
       const axes = this.input.rawAxes || [];
       monitor.textContent = axes.length
         ? axes.map((v, i) => `axis ${i}: ${v >= 0 ? " " : ""}${v.toFixed(3)}`).join("\n")
-        : "(no device — connect one and press a button)";
+        : "(no device -- connect one and press a button)";
 
       if (this.calibrating) {
         const { which, axis } = this.calibrating;
@@ -398,7 +398,7 @@ export class ControlsPanel {
         this.calibrating.min = Math.min(this.calibrating.min, v);
         this.calibrating.max = Math.max(this.calibrating.max, v);
         this.calibrating.el.textContent =
-          `${which}: seen ${this.calibrating.min.toFixed(3)} … ` +
+          `${which}: seen ${this.calibrating.min.toFixed(3)} ... ` +
           `${this.calibrating.max.toFixed(3)}`;
       }
       requestAnimationFrame(tick);
@@ -420,7 +420,7 @@ export class ControlsPanel {
           // Second click: store what we saw.
           const { min, max } = this.calibrating;
           if (Math.abs(max - min) < 0.2) {
-            status.textContent = "not enough travel seen — try again";
+            status.textContent = "not enough travel seen -- try again";
           } else {
             // Rest is whichever end it sat at longest; assume the pedal starts
             // released, so the first value read is the rest position.
@@ -434,7 +434,7 @@ export class ControlsPanel {
             );
             this.input.refreshProfile();
             this.onChange?.();
-            status.textContent = `calibrated: ${min.toFixed(3)} … ${max.toFixed(3)}`;
+            status.textContent = `calibrated: ${min.toFixed(3)} ... ${max.toFixed(3)}`;
           }
           this.calibrating = null;
           btn.textContent = `Calibrate ${which}`;

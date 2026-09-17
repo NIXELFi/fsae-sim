@@ -263,7 +263,7 @@ export const PROFILES = {
 
   "gamepad-xbox": {
     id: "gamepad-xbox",
-    label: "Controller — Xbox",
+    label: "Controller - Xbox",
     kind: "gamepad",
     // Standard Gamepad API mapping, which is what an Xbox One/Series pad
     // reports on Windows over USB and Bluetooth alike.
@@ -296,7 +296,7 @@ export const PROFILES = {
 
   "gamepad-ps": {
     id: "gamepad-ps",
-    label: "Controller — PlayStation",
+    label: "Controller - PlayStation",
     kind: "gamepad",
     // DualShock 4 and DualSense report the same standard mapping; what changes
     // is what the buttons are called, and the triggers are physically longer,
@@ -679,7 +679,7 @@ export function editableSettings(profile) {
         {
           path: "steering.accelDegPerS2",
           label: "Steering acceleration",
-          unit: " deg/s²",
+          unit: " deg/s^2",
           min: 200, max: 20000, step: 100,
           note: "How fast the steering speed itself can change.",
         },

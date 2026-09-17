@@ -1,7 +1,7 @@
 """Two views of the MIS venue: the plan, and the cross-section.
 
 The section is the important one. A 2-mile oval is 1.3 km across, so its whole
-42 m cross-section — road, apron, banking, wall, fence — is a few pixels on any
+42 m cross-section -- road, apron, banking, wall, fence -- is a few pixels on any
 plan that fits on screen. The plan shows the surface palette and the outline;
 the section shows the part that is actually built to published figures.
 
@@ -93,7 +93,7 @@ def main():
     d.line(bp + [bp[0]], fill=BARRIER, width=2)
     d.line([to_px(ring("bankInner")[0]), to_px(ring("bankOuter")[0])], fill=INK, width=3)
 
-    d.text((PAD, 8), f"{v['name']}  —  PLAN (outline is placeholder)", fill=INK)
+    d.text((PAD, 8), f"{v['name']} -- PLAN (outline is placeholder)", fill=INK)
     d.text((PAD, PLAN_H - 18),
            f"{v['lengthM']:.0f} m / {v['lengthM'] / 1609.344:.3f} mi   "
            f"footprint {max(xs) - min(xs):.0f} x {max(ys) - min(ys):.0f} m   "
@@ -103,7 +103,7 @@ def main():
     top = PLAN_H
     d.rectangle([0, top, W, top + SEC_H], fill=BG)
     d.line([0, top, W, top], fill=(60, 62, 64))
-    d.text((PAD, top + 8), "CROSS-SECTION through a turn  —  built to published figures",
+    d.text((PAD, top + 8), "CROSS-SECTION through a turn -- built to published figures",
            fill=INK)
 
     width = v["widthM"]
@@ -159,7 +159,7 @@ def main():
         f"banked surface {width:.2f} m")
 
     bx = grass_w + road_w + 2 + apron
-    d.text(sp(bx + width * 0.42, rise * 0.45), f"{bank_deg:.0f}°", fill=INK)
+    d.text(sp(bx + width * 0.42, rise * 0.45), f"{bank_deg:.0f} deg", fill=INK)
     d.text(sp(bx + width + 1.4, rise + v["wallHeightM"] * 0.3),
            f"concrete wall {v['wallHeightM']:.2f} m", fill=DIM)
     d.text(sp(bx + width + 1.4, rise + v["wallHeightM"] + v["fenceHeightM"] * 0.5),
@@ -168,8 +168,8 @@ def main():
 
     d.text((PAD, top + SEC_H - 26),
            "driveable: infield + apron   |   banking is visual only, barrier at its foot   "
-           f"|   banking {v['banking']['turnDeg']:.0f}° turns / "
-           f"{v['banking']['frontDeg']:.0f}° front / {v['banking']['backDeg']:.0f}° back",
+           f"|   banking {v['banking']['turnDeg']:.0f} deg turns / "
+           f"{v['banking']['frontDeg']:.0f} deg front / {v['banking']['backDeg']:.0f} deg back",
            fill=DIM)
 
     img.save(OUT)

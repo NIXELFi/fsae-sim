@@ -29,7 +29,9 @@ import math
 import os
 import sys
 
-DEFAULT = os.path.expanduser("~/Developer/sdm26-assetto-corsa/data/sdm26_team_data.json")
+# The team workbook export. $SDM26_TEAM_DATA overrides; the default is where
+# it lives on the machine this was written on.
+DEFAULT = os.path.expanduser(os.environ.get("SDM26_TEAM_DATA", "~/Developer/sdm26-assetto-corsa/data/sdm26_team_data.json"))
 IN = 0.0254
 LBF = 4.448222
 G = 9.81

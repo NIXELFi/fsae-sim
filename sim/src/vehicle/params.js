@@ -1,7 +1,7 @@
 // SDM26 vehicle parameters.
 //
 // Everything above the "DRIVING-SIM ADDITIONS" line is lifted verbatim from
-// Helios (`modules/oracle/lib/performance/vehicle.ts` -> SDM26_VEHICLE and
+// Helios (`apps/desktop/src/modules/cfd/lib/performance/vehicle.ts` -> SDM26_VEHICLE and
 // SDM26_ROLL), so this car is the same car the lap sim scores. Grip is the
 // skidpad-pinned muLat 1.368 that reproduces SDM26's real 5.02 s skidpad, and
 // the aero map is the 2026 CFD map at nominal ride height.

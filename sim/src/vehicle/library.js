@@ -177,7 +177,7 @@ export class VehicleLibrary {
   /** Apply an edit to a saved vehicle. Built-ins are read-only. */
   edit(id, changes) {
     const rec = this.saved[id];
-    if (!rec) throw new Error(`"${id}" is built in and cannot be edited — duplicate it first`);
+    if (!rec) throw new Error(`"${id}" is built in and cannot be edited -- duplicate it first`);
     const base = builtIns()[rec.basedOn];
     const next = merge(merge(clone(base), rec.patch), changes);
     rec.patch = diff(base, next);

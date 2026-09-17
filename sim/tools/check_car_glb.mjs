@@ -73,14 +73,14 @@ function main() {
   if (car.frame) {
     notes.push(car.stats.fit);
     if (car.frame.scale !== 1) {
-      notes.push(`units read as ${car.frame.units} — the simulator rescales, ` +
+      notes.push(`units read as ${car.frame.units} -- the simulator rescales, ` +
                  `nothing to change`);
     }
   } else {
     problems.push(
       "the frame could not be solved, so the model is used exactly as " +
       "exported. All four wheel nodes (wheel_fl, wheel_fr, wheel_rl, wheel_rr) " +
-      "are needed — they are what the forward, up and lateral axes are " +
+      "are needed -- they are what the forward, up and lateral axes are " +
       "measured from.",
     );
   }
@@ -94,7 +94,7 @@ function main() {
   if (size[0] > 0 && !(1.5 <= size[0] && size[0] <= 4.0)) {
     warnings.push(
       `the bodywork is ${size[0].toFixed(2)} m long after fitting, outside the ` +
-      `1.5–4 m a Formula Student car occupies. The wheels fitted correctly, so ` +
+      `1.5-4 m a Formula Student car occupies. The wheels fitted correctly, so ` +
       `this is the bodywork disagreeing with them rather than a frame problem.`,
     );
   }
@@ -137,7 +137,7 @@ function main() {
 
   // ---- articulated parts ---------------------------------------------------
   if (car.tire.count === 0) {
-    problems.push("no wheel geometry — the wheels will be invisible.");
+    problems.push("no wheel geometry -- the wheels will be invisible.");
   }
   if (car.steeringWheel.count === 0) {
     warnings.push("no 'steering_wheel' node. Not fatal; it just will not turn.");
@@ -149,7 +149,7 @@ function main() {
     problems.push(
       `${tris.toLocaleString()} triangles is too heavy to render at frame rate. ` +
       `Decimate below ${TRIANGLE_COMFORT.toLocaleString()}, and delete internal ` +
-      `parts rather than decimating them — most of a CAD assembly is inside ` +
+      `parts rather than decimating them -- most of a CAD assembly is inside ` +
       `the car and never visible.`,
     );
   } else if (tris > TRIANGLE_COMFORT) {
@@ -159,11 +159,11 @@ function main() {
     );
   }
   if (car.stats.materials === 0) {
-    warnings.push("no materials — everything will render in a default grey.");
+    warnings.push("no materials -- everything will render in a default grey.");
   }
 
   // ---- report --------------------------------------------------------------
-  for (const n of notes) console.log(`  ·  ${n}`);
+  for (const n of notes) console.log(`  .  ${n}`);
   if (notes.length) console.log();
   for (const w of warnings) console.log(`  WARN   ${w}`);
   for (const p of problems) console.log(`  ERROR  ${p}`);

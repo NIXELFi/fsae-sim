@@ -1,10 +1,10 @@
-# FSAE Sim — session resume
+# FSAE Sim -- session resume
 
 Sister doc to `helios-dev/HELIOS_DEV_PLAN.md` and `ORACLE_DEV_PLAN.md`. Read this
 first; update it at the end of each session.
 
 **Status: working and shipped.** Both codebases build, run and pass their tests
-(52 + 22 + 8 in Rust, the full harness in JS). Nothing is half-finished — the
+(`cargo test` in both workspaces, the full harness in JS). Nothing is half-finished -- the
 open items below are decisions, follow-ups, and one thing that genuinely needs
 hardware plugged in.
 
@@ -24,7 +24,7 @@ their message. Commits made before the merge refer to the old paths, so
 `git log -- src/main.js` reaches them where `git log -- sim/src/main.js` stops
 at the import.
 
-### `sim/` — the app
+### `sim/` -- the app
 
 First-person SDM26 driving simulator. **Tauri v2 desktop app**; the frontend is
 plain ES modules + WebGL2 with **zero dependencies and no build step**.
@@ -43,7 +43,7 @@ shortcut (**SDM26 Driver-in-Loop**) pointing at it.
 **Iterate in the browser, not the exe.** `generate_context!` embeds the frontend
 at compile time, so any `.js` edit forces a recompile and relink (~60-75 s).
 
-### `native/` — Rust solver + Bevy build
+### `native/` -- Rust solver + Bevy build
 
 **The Bevy build is not inside the desktop exe and cannot be.** They are two
 separate programs with two different renderers: `fsae-sim.exe` is the Tauri app
@@ -62,12 +62,12 @@ cargo run -p engine-audio --release --example golden_vectors \
   > ../sim/data/engine-audio-golden.json
 ```
 
-- `crates/sim-core` — dependency-free solver. Pluggable tyre / powertrain /
+- `crates/sim-core` -- dependency-free solver. Pluggable tyre / powertrain /
   suspension / aero / solver, three fidelity levels. **Valuable on its own; not
   tied to Bevy.**
-- `crates/engine-audio` — physically-modelled internal-combustion sound. Shared
+- `crates/engine-audio` -- physically-modelled internal-combustion sound. Shared
   by both packages; the reference implementation the JS port is checked against.
-- `apps/bevy-spike` — the Bevy build. Still one
+- `apps/bevy-spike` -- the Bevy build. Still one
   line of UI; it now has real engine sound and a glTF bodywork hook.
 
 ---
@@ -81,8 +81,8 @@ matters.
 | Check | Value | Anchor |
 |---|---|---|
 | Skidpad, 9.125 m | 4.986 s, 1.477 g | SDM26 ran **5.02 s** |
-| 75 m accel, managed launch | 4.874 s | QSS says 4.2 s — see below |
-| Braking from 25 m/s | 23.08 m, 1.74 g | — |
+| 75 m accel, managed launch | 4.874 s | QSS says 4.2 s -- see below |
+| Braking from 25 m/s | 23.08 m, 1.74 g | -- |
 | ETC map, 4000 random curves | 0 overshoot | monotone guarantee |
 
 **Two deliberate deviations from Helios, both load-bearing:**
@@ -101,14 +101,14 @@ matters.
 
 ## 3. Decisions worth not relitigating
 
-- **`build.rs` stages the frontend into `dist/`**, not `beforeBuildCommand` —
+- **`build.rs` stages the frontend into `dist/`**, not `beforeBuildCommand` -- 
   that hook only runs under the Tauri CLI, so a plain `cargo build` would embed
   a stale bundle. Per-*file* `rerun-if-changed`; directory watching misses
   in-place edits.
 - **`lto = "thin"`, not fat.** Fat LTO measured 2m24s for a one-line JS change.
 - **Tyre is a fitted Magic Formula, not Oracle's MF6.1.2 `.tir` evaluator.**
   The real R20 fit peaks at |mu| ~ 2.32 and does not reach peak Fy until 13-16
-  degrees of slip — fine for a peak-grip lap sim, vague and disconnected to
+  degrees of slip -- fine for a peak-grip lap sim, vague and disconnected to
   *drive*.
 - **ETC map uses monotone cubic Hermite (Fritsch-Carlson).** A natural cubic or
   Catmull-Rom overshoots between breakpoints, which on a throttle map means
@@ -138,8 +138,8 @@ Others:
   `about:blank` target before navigating; a target can report the app URL while
   the document is still committing ("Execution context was destroyed"); and
   `child.kill()` leaves children alive that lock the user-data folder, so the
-  *next* run fails with "no ready page" — pointing nowhere near the cause.
-- **A running instance locks the exe** — `cargo build` fails with
+  *next* run fails with "no ready page" -- pointing nowhere near the cause.
+- **A running instance locks the exe** -- `cargo build` fails with
   `Access is denied (os error 5)`. Kill `fsae-sim.exe` first.
 - **`tail` in a pipe masks cargo's exit code.** A build that reported "exit 0"
   had actually failed. Use `${PIPESTATUS[0]}`.
@@ -157,24 +157,24 @@ Others:
 
 ## 5. Model results that look wrong and are not
 
-- **A heavier car accelerates faster at pinned throttle** — 3.62 s at 340 kg
+- **A heavier car accelerates faster at pinned throttle** -- 3.62 s at 340 kg
   against 3.85 s at 267 kg over 40 m. The extra rear load stops it spinning
   (slip ratio 1.44 vs 4.13). Give both a managed, traction-limited launch and
   the order flips back (3.66 vs 3.53 s).
-- **Yaw inertia does not change steady-state cornering radius.** Correct — it
+- **Yaw inertia does not change steady-state cornering radius.** Correct -- it
   only affects transient response. Useful as a sanity check.
 - **Bicycle and double-track solvers agree to three figures in a straight
-  line.** Correct — a double track degenerates to a bicycle under symmetric
+  line.** Correct -- a double track degenerates to a bicycle under symmetric
   load.
 
 ---
 
-## 6. Provenance — which numbers are real
+## 6. Provenance -- which numbers are real
 
 The home screen tags all 55 parameters. **34 trace to the team; 21 (38%) are
 estimates generated for the simulator that nobody has measured.** The biggest:
 
-- **Yaw inertia 105 kg·m²** — wants a bifilar rig. Highest value to measure.
+- **Yaw inertia 105 kg.m^2** -- wants a bifilar rig. Highest value to measure.
 - Wheel and driveline rotational inertias
 - Steering lock, rate and lag
 - Brake torque and bias
@@ -192,13 +192,13 @@ restretch the drawn body and the cone hitbox.
    it needs Daniel, not more code. The gamepad path in WebView2 is unverified
    (it is Chromium, so it should behave as Edge does; `bevy_gilrs` detected
    three pads instantly, so a native reader is the known fallback). The wheel
-   profile is worse than unverified — **its axis assignments are a guess**.
+   profile is worse than unverified -- **its axis assignments are a guess**.
    Wheels do not use the Gamepad API's standard mapping and every vendor
    differs, which is exactly why the panel has a live axis monitor and a
    calibration capture. Plug a wheel in, read which axis each pedal moves, and
    the defaults can stop being a guess.
 2. **The Bevy decision is still open, but the bill went down.** The spike
-   answers "does it look better" — yes, modestly, mostly from shadows and PBR.
+   answers "does it look better" -- yes, modestly, mostly from shadows and PBR.
    The estimate used to include "replacing the WebAudio engine synth"; that is
    now done and shared, so the remaining cost is the ~2,500 lines of HUD / ETC
    editor / spec sheet in `bevy_ui`. Recommendation unchanged: the WebGL build
@@ -208,11 +208,9 @@ restretch the drawn body and the cone hitbox.
    that already tracks combustion power, so it is a preference rather than a
    correction.
 
-4. **`sim-core` is not wired into `fsae-sim`.** The WASM path is designed for
-   but not built, and it costs the zero-build-step frontend. The engine audio
-   faced the same choice and answered it the other way — ported by hand, kept
-   honest by golden vectors — which is now a worked precedent for doing the
-   same with the solver if the duplication is ever judged worth it.
+4. ~~`sim-core` is not wired into `fsae-sim`.~~ Done: the desktop build links
+   `sim-core` and runs it on the rig thread (`src-tauri/src/rig.rs`); the JS
+   model stays as the browser's copy, held to parity by `vehicle-golden.json`.
 
 5. **Suspension and aero are registered but not extracted.** Both are still
    embedded in `bicycle.js` and in the Rust solvers; the registry marks them
@@ -226,11 +224,11 @@ restretch the drawn body and the cone hitbox.
    mean inventing the force, which is the one thing worth not doing.
 7. **The endurance centreline has one curvature spike** at s ~ 607 m with
    R = 2.83 m, below SDM26's 2.88 m minimum turning circle. A tracing artifact
-   — fix it upstream in the Helios track data, not here.
+ -- fix it upstream in the Helios track data, not here.
 8. **MIS next steps (Daniel's):** explore and refine the venue,
    then make copies with the autocross and endurance layouts laid out inside the
-   infield. The plumbing for that already exists — `Venue` and `Track` are
-   interchangeable — but a combined venue-plus-course object does not, so
+   infield. The plumbing for that already exists -- `Venue` and `Track` are
+   interchangeable -- but a combined venue-plus-course object does not, so
    whichever way it goes will need one new decision: either a `Venue` that
    carries a course, or a `Track` that carries scenery.
 9. **Bevy spike rough edges** (only matter if it is promoted): the asphalt
@@ -263,7 +261,7 @@ native/
   apps/bevy-spike/     main, car, track, ground, audio, cadmodel
 ```
 
-`window.__sim` is exposed in the browser console — `__sim.car.telemetry`,
+`window.__sim` is exposed in the browser console -- `__sim.car.telemetry`,
 `__sim.etc.describe()`, `__sim.setup.state(0)`.
 
 ## 9. Michigan International Speedway venue
@@ -315,13 +313,13 @@ validated reference numbers are untouched.
 
 Verified in the exe by `smoke_desktop.mjs`, which now loads the venue, drives at
 the banking at 12 m/s on full throttle for 4 s and asserts the car is held:
-worst lateral −11.125 m against a −11.125 m barrier, `glError` 0.
+worst lateral -11.125 m against a -11.125 m barrier, `glError` 0.
 
 **Second colour-space trap.** The venue first rendered near-black. This
-renderer's colours are in **display space, not linear** — its own procedural
+renderer's colours are in **display space, not linear** -- its own procedural
 asphalt is 0.30. The palette had been converted to linear first (asphalt 0.04),
 which is correct for a PBR pipeline and wrong for this one. Same shape of bug as
-the cached-value trap in §4: an assumption that is right somewhere else.
+the cached-value trap in section 4: an assumption that is right somewhere else.
 
 **Lesson worth keeping:** the ring offsets were initially inverted. The loop is
 built turning left, so it runs counterclockwise and its enclosed area is on the
@@ -335,8 +333,8 @@ was only caught by drawing the plan. **Draw geometry before trusting it.**
 **Sound is generated, not sampled. There are no recordings anywhere.**
 
 Adapted from [`ange-yaghi/engine-sim`](https://github.com/ange-yaghi/engine-sim),
-**MIT**. Note that the repository usually linked —
-`Engine-Simulator/engine-sim-community-edition` — ships the built application
+**MIT**. Note that the repository usually linked -- 
+`Engine-Simulator/engine-sim-community-edition` -- ships the built application
 and contains **no source at all** ("You'll notice that there is no application
 code here"). The algorithms here follow the original open codebase.
 
@@ -351,14 +349,14 @@ crank angle
 
 Implemented twice: `native/crates/engine-audio` (reference) and
 `sim/src/audio/engineAudio.js` (port). WASM was the alternative and was
-declined for the same reason as before — it costs the zero-build-step frontend.
+declined for the same reason as before -- it costs the zero-build-step frontend.
 They are kept in lockstep the way `sim-core` is: the Rust side emits golden
 vectors, `tools/validate.js` checks the JS against them. Measured agreement is
 2e-3 over 512 samples, which is f32-against-f64 rounding and nothing else.
 
 **The torque curve is an input.** `set_operating_point(rpm, throttle, torque)`
 solves the Wiebe heat release so the modelled cycle does that much indicated
-work. Feed it the Helios CFD sweep — which is what both builds do — and the note
+work. Feed it the Helios CFD sweep -- which is what both builds do -- and the note
 is generated from a cylinder trace doing the same work the car is doing.
 
 **Things that are emergent rather than scripted**, because the model is physical:
@@ -374,25 +372,25 @@ correctness would ever have caught.
 
 
 1. **The port flow was never choked.** The incompressible orifice equation
-   returns about 930 m/s through the exhaust valve at blowdown — supersonic. It
+   returns about 930 m/s through the exhaust valve at blowdown -- supersonic. It
    emptied the cylinder in a few crank degrees and slammed the waveguide.
 2. **The cylinder end of each primary reflected rigidly** regardless of valve
    position. A wide-open exhaust valve is a hole into a large volume, not a
    mirror.
 
-Together these made **consecutive firing pulses correlate at −0.35** — inverted,
+Together these made **consecutive firing pulses correlate at -0.35** -- inverted,
 so the pitch did not track rpm. Fixed (choke at Mach 1; reflection
-`r = (A_pipe − A_valve)/(A_pipe + A_valve)`), the spectrum is a clean harmonic
-series on the firing frequency with off-harmonics **200–500× down** and no
+`r = (A_pipe - A_valve)/(A_pipe + A_valve)`), the spectrum is a clean harmonic
+series on the firing frequency with off-harmonics **200-500x down** and no
 half-order content, which is exactly right for an even-firing four.
 
 3. **The output was clipped flat at every operating point.** Measured RMS was
-   0.99 against a ±1 clamp -- a square wave, not levelled audio. The leveller
+   0.99 against a +-1 clamp -- a square wave, not levelled audio. The leveller
    was a peak follower with a 1 ms attack, and a blowdown transient is about
    *ten samples* wide at 48 kHz. It could never respond in time, so the gain was
    always set by the quiet stretch between pulses and every pulse then arrived
    into a gain far too high. Replaced with an RMS follower averaging over 150 ms
-   -- longer than a firing period even at idle -- plus `tanh` soft clipping, so
+ -- longer than a firing period even at idle -- plus `tanh` soft clipping, so
    transients are rounded rather than sheared.
 
 4. **The derivative was 2500x too large.** `DerivativeFilter` divided by `dt`,
@@ -478,7 +476,7 @@ what stops it becoming the AGC again -- it cannot flatten a 20 dB curve.
 
 | | idle | 2500 part | 4000 | 7000 | 10000 | 13000 | 3000 ovr | 9000 ovr |
 |---|---|---|---|---|---|---|---|---|
-| dBA vs limiter | −37 | −29 | −14 | −8.6 | −3.6 | 0 | −42 | −29 |
+| dBA vs limiter | -37 | -29 | -14 | -8.6 | -3.6 | 0 | -42 | -29 |
 
 **Correctness and listenability are different properties, and only one of them
 had tests.** The spectral checks that proved the model right -- energy on the
@@ -489,21 +487,21 @@ balance suite exists because of that gap.
 **Test the spectrum, not the waveform.** The first pitch test used zero-crossing
 counting and measured the 3.9 kHz pipe resonance rather than the 200 Hz firing
 rate, reporting roughly the same answer at every rpm. Autocorrelation fixed that
-but needed an octave guard restricted to *local maxima* — a smooth signal's
+but needed an octave guard restricted to *local maxima* -- a smooth signal's
 autocorrelation rises gradually, so "first lag above a threshold" lands on the
 slope. The assertion that actually earns its keep is the spectral one.
 
 ### Performance
 
-Rust 24× real time, JS 12.5× at 48 kHz with four cylinders and a 256-tap
-impulse response. The dominant cost was **not** the transcendental functions —
+Rust 24x real time, JS 12.5x at 48 kHz with four cylinders and a 256-tap
+impulse response. The dominant cost was **not** the transcendental functions -- 
 tabulating those barely moved it. It was twelve `Vec` allocations per sample in
 the waveguide, half a million a second. Preallocating doubled throughput.
 
 **The RNG is `xorshift32`, deliberately.** A better 64-bit generator cannot be
 reproduced in JavaScript without `BigInt`, and since jitter and air noise both
 reach the output, different noise would make the two waveforms diverge from the
-first sample — leaving nothing to compare.
+first sample -- leaving nothing to compare.
 
 ---
 
@@ -513,25 +511,25 @@ first sample — leaving nothing to compare.
 whatever the active profile says. Adding a device means adding a profile.
 
 Four shipped: keyboard/mouse, Xbox, PlayStation, wheel-and-pedals. They are not
-variations on a theme — they differ in what the driver can physically command:
+variations on a theme -- they differ in what the driver can physically command:
 
 | | steering rate | accel | deadzone | curve |
 |---|---|---|---|---|
-| keyboard | 180 °/s | 700 °/s² | 0 | linear |
-| gamepad | 300 °/s | 2200 °/s² | 0.10 | 1.7 expo |
-| wheel | 720 °/s | 12000 °/s² | **0** | **1.0** |
+| keyboard | 180  deg/s | 700  deg/s^2 | 0 | linear |
+| gamepad | 300  deg/s | 2200  deg/s^2 | 0.10 | 1.7 expo |
+| wheel | 720  deg/s | 12000  deg/s^2 | **0** | **1.0** |
 
 All at the **road wheel**, matching `BicycleModel.delta`. Divide by
 `steeringRatio` for rim figures.
 
 **Steering is now a rate- *and* acceleration-limited servo.** The acceleration
 limit is new. Without it a step input produces a step in steering *velocity*,
-which no hand and no steering motor can do — and on a keyboard, where every
+which no hand and no steering motor can do -- and on a keyboard, where every
 input is a step, it is the difference between the car darting and the car being
 steered. `steeringServo` on the model is **configuration, not state**: it is
 deliberately not reset by `reset()`, or a respawn would silently drop the
-driver's profile. `steerRateDegPerS` *is* state and is reset — same shape as the
-clutch-mismatch bug in §4.
+driver's profile. `steerRateDegPerS` *is* state and is reset -- same shape as the
+clutch-mismatch bug in section 4.
 
 With no profile attached the servo uses an effectively infinite acceleration and
 reduces exactly to the previous behaviour, so **the validated numbers do not
@@ -541,12 +539,12 @@ move.**
 smoothing is a defect rather than a feature:
 
 - **Rim-to-road-wheel mapping.** `match-car` turns the rim through the car's real
-  ratio: SDM26's 28° lock through 4.0 is **112° at the rim, lock to lock**. Set
+  ratio: SDM26's 28 deg lock through 4.0 is **112 deg at the rim, lock to lock**. Set
   the driver software to 112 and hand position *is* front-wheel angle.
   `scale-to-lock` spreads whatever rotation the wheel is set to across full lock
-  — forgiving, but the ratio becomes a fiction and the steering is eight times
+ -- forgiving, but the ratio becomes a fiction and the steering is eight times
   slower than the real car's.
-- **Pedal calibration against real axis travel.** A G29 brake rests near −1 and
+- **Pedal calibration against real axis travel.** A G29 brake rests near -1 and
   tops out near +1; a load cell may never reach +1 at any force a person can
   apply. Without per-axis min/max the same code reads full brake at rest on one
   device and half brake at the stop on another.
@@ -570,19 +568,19 @@ subsystem, plus the parameters. That is what makes it savable, exportable,
 diffable and readable by both builds.
 
 ```
-tyre · powertrain · suspension · aero · engineAudio
+tyre . powertrain . suspension . aero . engineAudio
 ```
 
-- `src/vehicle/modules.js` — the registry, and the SDM26 reference definition.
+- `src/vehicle/modules.js` -- the registry, and the SDM26 reference definition.
   Its `params` block **references** the live `SDM26` object rather than copying
   it, so there is still exactly one source of truth and `paramMeta.js` still
   describes it.
-- `src/vehicle/library.js` — duplicate, edit, swap a module, export, import.
-- `sim-core/src/modular.rs` — the same shape in Rust, plus `SuspensionModel` and
+- `src/vehicle/library.js` -- duplicate, edit, swap a module, export, import.
+- `sim-core/src/modular.rs` -- the same shape in Rust, plus `SuspensionModel` and
   `AeroModel` traits with `rigid` and `none` alternatives (useful references:
   they isolate how much of a result comes from load transfer or downforce).
 
-**Saved vehicles store a sparse diff against their ancestor**, not a full copy —
+**Saved vehicles store a sparse diff against their ancestor**, not a full copy -- 
 the same rule the parameter and control overrides use. Improving a shipped
 default then reaches every car derived from it, instead of each being silently
 pinned to whatever shipped the day it was created.
@@ -594,7 +592,7 @@ build.
 **No second vehicle exists, on purpose.** The framework is the deliverable;
 inventing a plausible-looking car would put numbers in the repository nobody has
 measured. Two subsystems are also still *embedded in the solver* rather than
-extracted — suspension and aero are registered and described but marked
+extracted -- suspension and aero are registered and described but marked
 `extracted: false`, and the picker says so instead of offering a choice that
 silently does nothing. **Extracting them is the next real step.**
 
@@ -618,7 +616,7 @@ apps/bevy-spike/src/cadmodel.rs  the Bevy side (glTF is native there)
 ```
 
 **Frame:** origin at the CG projected to the ground, +X forward, +Y up, +Z left,
-metres. Front axle x = +0.788, rear x = −0.742, hubs y = +0.200. Nodes:
+metres. Front axle x = +0.788, rear x = -0.742, hubs y = +0.200. Nodes:
 `body`, `wheel_fl/fr/rl/rr`, `steering_wheel`.
 
 **The division of labour: the file supplies geometry, the simulator supplies
@@ -674,14 +672,14 @@ about 14%.** Two numbers, and between them they fixed four things that had been
 guesses.
 
 **They cross-check each other.** Before using either, the model already said a
-14% plate balances friction at about 2350 rpm — from the CFD torque curve and
+14% plate balances friction at about 2350 rpm -- from the CFD torque curve and
 the friction model alone. Agreement to a few hundred rpm on numbers that had
 never seen the measurement.
 
 **They pin the low-rpm end of the torque curve.** Below the sweep's first point
 (4000 rpm) the curve was extrapolated to `0.35 x peak`, invented. Requiring a
 14% plate to balance friction at 2000 rpm forces `wot(2000) = 34 N.m`, which is
-**0.56 x peak** — and that independently lands in the 55-70% a naturally
+**0.56 x peak** -- and that independently lands in the 55-70% a naturally
 aspirated four really makes there. The old 0.35 could not sustain an idle at any
 plate opening.
 

@@ -2,7 +2,8 @@
 //     node tools/tabshots.mjs <tag> <width> <height>
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-const { chromium } = await import("/Users/nmurray/.npm/_npx/e41f203b7505f1fb/node_modules/playwright/index.mjs");
+// `npm i -D playwright` in sim/, or point $PLAYWRIGHT at an installed copy.
+const { chromium } = await import(process.env.PLAYWRIGHT ?? "playwright");
 const here = dirname(fileURLToPath(import.meta.url));
 const out = join(here, "..", "docs", "screenshots");
 const [tag = "tabs", W = 1600, H = 900] = process.argv.slice(2);

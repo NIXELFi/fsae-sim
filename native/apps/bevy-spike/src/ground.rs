@@ -6,7 +6,7 @@
 //! optical flow at all, and two feet off the deck at 25 m/s that is most of
 //! what tells you how fast you are going.
 //!
-//! The stall lines are authentic — FSAE Michigan runs on a parking lot, and
+//! The stall lines are authentic -- FSAE Michigan runs on a parking lot, and
 //! courses are coned out over the existing markings.
 
 use bevy::asset::RenderAssetUsages;
@@ -56,7 +56,7 @@ pub fn asphalt_image(images: &mut Assets<Image>) -> Handle<Image> {
             // Faded stall lines: two verticals 2.75 m apart, one horizontal.
             let line_w = 0.10 / TILE_METRES; // 100 mm paint
             // Bay dividers run across; the aisle line is fainter still. These
-            // are years-old markings under rubber, not fresh paint — bright
+            // are years-old markings under rubber, not fresh paint -- bright
             // white here reads as a tiled grid rather than a car park.
             let du = (u.min(1.0 - u)).min((u - 0.5).abs());
             let dv = v.min(1.0 - v);

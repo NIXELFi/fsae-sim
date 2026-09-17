@@ -19,9 +19,9 @@ const RADS_TO_RPM: f64 = 60.0 / core::f64::consts::TAU;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DriveOutput {
-    /// Torque delivered to the driven axle (N·m).
+    /// Torque delivered to the driven axle (N.m).
     pub wheel_torque_nm: f64,
-    /// Reflected driveline inertia to add at the wheel (kg·m²).
+    /// Reflected driveline inertia to add at the wheel (kg.m^2).
     pub added_wheel_inertia: f64,
     pub locked: bool,
 }
@@ -68,7 +68,7 @@ pub trait PowertrainModel: Send + Sync {
     fn reset(&mut self);
 
     /// Put the crank where the current ratio says it should be. Needed
-    /// whenever the car is placed at speed — an engine left at idle behind a
+    /// whenever the car is placed at speed -- an engine left at idle behind a
     /// rolling wheel is a huge clutch mismatch that brakes the driven axle to
     /// a stop on the first substep.
     fn sync_to_wheel(&mut self, _wheel_omega: f64) {}
@@ -149,7 +149,7 @@ impl PowertrainModel for IdealDrive {
 
 /// An electric drive: flat torque to base speed, constant power above it,
 /// through a single reduction. Here mostly to prove the trait carries a
-/// genuinely different architecture — an EV conversion is a parameter set,
+/// genuinely different architecture -- an EV conversion is a parameter set,
 /// not a rewrite.
 #[derive(Debug, Clone)]
 pub struct ElectricDrive {
@@ -215,11 +215,11 @@ pub struct TorquePoint {
 }
 
 /// SDM26 characteristic RPM sweep from the Helios CFD module's 1-D
-/// finite-volume engine solver, 4000–15000 rpm.
+/// finite-volume engine solver, 4000-15000 rpm.
 ///
 /// Not a smooth dyno arc: the wave-action features the solver predicts are
-/// preserved — the hole at 6500, the spike at 8000, the second wind at
-/// 11000–11500 before the restrictor chokes it.
+/// preserved -- the hole at 6500, the spike at 8000, the second wind at
+/// 11000-11500 before the restrictor chokes it.
 pub const SDM26_SWEEP: [TorquePoint; 23] = [
     TorquePoint { rpm: 4000.0, torque_nm: 60.997, fmep_bar: 1.1630 },
     TorquePoint { rpm: 4500.0, torque_nm: 61.335, fmep_bar: 1.2594 },
@@ -294,8 +294,8 @@ impl GearedEngine {
             idle_throttle_frac: 0.14,
             shift_time_s: 0.1,
             // Split at the primary, because that is where the clutch sits on a
-            // CBR600RR: the crank turns primary×gear×final, everything
-            // downstream only gear×final.
+            // CBR600RR: the crank turns primaryxgearxfinal, everything
+            // downstream only gearxfinal.
             crank_inertia_kg_m2: 0.011,
             gearbox_inertia_kg_m2: 0.006,
             clutch_capacity_nm: 220.0,
@@ -317,13 +317,13 @@ impl GearedEngine {
         self.primary * self.gear_ratios[gear] * self.final_drive
     }
 
-    /// Linear-interpolated wide-open-throttle brake torque (N·m).
+    /// Linear-interpolated wide-open-throttle brake torque (N.m).
     pub fn wot_torque(&self, rpm: f64) -> f64 {
         let p = &self.curve;
         let first = p[0];
         if rpm <= first.rpm {
             // Below the sweep, fall away toward a plausible idle torque rather
-            // than holding 61 N·m down to zero rpm.
+            // than holding 61 N.m down to zero rpm.
             // The 0.56 floor is pinned by the measured idle point, not
             // guessed: the engine idles at 2000 rpm with the throttle plate at
             // 14%, so at 2000 rpm a 14% opening must exactly balance friction.
@@ -368,8 +368,8 @@ impl GearedEngine {
         last.fmep_bar
     }
 
-    /// Engine braking from the sweep's own fmep: T = fmep·Vd/4π for a
-    /// four-stroke. About 12 N·m of overrun drag at 10 000 rpm.
+    /// Engine braking from the sweep's own fmep: T = fmep.Vd/4pi for a
+    /// four-stroke. About 12 N.m of overrun drag at 10 000 rpm.
     pub fn motoring_torque(&self, rpm: f64) -> f64 {
         self.fmep_bar(rpm) * 1e5 * self.displacement_m3 / (4.0 * core::f64::consts::PI)
     }
@@ -690,6 +690,6 @@ mod tests {
         let mut e = GearedEngine::sdm26();
         e.reset();
         let rpm = e.optimal_upshift_rpm();
-        assert!(rpm > 10_000.0, "shifting at {rpm} rpm — latched onto a dip");
+        assert!(rpm > 10_000.0, "shifting at {rpm} rpm -- latched onto a dip");
     }
 }

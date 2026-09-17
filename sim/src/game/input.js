@@ -13,8 +13,8 @@
 //
 //   axes[0]  left stick X      steering
 //   axes[1]  left stick Y      (unused)
-//   buttons[6] LT              brake      -- analog, read .value not .pressed
-//   buttons[7] RT              throttle   -- analog
+//   buttons[6] LT              brake -- analog, read .value not .pressed
+//   buttons[7] RT              throttle -- analog
 //   buttons[4] LB              downshift
 //   buttons[5] RB              upshift
 //   buttons[0] A               (hold) clutch-free launch assist

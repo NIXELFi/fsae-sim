@@ -1,4 +1,4 @@
-//! Solvers — three fidelity levels behind one interface.
+//! Solvers -- three fidelity levels behind one interface.
 //!
 //! The ladder exists so a study can pick the cheapest model that still answers
 //! the question, and so the same vehicle, tyre and powertrain can be run

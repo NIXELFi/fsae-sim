@@ -7,13 +7,13 @@
 //!
 //! Three things are swappable independently:
 //!
-//! * **Tyre** — [`tyre::TyreModel`]. Linear-with-ceiling for grip-budget work,
+//! * **Tyre** -- [`tyre::TyreModel`]. Linear-with-ceiling for grip-budget work,
 //!   fitted Magic Formula with combined slip for driving. The tyre owns its own
-//!   load sensitivity, so solvers never have to reason about how μ varies.
-//! * **Powertrain** — [`powertrain::PowertrainModel`]. An idealised drive, the
+//!   load sensitivity, so solvers never have to reason about how mu varies.
+//! * **Powertrain** -- [`powertrain::PowertrainModel`]. An idealised drive, the
 //!   real geared engine on the CFD sweep with a slipping clutch, or an electric
 //!   motor. An EV conversion is a parameter set, not a rewrite.
-//! * **Solver** — [`solver::Solver`], at three fidelity levels: grip-limited
+//! * **Solver** -- [`solver::Solver`], at three fidelity levels: grip-limited
 //!   point mass, transient bicycle, four-corner double track.
 //!
 //! A vehicle is pure data ([`vehicle::VehicleParams`]), so a different car is a
@@ -59,7 +59,7 @@ pub mod prelude {
     pub use crate::vehicle::{sdm25, sdm26, VehicleParams, G};
 }
 
-/// Convenience: the SDM26 as it is actually run — bicycle solver, fitted Magic
+/// Convenience: the SDM26 as it is actually run -- bicycle solver, fitted Magic
 /// Formula, geared engine on the CFD sweep.
 pub fn sdm26_default() -> Box<dyn solver::Solver> {
     solver::build(

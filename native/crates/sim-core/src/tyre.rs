@@ -4,10 +4,10 @@
 //! it owns its own load sensitivity, which is what lets the solvers stay
 //! simple: a double-track model just calls it four times with four loads, and
 //! a bicycle model calls it twice per axle with the inner and outer loads and
-//! sums. Neither needs to know how μ varies with load.
+//! sums. Neither needs to know how mu varies with load.
 //!
 //! That is a change from the JS build, where the bicycle model computed a
-//! load-weighted mean μ for the axle and handed it to the tyre. Summing the two
+//! load-weighted mean mu for the axle and handed it to the tyre. Summing the two
 //! contact patches is the same idea done properly, and it means the bicycle and
 //! double-track solvers share one code path into the tyre.
 
@@ -51,7 +51,7 @@ pub trait TyreModel: Send + Sync {
     /// Forces from one contact patch at vertical load `fz` (N).
     fn forces(&self, slip: Slip, fz: f64) -> TyreForces;
 
-    /// Peak (μx, μy) available at this load. Used by the simplest solvers,
+    /// Peak (mux, muy) available at this load. Used by the simplest solvers,
     /// which never form a slip state at all.
     fn peak_mu(&self, fz: f64) -> (f64, f64);
 
@@ -67,7 +67,7 @@ pub trait TyreModel: Send + Sync {
 /// Level 1: linear up to a friction ceiling.
 ///
 /// Cornering stiffness until the friction circle runs out, then flat. No
-/// falloff past the peak, so it cannot spin — which is exactly what you want
+/// falloff past the peak, so it cannot spin -- which is exactly what you want
 /// when the point is to study grip budget rather than car control.
 #[derive(Debug, Clone)]
 pub struct LinearTyre {
@@ -204,8 +204,8 @@ impl MagicFormulaTyre {
         relaxation_m: f64,
     ) -> Self {
         // E is negative on purpose. A positive E pushes the peak far out in
-        // normalised slip, which forces B — and with it the cornering
-        // stiffness — to absurd values to keep the peak where it belongs.
+        // normalised slip, which forces B -- and with it the cornering
+        // stiffness -- to absurd values to keep the peak where it belongs.
         let (cy, ey) = (1.45, -0.35);
         let (cx, ex) = (1.55, -0.40);
         let by = solve_b(peak_alpha, cy, ey);
@@ -242,7 +242,7 @@ impl MagicFormulaTyre {
         m.clamp(0.25 * base, 1.6 * base)
     }
 
-    /// Cornering stiffness (N/rad) at a given load — a headline tyre number.
+    /// Cornering stiffness (N/rad) at a given load -- a headline tyre number.
     pub fn cornering_stiffness(&self, fz: f64) -> f64 {
         let (_, muy) = self.peak_mu(fz);
         self.by * self.cy * self.ky * muy * fz

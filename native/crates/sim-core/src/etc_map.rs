@@ -1,7 +1,7 @@
 //! Electronic throttle map: accelerator pedal position to plate position.
 //!
 //! Any number of breakpoints, interpolated with a monotone cubic Hermite
-//! spline (Fritsch–Carlson). The monotone part is the whole point: a natural
+//! spline (Fritsch-Carlson). The monotone part is the whole point: a natural
 //! cubic or Catmull-Rom through the same breakpoints overshoots between them,
 //! which on a throttle map means that somewhere in that span pushing the pedal
 //! harder *closes* the throttle.

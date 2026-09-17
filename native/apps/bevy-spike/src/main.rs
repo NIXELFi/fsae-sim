@@ -1,8 +1,8 @@
-//! SDM26 driving simulator — Bevy visual spike.
+//! SDM26 driving simulator -- Bevy visual spike.
 //!
 //! Purpose: judge whether Bevy's renderer is worth the rewrite. So the UI is
 //! deliberately one line of text and the effort goes into the things the WebGL
-//! build cannot do — real shadows, PBR materials, fog and tonemapping.
+//! build cannot do -- real shadows, PBR materials, fog and tonemapping.
 //!
 //! Physics is `sim-core`, the same solver the eventual app would use.
 //!
@@ -56,7 +56,7 @@ struct ShotRequest {
     frames: u32,
 }
 
-/// Where the camera sits. Chase is not just a nicety — you cannot diagnose the
+/// Where the camera sits. Chase is not just a nicety -- you cannot diagnose the
 /// scale or placement of a cockpit from inside it.
 #[derive(Resource, Clone, Copy, PartialEq)]
 enum View {
@@ -89,7 +89,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "SDM26 Driver-in-Loop — Bevy spike".into(),
+                        title: "SDM26 Driver-in-Loop -- Bevy spike".into(),
                         resolution: WindowResolution::new(1600, 900),
                         ..default()
                     }),
@@ -112,8 +112,8 @@ fn main() {
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.62, 0.72, 0.88),
             // The cockpit is a box that faces away from the sun, so almost all
-            // of its light is sky bounce. Too low and the whole interior — the
-            // part the driver actually looks at — goes to mud.
+            // of its light is sky bounce. Too low and the whole interior -- the
+            // part the driver actually looks at -- goes to mud.
             brightness: 450.0,
             ..default()
         })
@@ -493,7 +493,7 @@ fn update_hud(sim: Res<Sim>, mut q: Query<&mut Text, With<Hud>>) {
     let s = sim.solver.state();
     if let Ok(mut text) = q.single_mut() {
         **text = format!(
-            "{:>3.0} km/h    gear {}    {:>5.0} rpm    {:+.2} g lat  {:+.2} g long\n{}  ·  {}",
+            "{:>3.0} km/h    gear {}    {:>5.0} rpm    {:+.2} g lat  {:+.2} g long\n{}  .  {}",
             s.speed() * 3.6,
             tel.gear + 1,
             tel.engine_rpm,

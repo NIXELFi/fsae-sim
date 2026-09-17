@@ -13,6 +13,13 @@ import { dirname, join, relative } from "node:path";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+// The boot check drives WebView2 over its remote-debugging port, which only
+// exists on Windows. Elsewhere there is nothing to test here; say so and pass.
+if (process.platform !== "win32") {
+  console.log("smoke_desktop: WebView2 remote debugging is Windows-only; skipped");
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const exe = join(here, "..", "src-tauri", "target", "release", "fsae-sim.exe");
 const PORT = 9222;
@@ -98,11 +105,6 @@ if (process.platform === "win32") {
   await sleep(1200);
 }
 
-const child = spawn(exe, [], {
-  env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}` },
-  stdio: "ignore",
-  detached: false,
-});
 
 // The exe must be newer than everything it embeds.
 //
@@ -113,6 +115,10 @@ const child = spawn(exe, [], {
 // holding the file -- was followed by a full-green smoke run reporting audio
 // levels from the version before the fix. Silent success on stale artefacts is
 // the worst failure mode this harness can have.
+if (!existsSync(exe)) {
+  console.error(`no binary at ${exe}; build it first (cargo build --release --manifest-path sim/src-tauri/Cargo.toml)`);
+  process.exit(1);
+}
 {
   const exeTime = statSync(exe).mtimeMs;
   const roots = ["src", "index.html", "data"];
@@ -146,10 +152,16 @@ STALE BINARY: ${newest.path} is newer than the exe.
   console.log(`exe is current (newest source: ${relative(join(here, ".."), newest.path)})`);
 }
 
+const child = spawn(exe, [], {
+  env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}` },
+  stdio: "ignore",
+  detached: false,
+});
+
 let code = 1;
 try {
   const attached = await attachWhenReady();
-  if (!attached) throw new Error("no ready page — WebView2 never loaded the frontend");
+  if (!attached) throw new Error("no ready page -- WebView2 never loaded the frontend");
   const { ws, page } = attached;
   console.log(`page: ${page.title || "(loading)"}`);
   console.log(`url:  ${page.url}`);

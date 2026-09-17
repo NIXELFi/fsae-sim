@@ -169,7 +169,7 @@ export class JitterFilter {
  * samples wide at 48 kHz -- far faster than a 1 ms attack can respond -- so the
  * gain was always set by the quiet stretch between pulses, and every pulse then
  * arrived into a gain far too high and slammed into the output clamp. Measured
- * output RMS was 0.99 against a ±1 clamp at every operating point: not levelled
+ * output RMS was 0.99 against a +-1 clamp at every operating point: not levelled
  * audio, a square wave.
  *
  * Averaging over 150 ms sets the *average* level and leaves transients alone.

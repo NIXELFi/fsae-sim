@@ -1,6 +1,6 @@
 """Build the simulator's data files from the Helios sources.
 
-Two inputs, both real team data — nothing here is invented:
+Two inputs, both real team data -- nothing here is invented:
 
   1. The traced 2026 FSAE Michigan autocross + endurance courses, from the
      Helios lap-sim's "-visual" track JSONs (0.5 m-spaced centreline in metres,
@@ -17,17 +17,25 @@ import csv
 import json
 import math
 import os
+import sys
 
+# Where Helios is checked out. `--helios <dir>` or $HELIOS_ROOT; the default
+# is where it lives on the machine this was written on. The tracks moved from
+# modules/oracle to modules/cfd when the lap sim was folded into the CFD module.
+HELIOS_ROOT = os.path.expanduser(os.environ.get("HELIOS_ROOT", "~/Developer/helios"))
+if "--helios" in sys.argv:
+    HELIOS_ROOT = os.path.expanduser(sys.argv[sys.argv.index("--helios") + 1])
 HELIOS = os.path.join(
-    os.path.dirname(__file__),
-    "..", "..", "helios-dev", "apps", "desktop", "src", "modules", "oracle",
+    HELIOS_ROOT, "apps", "desktop", "src", "modules", "cfd",
     "lib", "performance", "tracks",
 )
 SWEEP = os.path.join(
-    os.path.dirname(__file__),
-    "..", "..", "helios-dev", "crates", "engine-sim", "tests", "fixtures",
+    HELIOS_ROOT, "crates", "engine-sim", "tests", "fixtures",
     "sweep_python_v1", "sdm26_characteristic_4k_to_15k.csv",
 )
+for _p in (HELIOS, SWEEP):
+    if not os.path.exists(_p):
+        sys.exit(f"prepare_data: {_p} not found; pass --helios <dir> or set HELIOS_ROOT")
 OUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
 # FSAE D.11.1: autocross/endurance course minimum width is 3.5 m. The trace

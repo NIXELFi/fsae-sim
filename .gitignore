@@ -1,0 +1,4 @@
+# Python bytecode from the tools/ scripts.
+__pycache__/
+*.pyc
+.DS_Store
