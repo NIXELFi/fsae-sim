@@ -397,6 +397,8 @@ class Game {
     this.input.carSteeringRatio = SDM26.steeringRatio;
     // For the keyboard's speed-sensitive lock: last frame's speed is fine.
     this.input.carSpeed = this.car.speed;
+    this.input.carYawRateDegS = this.car.telemetry.yawRateDegS;
+    this.input.driving = this.driving;
     this.input.carWheelbaseM = SDM26.wheelbaseM;
     this.input.carPeakSlipDeg = TIRE_INFO.peakSlipAngleDeg;
     this.car.steeringServo = this.input.steeringServo();
@@ -699,14 +701,14 @@ class Game {
 
   openEtcEditor() {
     this.setPaused(true);
-    this.dom.pauseHint.hidden = true;
+    this.dom.pauseMenu.hidden = true;
     this.etcEditor.open();
   }
 
   /** Back to the home screen, with the run left paused behind it. */
   goHome() {
     this.setPaused(true);
-    this.dom.pauseHint.hidden = true;
+    this.dom.pauseMenu.hidden = true;
     this.dom.menu.hidden = false;
     this.audio.setEnabled(false);
     // The run is still there -- offer to go back to it rather than bin it.
@@ -721,9 +723,26 @@ class Game {
 
   setPaused(on) {
     this.paused = on;
-    this.dom.pauseHint.hidden = !on;
+    this.dom.pauseMenu.hidden = !on;
     // A paused engine is silent, not frozen at the last operating point.
     this.audio.setRunning(!on);
+    this.input.driving = this.driving;
+    this.syncPointer();
+  }
+
+  /**
+   * Mouse steering wants the pointer captured while driving (movementX keeps
+   * coming at the window edge, and the cursor is out of the way) and
+   * released the moment a menu is up.
+   */
+  syncPointer() {
+    const want = this.driving && !!this.input.profile.mouse?.enabled;
+    const locked = document.pointerLockElement === this.dom.gl;
+    try {
+      if (want && !locked) this.dom.gl.requestPointerLock?.();
+      else if (!want && locked) document.exitPointerLock?.();
+    } catch { /* not available (some webviews); movementX still works unlocked */ }
+    this.dom.gl.style.cursor = want ? "none" : "";
   }
 
   /** True while the driver is actually in the run (not menu, pause, editor). */
@@ -745,7 +764,7 @@ const dom = {
   autoToggle: document.getElementById("auto"),
   audioToggle: document.getElementById("sound"),
   padStatus: document.getElementById("padStatus"),
-  pauseHint: document.getElementById("pauseHint"),
+  pauseMenu: document.getElementById("pauseMenu"),
   loadNote: document.getElementById("loadNote"),
   specs: document.getElementById("specs"),
   etcOverlay: document.getElementById("etcOverlay"),
@@ -1004,6 +1023,40 @@ async function boot() {
   dom.startBtn.addEventListener("click", () => enterSim(!game.started));
   dom.restartBtn.addEventListener("click", () => enterSim(true));
 
+  // The pause menu. The keys still work (input.js); these are the same
+  // actions for a mouse.
+  document.getElementById("pauseResume").addEventListener("click", () => { game.setPaused(false); dom.gl.focus(); });
+  document.getElementById("pauseRestart").addEventListener("click", () => { game.restart(); game.setPaused(false); dom.gl.focus(); });
+  document.getElementById("pauseHome").addEventListener("click", () => game.goHome());
+  const quitBtn = document.getElementById("pauseQuit");
+  if (isDesktop) {
+    quitBtn.hidden = false;
+    quitBtn.addEventListener("click", () => {
+      const w = window.__TAURI__?.window;
+      const win = w?.getCurrentWindow?.() ?? w?.getCurrent?.();
+      win?.close?.();
+    });
+  }
+  // Esc on the home screen with a run behind it goes back to the run, the
+  // way Esc from the run comes here.
+  addEventListener("keydown", (e) => {
+    if (e.code === "Escape" && !dom.menu.hidden && game.started && !game.etcEditor.isOpen &&
+        !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? "")) {
+      enterSim(false);
+    }
+  });
+  // Clicking the scene while driving re-captures the pointer after the
+  // browser released it (Esc under pointer lock releases it silently).
+  dom.gl.addEventListener("click", () => game.syncPointer());
+  document.addEventListener("pointerlockchange", () => {
+    // Under pointer lock the browser consumes Esc to release the lock and
+    // the page never sees the key. So a lock that goes away while we are
+    // driving is the driver pressing Esc: open the menu.
+    if (document.pointerLockElement !== dom.gl && game.driving && game.input.profile.mouse?.enabled) {
+      game.setPaused(true);
+    }
+  });
+
   // ---- launch requests: `?track=mis&profile=wheel&autostart=1` in a browser,
   // `fsae-sim --track mis --profile wheel --autostart` on the desktop, and the
   // same again if a running app is launched a second time (Helios, a shortcut).
@@ -1048,6 +1101,7 @@ async function boot() {
     try {
       if (!dom.menu.hidden) {
         // Still poll so the pad-connected badge is live in the menu.
+        game.input.driving = false;
         game.input.poll();
         game.holdNative();
       } else {

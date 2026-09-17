@@ -216,13 +216,22 @@ export const PROFILES = {
     // input; the software ramp is the only thing standing between the driver
     // and full lock in one frame.
     steering: steering({
-      maxRateDegPerS: 180,
-      accelDegPerS2: 700,
-      lagS: 0.10,
-      slipCapDeg: 8,
+      maxRateDegPerS: 220,
+      accelDegPerS2: 900,
+      lagS: 0.08,
+      slipCapDeg: 7,
       rateSpeedRefMps: 12,
       deadzone: 0,
       expo: 1,
+      // A key is a step; these turn it into a hand. The command ramps to
+      // full over `keyRampUpS` and back over `keyRampDownS` (release is
+      // quicker: letting go is always the safe direction), and the car's
+      // yaw rate feeds back as a little counter-steer, which is what a
+      // driver does by reflex and a key cannot. 0.0035 lock per deg/s: a
+      // 40 deg/s slide gets 14% of lock against it before the driver reacts.
+      keyRampUpS: 0.28,
+      keyRampDownS: 0.12,
+      yawDampPerDegS: 0.0035,
       // The lock a key can reach shrinks with speed: Ackermann for 1.4 g plus
       // the peak slip angle plus 3 degrees. Full lock up to ~8 m/s, ~17 deg
       // at 15 m/s, ~14.5 deg at 20 m/s. See `usableLockFrac`. Measured on the
@@ -237,12 +246,20 @@ export const PROFILES = {
     // has a position, so it is not ramped, but it has no stop either, so it
     // gets the same speed-sensitive lock as the keys.
     mouse: {
-      enabled: false,
+      // On by default: a mouse has a position, which is what steering is.
+      // Horizontal movement turns a virtual rim; keys still steer if you
+      // would rather, and win whenever one is held.
+      enabled: true,
       /** Screen pixels for full lock. */
-      pixelsForFullLock: 420,
-      /** Recentres when not moving, like a self-centring wheel. */
+      pixelsForFullLock: 520,
+      /** Recentres when the mouse is still, like a self-centring wheel. */
       selfCentre: true,
-      selfCentreRateDegPerS: 90,
+      /** Road-wheel deg/s at speed; scales down toward standstill like a real rack. */
+      selfCentreRateDegPerS: 70,
+      /** One-pole on the rim position, s. Takes the jitter out of a hand on a mouse. */
+      smoothingS: 0.035,
+      /** The rim's own servo: a hand on a wheel, not a key. No slip cap. */
+      servo: { maxRateDegPerS: 720, accelDegPerS2: 20000, lagS: 0.03, slipCapDeg: 0, rateSpeedRefMps: 0 },
     },
     pedals: {
       // Ramped: 0 to full in 0.4 s on the way down, off in 0.1 s. See
@@ -803,6 +820,22 @@ export function editableSettings(profile) {
           unit: " deg/s",
           min: 0, max: 400, step: 5,
         },
+        {
+          path: "mouse.smoothingS",
+          label: "Smoothing",
+          unit: " s",
+          min: 0, max: 0.15, step: 0.005,
+        },
+      ],
+    });
+  }
+  if (profile.kind === "keyboard") {
+    rows.push({
+      group: "Keys",
+      items: [
+        { path: "steering.keyRampUpS", label: "Turn-in ramp", unit: " s", min: 0, max: 0.8, step: 0.02 },
+        { path: "steering.keyRampDownS", label: "Release ramp", unit: " s", min: 0, max: 0.5, step: 0.02 },
+        { path: "steering.yawDampPerDegS", label: "Yaw damping (counter-steer assist)", unit: "", min: 0, max: 0.01, step: 0.0005 },
       ],
     });
   }

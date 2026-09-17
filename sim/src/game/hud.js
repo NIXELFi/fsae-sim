@@ -405,12 +405,8 @@ export class Hud {
     ctx.textAlign = "center";
     ctx.fillStyle = "#fff";
     ctx.font = "600 40px ui-monospace, monospace";
-    ctx.fillText("PAUSED", W / 2, H / 2 - 6);
-    ctx.font = "13px ui-monospace, monospace";
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
-    ctx.fillText("Menu / Esc  resume", W / 2, H / 2 + 22);
-    ctx.fillText("L3 / H  home screen", W / 2, H / 2 + 42);
-    ctx.fillText("View / Backspace  restart run", W / 2, H / 2 + 62);
+    // The pause menu (index.html) carries the title and the actions; the
+    // HUD only dims the frame behind it.
   }
 }
 

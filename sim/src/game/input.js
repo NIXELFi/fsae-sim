@@ -83,6 +83,15 @@ export class Input {
     /** Ramped keyboard pedals (see controlProfiles.stepPedal) and their clock. */
     this.kbPedal = { throttle: 0, brake: 0 };
     this._kbPedalAt = 0;
+    /** Ramped key steering command, -1..1, before the speed lock. */
+    this.kbSteer = 0;
+    /** Filtered mouse rim position; `mouseSteer` is the raw accumulator. */
+    this.mouseSteerFiltered = 0;
+    this._mouseAt = 0;
+    /** Car yaw rate, deg/s, set by the game for the keyboard damping assist. */
+    this.carYawRateDegS = 0;
+    /** Set by the game: the run is live (not menu, pause, editor). Gates the mouse. */
+    this.driving = false;
     /**
      * The rim, for force feedback: measured angle in degrees (right positive,
      * as the device reports it) and the car's lock at the rim. Only meaningful
@@ -119,8 +128,11 @@ export class Input {
     addEventListener("mousemove", (e) => {
       const m = this.profile.mouse;
       if (!m || !m.enabled) return;
+      // Only while driving: a hand crossing the settings panel is not steering.
+      if (!this.driving) return;
       const span = Math.max(m.pixelsForFullLock, 1);
       this.mouseSteer = Math.max(-1, Math.min(1, this.mouseSteer + (-e.movementX * 2) / span));
+      this._mouseAt = performance.now();
     });
 
     addEventListener("gamepadconnected", (e) => {
@@ -169,6 +181,17 @@ export class Input {
    * a rack actually can.
    */
   steeringServo() {
+    const m = this.profile.mouse;
+    // A mouse rim is a hand on a wheel: fast, no slip cap. It takes over the
+    // servo whenever the mouse is the thing steering (moved recently and no
+    // key held); the keys keep their slower, capped servo.
+    if (this.usingMouse && m?.servo) {
+      const ms = m.servo;
+      return {
+        maxRateDegPerS: ms.maxRateDegPerS, accelDegPerS2: ms.accelDegPerS2, lagS: ms.lagS,
+        slipCapDeg: ms.slipCapDeg ?? 0, rateSpeedRefMps: ms.rateSpeedRefMps ?? 0, rateSpeedExp: 1.5,
+      };
+    }
     const st = this.profile.steering;
     return {
       maxRateDegPerS: st.maxRateDegPerS,
@@ -379,26 +402,69 @@ export class Input {
       maxSteerDeg: this.carLockDeg ?? 28,
       peakSlipAngleDeg: this.carPeakSlipDeg,
     });
-    if (kSteer !== 0 && steer === 0) steer = kSteer * lockFrac;
+    // Wall-clock step for everything ramped below: poll() runs once per
+    // rendered frame, and a ramp must not depend on the frame rate.
+    const now = performance.now();
+    const dt = this._kbPedalAt ? Math.min(0.1, (now - this._kbPedalAt) / 1000) : 0;
+    this._kbPedalAt = now;
 
-    // Mouse steering, when the keyboard profile has it switched on. It decays
-    // back to centre like a self-centring wheel, otherwise the car holds a
-    // steering angle forever after the mouse stops moving.
-    const mouse = prof.mouse;
-    if (mouse && mouse.enabled && steer === 0) {
-      steer = this.mouseSteer * lockFrac;
-      if (mouse.selfCentre) {
-        const decay = (mouse.selfCentreRateDegPerS / Math.max(1, 28)) * (1 / 60);
-        this.mouseSteer -= Math.sign(this.mouseSteer) * Math.min(Math.abs(this.mouseSteer), decay);
-      }
-    }
-    // Keyboard pedals are ramped rather than stepped, at the rates the
-    // profile sets (no rates: a plain step, as before). Timed off the wall
-    // clock because poll() is called once per rendered frame.
+    // ---- keys: a ramped command with a yaw-rate reflex ----
+    // The key is a step; the command it produces is not. It ramps up over
+    // keyRampUpS and back over keyRampDownS (release is the safe direction,
+    // so it is quicker), and the car's yaw rate feeds back as a small
+    // counter-steer, the reflex a driver has and a key does not. Both are
+    // profile settings; zero ramps and zero damping give the old step.
+    const stc = prof.steering ?? {};
+    const lock = Math.max(1, this.carLockDeg ?? 28);
     {
-      const now = performance.now();
-      const dt = this._kbPedalAt ? Math.min(0.1, (now - this._kbPedalAt) / 1000) : 0;
-      this._kbPedalAt = now;
+      const up = Math.max(stc.keyRampUpS ?? 0, 1e-3);
+      const down = Math.max(stc.keyRampDownS ?? 0, 1e-3);
+      const target = kSteer;
+      const towardCentre = target === 0 || Math.sign(target) !== Math.sign(this.kbSteer);
+      const rate = (towardCentre ? 1 / down : 1 / up) * dt;
+      this.kbSteer += Math.max(-rate, Math.min(rate, target - this.kbSteer));
+      if (Math.abs(this.kbSteer) < 1e-4) this.kbSteer = 0;
+    }
+    const keySteering = kSteer !== 0 || this.kbSteer !== 0;
+    if (keySteering && steer === 0) {
+      let cmd = this.kbSteer * lockFrac;
+      // Yaw damping: yaw rate is positive turning left, steer is positive
+      // left, so the term opposes the rotation. Only while the car moves.
+      const damp = (stc.yawDampPerDegS ?? 0) * Math.min(1, (this.carSpeed ?? 0) / 4);
+      cmd -= (this.carYawRateDegS ?? 0) * damp;
+      steer = clamp(cmd, -1, 1);
+    }
+
+    // ---- mouse: a virtual rim ----
+    // Horizontal movement turns a rim that has a position and a lock, like
+    // the real one. The position is low-pass filtered (a hand on a mouse
+    // jitters), and when the mouse is still the rim self-centres at a rate
+    // that scales with speed, the way aligning torque does: standing still
+    // it stays where you put it, at speed it comes back on its own. Keys
+    // win while one is held.
+    const mouse = prof.mouse;
+    this.usingMouse = !!(mouse && mouse.enabled && !keySteering && now - this._mouseAt < 1500);
+    if (mouse && mouse.enabled && steer === 0 && !keySteering) {
+      const idle = now - this._mouseAt > 60;
+      if (mouse.selfCentre && idle && dt > 0) {
+        const speedScale = Math.min(1, (this.carSpeed ?? 0) / 8);
+        const rate = ((mouse.selfCentreRateDegPerS ?? 0) / lock) * speedScale * dt;
+        this.mouseSteer -= Math.sign(this.mouseSteer) * Math.min(Math.abs(this.mouseSteer), rate);
+      }
+      const tau = Math.max(mouse.smoothingS ?? 0, 0);
+      const k = tau > 0 && dt > 0 ? 1 - Math.exp(-dt / tau) : 1;
+      this.mouseSteerFiltered += (this.mouseSteer - this.mouseSteerFiltered) * k;
+      steer = this.mouseSteerFiltered * lockFrac;
+    } else if (keySteering) {
+      // A key took over: fold the rim back to where the car is pointed so
+      // letting go does not snap to a stale mouse position.
+      this.mouseSteer = this.kbSteer;
+      this.mouseSteerFiltered = this.kbSteer;
+    }
+
+    // Keyboard pedals are ramped rather than stepped, at the rates the
+    // profile sets (no rates: a plain step, as before).
+    {
       const thrCfg = prof.pedals?.throttle ?? {};
       const brkCfg = prof.pedals?.brake ?? {};
       this.kbPedal.throttle = stepPedal(this.kbPedal.throttle, kThrottle, thrCfg, dt);
