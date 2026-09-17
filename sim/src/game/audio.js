@@ -65,7 +65,8 @@ export class EngineAudio {
     this.ctx = ctx;
 
     this.master = ctx.createGain();
-    this.master.gain.value = this.mix.master;
+    // Honour the sound toggle: it is applied before the context exists.
+    this.master.gain.value = this.enabled ? this.mix.master : 0;
     this.master.connect(ctx.destination);
 
     // ---- engine: three harmonics through a throttle-controlled lowpass ----
@@ -159,6 +160,22 @@ export class EngineAudio {
   engineSource() {
     if (!this.ready) return "off";
     return this.usingModel ? "physical model" : "oscillator fallback";
+  }
+
+  /**
+   * Pause or resume the whole context. Paused, hidden or on the menu the
+   * engine must go quiet; left running it holds the last operating point
+   * (12,000 rpm wide open, say) for as long as the window is in the
+   * background, and keeps rendering on the audio thread.
+   */
+  setRunning(on) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (on) {
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    } else if (ctx.state === "running") {
+      ctx.suspend().catch(() => {});
+    }
   }
 
   setEnabled(on) {

@@ -124,6 +124,9 @@ class Game {
       getMap: () => this.etc,
       onChange: (map) => { saveEtc(map); dom.etcSummary.innerHTML = etcSummary(map); this.syncFfb(); updateSession(); },
       getLive: () => ({ pedal: this.pedal, plate: this.plate }),
+      // Escape closes the editor AND reaches the input layer as a pause
+      // edge on the same frame; swallow that one so Done and Escape agree.
+      onClose: () => { this.setPaused(false); this.swallowPauseEdge = true; },
     });
 
     // Live setup adjustment from the d-pad. Writes into the same params object
@@ -335,7 +338,8 @@ class Game {
     const p = this.track.startPose();
     this.car.respawn(p.x, p.y, p.psi, 0);
     this.track.resetCones();
-    this.timing.reset();
+    // A restart is "try again": the reference the driver is chasing stays.
+    this.timing.reset({ keepBest: true });
     this.ggTrail.length = 0;
     this.clock = 0;
     this.started = true;
@@ -350,7 +354,12 @@ class Game {
   syncFfb() {
     if (!this.useNative || !this.car?.native) return;
     this.car.pushControls(this.input.profile, this.etc?.points);
-    rigNative.status().then((st) => { this.rigState = st; this.controlsPanel?.render(); });
+    // The command is queued for the rig thread; status read now is the old
+    // state, so read again once it has had a tick or two to act on it.
+    const refresh = () => rigNative.status().then((st) => { this.rigState = st; this.controlsPanel?.updateStatus(); });
+    refresh();
+    clearTimeout(this._statusTimer);
+    this._statusTimer = setTimeout(refresh, 400);
   }
 
   /** After any vehicle parameter edit: the rig holds its own copy. */
@@ -404,7 +413,10 @@ class Game {
 
     if (this.input.edges.mapEditor) { this.openEtcEditor(); return; }
     if (this.input.edges.home) { this.goHome(); return; }
-    if (this.input.edges.pause) this.setPaused(!this.paused);
+    if (this.input.edges.pause && !this.swallowPauseEdge) this.setPaused(!this.paused);
+    this.swallowPauseEdge = false;
+    // The pause overlay offers a restart, so it has to work from there.
+    if (this.input.edges.restart) { this.restart(); this.setPaused(false); }
     if (this.paused) { this.holdNative(); return; }
 
     this.clock += dt;
@@ -429,7 +441,6 @@ class Game {
       updateSession();
       this.timing.say(`TRACTION CONTROL ${this.assists.traction ? "ON" : "OFF"}`, 1.5);
     }
-    if (this.input.edges.restart) this.restart();
     if (this.input.edges.reset) this.recover();
 
     const pt = this.powertrain;
@@ -660,7 +671,8 @@ class Game {
       brake: this.brakeApplied,
       etcName: this.etc.name,
       setup: this.setup.state(this.clock),
-      lapTimeText: fmt(t.state === "staged" ? 0 : t.lapTime),
+      // After the flag the big clock shows the run that just finished, not 0.
+      lapTimeText: fmt(t.state === "staged" ? 0 : t.state === "finished" && last ? last.total : t.lapTime),
       lastLapText: last ? fmt(last.total) : "--.---",
       bestLapText: t.best ? fmt(t.best.total) : "--.---",
       lap: t.lap,
@@ -710,6 +722,13 @@ class Game {
   setPaused(on) {
     this.paused = on;
     this.dom.pauseHint.hidden = !on;
+    // A paused engine is silent, not frozen at the last operating point.
+    this.audio.setRunning(!on);
+  }
+
+  /** True while the driver is actually in the run (not menu, pause, editor). */
+  get driving() {
+    return this.started && this.dom.menu.hidden && !this.paused && !this.etcEditor.isOpen;
   }
 }
 
@@ -881,7 +900,18 @@ async function boot() {
 
   dom.startBtn.disabled = true;
   dom.loadNote.textContent = "Loading course and engine data...";
-  const { track, curve } = await game.load(dom.trackSel.value);
+  let track, curve;
+  try {
+    ({ track, curve } = await game.load(dom.trackSel.value));
+  } catch (err) {
+    // A missing data file used to hang here with the button greyed out and
+    // nothing said. Say what is missing; the course selector retries.
+    console.error(err);
+    dom.loadNote.textContent = `Could not load the course or engine data: ${err.message ?? err}`;
+    dom.loadNote.classList.add("error");
+    return;
+  }
+  dom.loadNote.classList.remove("error");
 
   const showCourse = (track, curve) => {
     const pt = game.powertrain;
@@ -901,14 +931,35 @@ async function boot() {
   dom.loadNote.textContent = "";
   dom.startBtn.disabled = false;
 
+  let loadSeq = 0;
   dom.trackSel.addEventListener("change", async () => {
+    const seq = ++loadSeq;
     dom.startBtn.disabled = true;
     dom.loadNote.textContent = "Loading course...";
-    const loaded = await game.load(dom.trackSel.value);
-    showCourse(loaded.track, loaded.curve);
-    dom.loadNote.textContent = "";
+    dom.loadNote.classList.remove("error");
+    try {
+      const loaded = await game.load(dom.trackSel.value);
+      if (seq !== loadSeq) return; // a later change won
+      showCourse(loaded.track, loaded.curve);
+      dom.loadNote.textContent = "";
+    } catch (err) {
+      if (seq !== loadSeq) return;
+      console.error(err);
+      dom.loadNote.textContent = `Could not load that course: ${err.message ?? err}`;
+      dom.loadNote.classList.add("error");
+      return;
+    }
     dom.startBtn.disabled = false;
   });
+
+  // Losing the window (alt-tab, minimise, another app grabbing focus) pauses
+  // the run: keyboard state is already cleared on blur, but the rig would
+  // keep the last throttle and the engine would hold its note.
+  const holdOnLeave = () => { if (game.driving) game.setPaused(true); game.holdNative(); };
+  window.addEventListener("blur", holdOnLeave);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) holdOnLeave(); });
+  // A reload restarts the rig; let the old thread release the wheel first.
+  window.addEventListener("beforeunload", () => { if (rigNative.available()) rigNative.stop(); });
   window.addEventListener("resize", () => { if (game?.track) drawCoursePlan(dom.coursePlan, game.track); });
 
   const sync = () => {
@@ -956,17 +1007,30 @@ async function boot() {
   window.__sim = game;
 
   let last = performance.now();
+  let frameErrors = 0;
   const frame = (now) => {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-    if (!dom.menu.hidden) {
-      // Still poll so the pad-connected badge is live in the menu.
-      game.input.poll();
-      game.holdNative();
-    } else {
-      game.update(dt);
+    try {
+      if (!dom.menu.hidden) {
+        // Still poll so the pad-connected badge is live in the menu.
+        game.input.poll();
+        game.holdNative();
+      } else {
+        game.update(dt);
+      }
+      game.render();
+    } catch (err) {
+      // A throw here used to end the loop: a frozen frame with no message.
+      // Report the first one loudly, then keep going; the rig's watchdog and
+      // the pause both rely on this loop running.
+      if (frameErrors++ === 0) {
+        console.error("frame error", err);
+        dom.loadNote.textContent = `Something went wrong in the game loop: ${err.message ?? err}`;
+        dom.loadNote.classList.add("error");
+      }
+      if (frameErrors > 300) return; // hopeless; stop burning the CPU
     }
-    game.render();
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

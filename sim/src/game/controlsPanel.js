@@ -58,6 +58,10 @@ export class ControlsPanel {
     const profile = s.active();
 
     this.root.innerHTML = "";
+    // Every live-readout loop below captures this; a re-render retires the
+    // old ones instead of leaving them writing to detached nodes forever.
+    this._gen = (this._gen || 0) + 1;
+    const gen = this._gen;
 
     const head = el("div", "ctl-head");
     head.append(el("h3", null, "Controls"));
@@ -241,18 +245,8 @@ export class ControlsPanel {
     );
 
     const st = this.game?.rigState;
-    let line;
-    if (!st || !st.ffbSupported) {
-      line = "Not available here: force feedback needs the Windows desktop build (DirectInput). " +
-        "In a browser the torque is still computed and shown below.";
-    } else if (st.wheelPresent && st.ffbActive) {
-      line = `Driving ${st.wheelName || "the wheel"} natively at 1 kHz.`;
-    } else if (st.wheelPresent) {
-      line = `Reading ${st.wheelName} for steering and pedals, but not driving it: ${st.wheelError}`;
-    } else {
-      line = `No wheel: ${st.wheelError || "none found"}. Plug the base in, put it in PC mode, and pick it below.`;
-    }
-    box.append(el("small", "ctl-hint", line));
+    this.statusEl = el("small", "ctl-hint", this.rigStatusLine());
+    box.append(this.statusEl);
     if (st?.wheelPresent && st.deviceNames?.length > 1) {
       box.append(el("small", "ctl-hint", `Also reading: ${st.deviceNames.slice(1).join(", ")} (axes 8 and up, buttons 32 and up).`));
     }
@@ -305,7 +299,7 @@ export class ControlsPanel {
     box.append(meter, read);
 
     const tick = () => {
-      if (!this.root.isConnected) return;
+      if (!this.root.isConnected || gen !== this._gen) return;
       const last = this.game?.ffb?.last;
       if (last) {
         const c = last.command;
@@ -322,6 +316,27 @@ export class ControlsPanel {
     };
     requestAnimationFrame(tick);
     return box;
+  }
+
+  /** The one line that says what the rig is doing with the wheel. */
+  rigStatusLine() {
+    const st = this.game?.rigState;
+    if (!st || !st.ffbSupported) {
+      return "Not available here: force feedback needs the Windows desktop build (DirectInput). " +
+        "In a browser the torque is still computed and shown below.";
+    }
+    if (st.wheelPresent && st.ffbActive) return `Driving ${st.wheelName || "the wheel"} natively at 1 kHz.`;
+    if (st.wheelPresent) return `Reading ${st.wheelName} for steering and pedals, but not driving it: ${st.wheelError}`;
+    return `No wheel: ${st.wheelError || "none found"}. Plug the base in, put it in PC mode, and pick it below.`;
+  }
+
+  /**
+   * Refresh the rig status without rebuilding the panel. A full render() in
+   * the middle of a slider drag replaces the slider under the pointer and the
+   * drag dies, so the per-change path must only touch this line.
+   */
+  updateStatus() {
+    if (this.statusEl?.isConnected) this.statusEl.textContent = this.rigStatusLine();
   }
 
   mouseToggle(id, profile) {
@@ -371,7 +386,7 @@ export class ControlsPanel {
     box.append(monitor);
 
     const tick = () => {
-      if (!this.root.isConnected) return; // panel replaced; stop the loop
+      if (!this.root.isConnected || gen !== this._gen) return; // panel replaced; stop the loop
       const axes = this.input.rawAxes || [];
       monitor.textContent = axes.length
         ? axes.map((v, i) => `axis ${i}: ${v >= 0 ? " " : ""}${v.toFixed(3)}`).join("\n")

@@ -22,6 +22,7 @@ export class EtcEditor {
     this.getMap = opts.getMap;
     this.onChange = opts.onChange ?? (() => {});
     this.getLive = opts.getLive ?? (() => null);
+    this.onClose = opts.onClose ?? null;
     this.isOpen = false;
     this.selected = -1;
     this.dragging = -1;
@@ -376,7 +377,11 @@ export class EtcEditor {
         if (!this.isOpen) { this._raf = null; return; }
         // Only the live marker needs redrawing at frame rate.
         const live = this.getLive();
-        if (live && (live.pedal !== this._lastPedal)) {
+        // Redraw for a real pedal move, never for analog jitter, and never
+        // while the driver is typing into the table (a rebuild eats the edit).
+        const typing = this.root.contains(document.activeElement) &&
+          /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+        if (live && !typing && Math.abs(live.pedal - (this._lastPedal ?? -1)) > 0.004) {
           this._lastPedal = live.pedal;
           this._render();
         }
@@ -387,8 +392,10 @@ export class EtcEditor {
   }
 
   close() {
+    if (!this.isOpen) return;
     this.isOpen = false;
     this.root.hidden = true;
+    this.onClose?.();
   }
 }
 

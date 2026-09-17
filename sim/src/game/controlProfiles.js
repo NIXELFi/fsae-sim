@@ -539,6 +539,8 @@ function overlay(base, patch) {
 export class ControlSettings {
   constructor() {
     this.activeId = "keyboard";
+    /** The driver chose the profile by hand; device detection must not override it. Persisted. */
+    this.pinned = false;
     /** @type {Record<string, object>} profile id -> sparse override tree */
     this.overrides = {};
     this.load();
@@ -631,7 +633,7 @@ export class ControlSettings {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ activeId: this.activeId, overrides: this.overrides }),
+        JSON.stringify({ activeId: this.activeId, pinned: this.pinned, overrides: this.overrides }),
       );
     } catch {
       // Private browsing, or storage disabled. Settings just do not persist.
@@ -644,6 +646,7 @@ export class ControlSettings {
       if (!raw) return;
       const data = JSON.parse(raw);
       if (data && PROFILES[data.activeId]) this.activeId = data.activeId;
+      if (data && typeof data.pinned === "boolean") this.pinned = data.pinned;
       if (data && data.overrides && typeof data.overrides === "object") {
         this.overrides = data.overrides;
       }

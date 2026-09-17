@@ -45,7 +45,7 @@ export class Input {
     this.settings = new ControlSettings();
     this.profile = this.settings.active();
     /** Set when the driver picks a profile by hand, so detection stops overriding it. */
-    this.pinned = false;
+    this.pinned = !!this.settings.pinned;
     /** Raw pedal readings, for the calibration UI to watch. */
     this.rawAxes = [];
     this.mouseSteer = 0;
@@ -150,6 +150,7 @@ export class Input {
   /** Switch profile by hand. Stops device detection from overriding it. */
   setProfile(id) {
     this.pinned = true;
+    this.settings.pinned = true;
     this.settings.setActive(id);
     this.profile = this.settings.active();
     this.onProfileChange?.(id, this.padName);
@@ -475,4 +476,5 @@ function analog(button) {
   return v > 0.02 ? Math.min(1, v) : button.pressed ? 1 : 0;
 }
 
-function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
+// NaN fails both comparisons and would pass straight through into the car.
+function clamp(x, lo, hi) { return Number.isFinite(x) ? (x < lo ? lo : x > hi ? hi : x) : 0; }

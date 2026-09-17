@@ -17,24 +17,33 @@ export class Timing {
     this.reset();
   }
 
-  reset() {
+  reset({ keepBest = false } = {}) {
+    const best = keepBest ? this.best : null;
+    const bestRaw = keepBest ? this.bestRaw : null;
+    const bestSectors = keepBest ? this.bestSectors : [];
     this.state = "staged";       // staged -> running -> finished
     this.elapsed = 0;
     this.lap = 0;
     this.lapStart = 0;
     this.laps = [];              // { raw, cones, off, total }
-    this.best = null;
-    this.bestRaw = null;
+    this.best = best;
+    this.bestRaw = bestRaw;
     this.cones = 0;
     this.offCourse = 0;
     this.wasOffCourse = false;
     this.prevS = 0;
     this.sectorIndex = 0;
     this.sectorSplits = [];
-    this.bestSectors = [];
+    this.bestSectors = bestSectors;
     this.lastSplitDelta = null;
     this.message = "";
     this.messageUntil = 0;
+    // Messages time out on this, not on lap time: lap time is 0 while
+    // staged and frozen after the flag, and a toast must still clear then.
+    this.clock = 0;
+    // A lap only counts once the car has been round the far side of it;
+    // reversing over the line and rolling forward again is not a lap.
+    this.passedHalf = false;
   }
 
   get lapTime() { return this.state === "running" ? this.elapsed - this.lapStart : 0; }
@@ -46,7 +55,7 @@ export class Timing {
 
   say(text, seconds = 2.5) {
     this.message = text;
-    this.messageUntil = this.elapsed + seconds;
+    this.messageUntil = this.clock + seconds;
   }
 
   /**
@@ -56,6 +65,8 @@ export class Timing {
    * @param newCones  cones knocked down since the last call
    */
   update(dt, loc, moving, newCones) {
+    this.clock += dt;
+    if (this.clock > this.messageUntil) this.message = "";
     if (this.state === "finished") return;
 
     if (this.state === "staged") {
@@ -109,7 +120,11 @@ export class Timing {
     const L = this.track.length;
     if (this.track.closed) {
       // Wrap from the end of the lap back to the start means a completed lap.
-      if (this.prevS > L * 0.7 && loc.s < L * 0.3) this.completeLap();
+      if (loc.s > L * 0.4 && loc.s < L * 0.6) this.passedHalf = true;
+      if (this.prevS > L * 0.7 && loc.s < L * 0.3) {
+        if (this.passedHalf) this.completeLap();
+        this.passedHalf = false;
+      }
     } else if (loc.s >= L - 3 && this.prevS < loc.s) {
       this.completeLap();
       this.state = "finished";
@@ -117,7 +132,6 @@ export class Timing {
     }
 
     this.prevS = loc.s;
-    if (this.elapsed > this.messageUntil) this.message = "";
   }
 
   completeLap() {
