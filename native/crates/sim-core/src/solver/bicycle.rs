@@ -282,6 +282,9 @@ impl BicycleSolver {
         if self.w_f > 0.0 && self.w_f + dw_f * dt < 0.0 && tb_f > 0.0 {
             dw_f = -self.w_f / dt;
         }
+        if self.w_f < 0.0 && self.w_f + dw_f * dt > 0.0 && tb_f > 0.0 {
+            dw_f = -self.w_f / dt;
+        }
         if self.w_r > 0.0
             && self.w_r + dw_r * dt < 0.0
             && tb_r > 0.0
@@ -293,7 +296,9 @@ impl BicycleSolver {
         self.s.u += du * dt;
         self.s.v += dv * dt;
         self.s.r += dr * dt;
-        self.w_f = (self.w_f + dw_f * dt).max(0.0);
+        // Fronts may roll backwards (see bicycle.js); the rear stays
+        // non-negative for the driveline behind it.
+        self.w_f += dw_f * dt;
         self.w_r = (self.w_r + dw_r * dt).max(0.0);
 
         // The measured accelerations that feed the next substep's transfer.
@@ -315,9 +320,9 @@ impl BicycleSolver {
             self.a_f = 0.0;
             self.a_r = 0.0;
         }
-        if self.s.u < 0.0 {
-            self.s.u = 0.0; // no reverse gear, and the tyre model is not valid backwards
-        }
+        // u may go negative: a spinning car travels backwards for a moment,
+        // and pinning u at zero with v left alone made it orbit (see
+        // bicycle.js). Slip angles use |u|, so the tyre model holds.
 
         self.s.x += (self.s.u * self.s.psi.cos() - self.s.v * self.s.psi.sin()) * dt;
         self.s.y += (self.s.u * self.s.psi.sin() + self.s.v * self.s.psi.cos()) * dt;
@@ -328,7 +333,7 @@ impl BicycleSolver {
             speed: self.s.speed(),
             ax_g: self.ax / G,
             ay_g: self.ay / G,
-            body_slip_deg: self.s.v.atan2(self.s.u.max(0.1)).to_degrees(),
+            body_slip_deg: self.s.v.atan2(self.s.u.abs().max(0.1)).to_degrees(),
             yaw_rate_deg_s: self.s.r.to_degrees(),
             steer_rad: d,
             // Left/right by the sign of the transfer: positive ay is a left

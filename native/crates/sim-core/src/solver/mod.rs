@@ -208,6 +208,9 @@ pub(crate) fn advance_steer_capped(
             // the rear steps out the front follows the slide: the assist
             // counter-steers for a driver who has no seat to feel it in.
             target = target.clamp(k - st.slip_cap_rad, k + st.slip_cap_rad);
+            // The band follows the car's velocity, which in a spin is 70 to
+            // 90 degrees off the nose; the rack still stops at lock.
+            target = target.clamp(-st.max_steer_rad, st.max_steer_rad);
         }
     }
     let want = ((target - current) / st.lag_s.max(1e-4))

@@ -174,6 +174,9 @@ export class BicycleModel {
       const kinDeg = (Math.atan2(this.v + this.a * this.r, Math.max(Math.abs(this.u), 0.6)) * 180) / Math.PI;
       const lo = kinDeg - cfg.slipCapDeg, hi = kinDeg + cfg.slipCapDeg;
       targetDeg = clamp(targetDeg, lo, hi);
+      // The band follows the car's velocity, and in a spin that is 70 to 90
+      // degrees off the nose; the rack still stops at lock.
+      targetDeg = clamp(targetDeg, -p.maxSteerDeg, p.maxSteerDeg);
     }
     const angleDeg = (this.delta * 180) / Math.PI;
 
@@ -303,6 +306,7 @@ export class BicycleModel {
 
     // Clamp so braking stops a wheel instead of reversing it inside one step.
     if (this.wF > 0 && this.wF + dwF * dt < 0 && tbF > 0) dwF = -this.wF / dt;
+    if (this.wF < 0 && this.wF + dwF * dt > 0 && tbF > 0) dwF = -this.wF / dt;
     if (this.wR > 0 && this.wR + dwR * dt < 0 && tbR > 0 && drive.wheelTorqueNm <= 0) {
       dwR = -this.wR / dt;
     }
@@ -311,7 +315,10 @@ export class BicycleModel {
     this.u += du * dt;
     this.v += dv * dt;
     this.r += dr * dt;
-    this.wF = Math.max(0, this.wF + dwF * dt);
+    // The fronts may roll backwards (a spin carries the car backwards for a
+    // moment); the rear stays non-negative because the driveline behind it
+    // has no reverse and the clutch logic assumes it.
+    this.wF = this.wF + dwF * dt;
     this.wR = Math.max(0, this.wR + dwR * dt);
 
     // The measured accelerations that feed next step's load transfer.
@@ -329,9 +336,11 @@ export class BicycleModel {
       this.aF = 0; this.aR = 0;
     }
 
-    // Reverse is not a thing here -- no reverse gear, and the tyre model is
-    // not valid backwards.
-    if (this.u < 0) this.u = 0;
+    // No reverse gear, but a spinning car does travel backwards for a moment
+    // and u must be allowed to say so. Pinning it at zero while v was left
+    // alone forced the velocity perpendicular to the body every substep, and
+    // the car orbited in a "tornado" instead of scrubbing off. The tyre
+    // model is symmetric in |u| (slip angles use |u|), so it is valid here.
 
     this.X += (this.u * Math.cos(this.psi) - this.v * Math.sin(this.psi)) * dt;
     this.Y += (this.u * Math.sin(this.psi) + this.v * Math.cos(this.psi)) * dt;
@@ -342,7 +351,7 @@ export class BicycleModel {
     t.speed = this.speed;
     t.axG = this.ax / G;
     t.ayG = this.ay / G;
-    t.bodySlipDeg = (Math.atan2(this.v, Math.max(this.u, 0.1)) * 180) / Math.PI;
+    t.bodySlipDeg = (Math.atan2(this.v, Math.max(Math.abs(this.u), 0.1)) * 180) / Math.PI;
     t.yawRateDegS = (this.r * 180) / Math.PI;
     t.FzF = FzF; t.FzR = FzR;
     t.dFzLatF = dFzF; t.dFzLatR = dFzR;
