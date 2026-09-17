@@ -40,6 +40,8 @@ const SUBSTEP = 1 / 500;
 
 /** Finite-difference step in slip ratio for the wheel update's implicit term. */
 const KAPPA_H = 1e-4;
+/** Speed above which the steering slip cap is at its full (narrow) width. */
+const SLIP_CAP_FULL_MPS = 8;
 
 export class BicycleModel {
   constructor(params, powertrain) {
@@ -172,7 +174,13 @@ export class BicycleModel {
     // driver has the tyre's own signal in their hands.
     if (cfg.slipCapDeg > 0) {
       const kinDeg = (Math.atan2(this.v + this.a * this.r, Math.max(Math.abs(this.u), 0.6)) * 180) / Math.PI;
-      const lo = kinDeg - cfg.slipCapDeg, hi = kinDeg + cfg.slipCapDeg;
+      // The band only means something once the car is moving: at walking
+      // pace the velocity direction swings with any leftover sideslip, and a
+      // band centred on it commanded steer with no key held, so the car
+      // wandered side to side by itself. Below SLIP_CAP_FULL_MPS the band
+      // opens up, 10 deg per m/s, until it is no band at all.
+      const capDeg = cfg.slipCapDeg + Math.max(0, SLIP_CAP_FULL_MPS - Math.abs(this.u)) * 10;
+      const lo = kinDeg - capDeg, hi = kinDeg + capDeg;
       targetDeg = clamp(targetDeg, lo, hi);
       // The band follows the car's velocity, and in a spin that is 70 to 90
       // degrees off the nose; the rack still stops at lock.

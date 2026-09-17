@@ -258,6 +258,8 @@ export const PROFILES = {
       selfCentreRateDegPerS: 70,
       /** One-pole on the rim position, s. Takes the jitter out of a hand on a mouse. */
       smoothingS: 0.035,
+      /** Response curve: 1 linear, above 1 softer near centre, same full lock. */
+      expo: 1.5,
       /** The rim's own servo: a hand on a wheel, not a key. No slip cap. */
       servo: { maxRateDegPerS: 720, accelDegPerS2: 20000, lagS: 0.03, slipCapDeg: 0, rateSpeedRefMps: 0 },
     },
@@ -825,6 +827,12 @@ export function editableSettings(profile) {
           label: "Smoothing",
           unit: " s",
           min: 0, max: 0.15, step: 0.005,
+        },
+        {
+          path: "mouse.expo",
+          label: "Response curve (1 = linear)",
+          unit: "",
+          min: 1, max: 2.5, step: 0.05,
         },
       ],
     });

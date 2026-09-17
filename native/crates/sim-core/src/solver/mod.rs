@@ -20,6 +20,9 @@ pub use point_mass::PointMassSolver;
 /// how often `step` is called, so results never depend on frame rate.
 pub const SUBSTEP: f64 = 1.0 / 500.0;
 
+/// Speed above which the steering slip cap is at its full (narrow) width.
+const SLIP_CAP_FULL_MPS: f64 = 8.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fidelity {
     /// Point mass: speed and heading only, grip-limited. No yaw dynamics.
@@ -207,7 +210,10 @@ pub(crate) fn advance_steer_capped(
             // The band is centred on the car's motion, not on zero, so when
             // the rear steps out the front follows the slide: the assist
             // counter-steers for a driver who has no seat to feel it in.
-            target = target.clamp(k - st.slip_cap_rad, k + st.slip_cap_rad);
+            // Opens up below SLIP_CAP_FULL_MPS (see bicycle.js): at walking
+            // pace a band centred on the velocity commanded steer by itself.
+            let cap = st.slip_cap_rad + (SLIP_CAP_FULL_MPS - u.abs()).max(0.0) * 10f64.to_radians();
+            target = target.clamp(k - cap, k + cap);
             // The band follows the car's velocity, which in a spin is 70 to
             // 90 degrees off the nose; the rack still stops at lock.
             target = target.clamp(-st.max_steer_rad, st.max_steer_rad);

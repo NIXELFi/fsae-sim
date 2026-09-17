@@ -430,7 +430,9 @@ export class Input {
       let cmd = this.kbSteer * lockFrac;
       // Yaw damping: yaw rate is positive turning left, steer is positive
       // left, so the term opposes the rotation. Only while the car moves.
-      const damp = (stc.yawDampPerDegS ?? 0) * Math.min(1, (this.carSpeed ?? 0) / 4);
+      // Off below 4 m/s, full by 12: at walking pace the reflex only fought
+      // the driver's own full lock.
+      const damp = (stc.yawDampPerDegS ?? 0) * Math.min(1, Math.max(0, ((this.carSpeed ?? 0) - 4) / 8));
       cmd -= (this.carYawRateDegS ?? 0) * damp;
       steer = clamp(cmd, -1, 1);
     }
@@ -458,7 +460,11 @@ export class Input {
       const tau = Math.max(mouse.smoothingS ?? 0, 0);
       const k = tau > 0 && dt > 0 ? 1 - Math.exp(-dt / tau) : 1;
       this.mouseSteerFiltered += (this.mouseSteer - this.mouseSteerFiltered) * k;
-      steer = this.mouseSteerFiltered * lockFrac;
+      // Expo: gentle near centre, still full lock at full travel. At low
+      // speed the usable lock is the whole rack and a linear map was twitchy.
+      const ex = mouse.expo ?? 1;
+      const f = this.mouseSteerFiltered;
+      steer = Math.sign(f) * Math.pow(Math.abs(f), ex) * lockFrac;
     } else if (keySteering) {
       // A key took over: fold the rim back to where the car is pointed so
       // letting go does not snap to a stale mouse position.
