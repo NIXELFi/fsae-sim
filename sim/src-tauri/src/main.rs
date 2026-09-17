@@ -1,12 +1,14 @@
 // SDM26 Driver-in-Loop desktop shell.
 //
-// The whole simulator is the embedded frontend -- physics, rendering, input and
-// audio all live in the webview. This process exists to give it a native window
-// and to carry the static files inside the executable, so there is no dev
-// server and nothing to install alongside it.
+// Rendering, input mapping, audio and the courses live in the embedded
+// frontend. This process gives it a native window, carries the static files
+// inside the executable, and runs the rig: the vehicle model, the steering
+// wheel and the force feedback on one native thread at 1 kHz (`rig.rs`).
 
 // Release builds are a GUI app: no console window behind the game.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use tauri::Manager;
 
 mod rig;
 mod wheel;
@@ -23,6 +25,13 @@ fn main() {
             rig::rig_frame,
             rig::rig_command,
         ])
+        // Closing the window must release the wheel (torque off, effect
+        // stopped, device unacquired) before the process goes away.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                window.state::<rig::Rig>().stop();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("failed to start SDM26 Driver-in-Loop");
 }

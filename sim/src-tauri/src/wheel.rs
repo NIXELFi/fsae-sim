@@ -50,6 +50,7 @@ pub struct DeviceInfo {
 }
 
 /// Does this product name look like a steering wheel base?
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn looks_like_wheel(name: &str) -> bool {
     let l = name.to_lowercase();
     ["wheel", "base", "moza", "simucube", "fanatec", "logitech g", "g29", "g920", "g923", "g27",
@@ -61,6 +62,7 @@ pub fn looks_like_wheel(name: &str) -> bool {
 
 /// Does this product name look like a pedal set, shifter or button box --
 /// something to read but never to drive?
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn looks_like_peripheral(name: &str) -> bool {
     let l = name.to_lowercase();
     ["pedal", "shifter", "handbrake", "button", "srp", "csp", "heusinkveld", "sim-lab"].iter().any(|k| l.contains(k))

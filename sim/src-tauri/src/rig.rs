@@ -35,6 +35,14 @@ use std::time::{Duration, Instant};
 use crate::wheel::{self, DeviceInfo, DeviceState, Wheel, AXES_PER_DEVICE, MAX_DEVICES};
 
 const RATE_HZ: f64 = 1000.0;
+/// How long the rig drives on the last inputs before it decides the webview
+/// has gone away (reload, exception, devtools pause) and holds the car with
+/// the pedals up and the motor off.
+const INPUT_STALE: Duration = Duration::from_millis(250);
+/// How often to look for a base when none is open or the open one went quiet.
+const RESCAN_EVERY: Duration = Duration::from_secs(2);
+/// A rim rate above this is a glitch (respawn, reacquire), not a driver.
+const MAX_RIM_RATE_DEG_S: f64 = 5000.0;
 
 // ------------------------------------------------------------------ inputs --
 
@@ -241,12 +249,12 @@ pub struct ParamSet {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RigCommand {
     Respawn { x: f64, y: f64, psi: f64, speed: f64 },
-    Params(ParamSet),
+    Params(Box<ParamSet>),
     #[serde(rename_all = "camelCase")]
     Boundary { centre: Vec<[f64; 2]>, offset_m: f64 },
     ClearBoundary,
     Ffb(FfbConfig),
-    Wheel(WheelConfig),
+    Wheel(Box<WheelConfig>),
     /// Re-open the wheel, steering by the named base (or the best guess).
     #[serde(rename_all = "camelCase")]
     SelectDevice { name: String },
@@ -400,6 +408,8 @@ pub struct RigStatus {
 
 pub struct Shared {
     input: Mutex<RigInput>,
+    /// When the webview last sent a frame; the watchdog reads it.
+    frame_at: Mutex<Instant>,
     commands: Mutex<Vec<RigCommand>>,
     snapshot: Mutex<Snapshot>,
     status: Mutex<RigStatus>,
@@ -419,6 +429,7 @@ impl Rig {
         Rig {
             shared: Arc::new(Shared {
                 input: Mutex::new(RigInput::default()),
+                frame_at: Mutex::new(Instant::now()),
                 commands: Mutex::new(Vec::new()),
                 snapshot: Mutex::new(Snapshot::default()),
                 status: Mutex::new(RigStatus { ffb_supported: cfg!(windows), ..Default::default() }),
@@ -429,6 +440,26 @@ impl Rig {
             }),
             thread: Mutex::new(None),
         }
+    }
+
+    /// Stop the thread and wait for it: the wheel is released (torque zero,
+    /// effect stopped, device unacquired) on the way out. Safe to call twice.
+    pub fn stop(&self) -> RigStatus {
+        self.shared.running.store(false, Ordering::SeqCst);
+        if let Some(h) = self.thread.lock().unwrap().take() {
+            let _ = h.join();
+        }
+        let mut st = self.shared.status.lock().unwrap();
+        st.running = false;
+        st.clone()
+    }
+}
+
+impl Shared {
+    /// Mark the inputs fresh. Every path that writes `input` must call this or
+    /// the watchdog will hold the car.
+    fn touch(&self) {
+        *self.frame_at.lock().unwrap() = Instant::now();
     }
 }
 
@@ -443,8 +474,13 @@ pub fn rig_status(state: tauri::State<'_, Rig>) -> RigStatus {
 #[tauri::command(async)]
 pub fn rig_start(window: tauri::Window, state: tauri::State<'_, Rig>) -> RigStatus {
     let mut th = state.thread.lock().unwrap();
-    if th.is_some() && state.shared.running.load(Ordering::SeqCst) {
+    let alive = th.as_ref().map(|h| !h.is_finished()).unwrap_or(false);
+    if alive && state.shared.running.load(Ordering::SeqCst) {
         return state.shared.status.lock().unwrap().clone();
+    }
+    // A thread that finished on its own (panic) leaves a stale handle.
+    if let Some(h) = th.take() {
+        let _ = h.join();
     }
     #[cfg(windows)]
     let hwnd_raw: isize = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
@@ -468,13 +504,7 @@ pub fn rig_start(window: tauri::Window, state: tauri::State<'_, Rig>) -> RigStat
 
 #[tauri::command]
 pub fn rig_stop(state: tauri::State<'_, Rig>) -> RigStatus {
-    state.shared.running.store(false, Ordering::SeqCst);
-    if let Some(h) = state.thread.lock().unwrap().take() {
-        let _ = h.join();
-    }
-    let mut st = state.shared.status.lock().unwrap();
-    st.running = false;
-    st.clone()
+    state.stop()
 }
 
 /// The per-frame exchange: inputs in, the latest snapshot out.
@@ -491,6 +521,7 @@ pub fn rig_frame(state: tauri::State<'_, Rig>, input: RigInput) -> Snapshot {
         sh.cone_hits.fetch_add(input.cone_hits, Ordering::Relaxed);
     }
     *sh.input.lock().unwrap() = input;
+    sh.touch();
     *sh.snapshot.lock().unwrap()
 }
 
@@ -511,10 +542,20 @@ struct Loop {
     hwnd_raw: isize,
     shared: Arc<Shared>,
     wheel_cfg: WheelConfig,
+    /// The base the driver asked for by name ("" = best guess). Compared
+    /// against the next request, never against what actually opened: an
+    /// open that fell back or failed must not be retried on every settings
+    /// change.
+    requested_device: String,
+    next_rescan: Instant,
     ffb_cfg: FfbConfig,
     ffb: FfbMixer,
     device: DeviceState,
     device_present: bool,
+    /// Consecutive ticks the base failed to read.
+    lost_ticks: u32,
+    /// The watchdog tripped last tick; used to log the transition once.
+    held: bool,
     // for the display-only gradients the JS model carried
     ticks: u64,
     tick_us_sum: f64,
@@ -549,10 +590,14 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
         hwnd_raw,
         shared: shared.clone(),
         wheel_cfg: WheelConfig::default(),
+        requested_device: String::new(),
+        next_rescan: Instant::now() + RESCAN_EVERY,
         ffb_cfg: FfbConfig::default(),
         ffb: FfbMixer::default(),
         device: DeviceState::default(),
         device_present: false,
+        lost_ticks: 0,
+        held: false,
         ticks: 0,
         tick_us_sum: 0.0,
         tick_us_max: 0.0,
@@ -581,11 +626,24 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
             lp.apply_command(c);
         }
 
-        let input = *shared.input.lock().unwrap();
+        let mut input = *shared.input.lock().unwrap();
+        // Watchdog. The webview is the only thing that unpauses the car; if
+        // it stops talking, hold everything and take the torque off the rim.
+        let stale = shared.frame_at.lock().unwrap().elapsed() > INPUT_STALE;
+        if stale {
+            input.paused = true;
+            input.throttle = 0.0;
+            input.brake = 0.0;
+        }
+        if stale != lp.held {
+            lp.held = stale;
+            eprintln!("rig: webview {}", if stale { "silent, holding the car" } else { "back" });
+        }
         let shift_up = shared.shift_up.swap(0, Ordering::Relaxed);
         let shift_down = shared.shift_down.swap(0, Ordering::Relaxed);
         let cone_hits = shared.cone_hits.swap(0, Ordering::Relaxed);
 
+        lp.maybe_rescan();
         let snap = lp.tick(dt, &input, shift_up, shift_down, cone_hits);
         *shared.snapshot.lock().unwrap() = snap;
 
@@ -649,7 +707,12 @@ impl Loop {
         match c {
             RigCommand::Respawn { x, y, psi, speed } => {
                 self.car.reset(x, y, psi, speed);
-                self.ffb = FfbMixer::default();
+                // Keep the rim angle and rate: zeroing them makes the next
+                // tick see a 90,000 deg/s step and the damping term clips at
+                // full rated torque. Only the transients belong to the run.
+                self.ffb.kick = 0.0;
+                self.ffb.phase = 0.0;
+                self.ffb.friction_state = 0.0;
             }
             RigCommand::Params(p) => self.apply_params(&p),
             RigCommand::Boundary { centre, offset_m } => {
@@ -663,13 +726,15 @@ impl Loop {
                     self.etc.set_points(&pts);
                 }
                 let want = cfg.device_name.clone();
-                let have = self.wheel.as_ref().map(|w| w.name.clone()).unwrap_or_default();
-                self.wheel_cfg = cfg;
-                if !want.is_empty() && want != have {
-                    self.reopen(Some(&want));
+                self.wheel_cfg = *cfg;
+                if want != self.requested_device {
+                    self.requested_device = want.clone();
+                    let prefer = if want.is_empty() { None } else { Some(want.as_str()) };
+                    self.reopen(prefer);
                 }
             }
             RigCommand::SelectDevice { name } => {
+                self.requested_device = name.clone();
                 let prefer = if name.is_empty() { None } else { Some(name.as_str()) };
                 self.reopen(prefer);
             }
@@ -682,7 +747,29 @@ impl Loop {
         }
         self.device = DeviceState::default();
         self.device_present = false;
+        self.lost_ticks = 0;
+        self.next_rescan = Instant::now() + RESCAN_EVERY;
         self.wheel = open_wheel(&self.shared, self.hwnd_raw, prefer);
+    }
+
+    /// Hot-plug. With no base open, or one that has stopped answering for a
+    /// couple of seconds, try again every `RESCAN_EVERY`. Enumeration is
+    /// cheap and also refreshes the picker's list.
+    fn maybe_rescan(&mut self) {
+        if !cfg!(windows) {
+            return;
+        }
+        let now = Instant::now();
+        if now < self.next_rescan {
+            return;
+        }
+        self.next_rescan = now + RESCAN_EVERY;
+        let lost = self.wheel.is_some() && self.lost_ticks > (2.0 * RATE_HZ) as u32;
+        if self.wheel.is_none() || lost {
+            let want = self.requested_device.clone();
+            let prefer = if want.is_empty() { None } else { Some(want.as_str()) };
+            self.reopen(prefer);
+        }
     }
 
     fn apply_params(&mut self, p: &ParamSet) {
@@ -744,8 +831,12 @@ impl Loop {
                 Some(s) => {
                     self.device = s;
                     self.device_present = true;
+                    self.lost_ticks = 0;
                 }
-                None => self.device_present = false,
+                None => {
+                    self.device_present = false;
+                    self.lost_ticks = self.lost_ticks.saturating_add(1);
+                }
             }
         }
         let native = self.device_present && self.wheel_cfg.enabled;
@@ -940,7 +1031,7 @@ impl FfbMixer {
         // short filter; a webview rim arrives at frame rate and needs a
         // longer one or the derivative is a comb of spikes.
         let tau = if native { 0.004 } else { 0.025 };
-        let raw_rate = (rim_deg - self.rim_deg) / dt.max(1e-4);
+        let raw_rate = ((rim_deg - self.rim_deg) / dt.max(1e-4)).clamp(-MAX_RIM_RATE_DEG_S, MAX_RIM_RATE_DEG_S);
         self.rim_rate_deg_s += (raw_rate - self.rim_rate_deg_s) * (dt / tau).min(1.0);
         self.rim_deg = rim_deg;
         if !on {
@@ -966,7 +1057,9 @@ impl FfbMixer {
         out.torque_nm = out.align + out.damping + out.friction + out.soft_lock;
 
         let mut cmd = out.torque_nm * cfg.gain / rated;
-        if cfg.min_force > 0.0 && out.align.abs() > 1e-3 && cmd.abs() < cfg.min_force {
+        // `f64::signum(0.0)` is +1, unlike Math.sign; a zero command must
+        // stay zero or a gain of 0 pushes the rim to the right.
+        if cfg.min_force > 0.0 && out.align.abs() > 1e-3 && cmd != 0.0 && cmd.abs() < cfg.min_force {
             cmd = cmd.signum() * cfg.min_force;
         }
         if cmd.abs() > 1.0 {
@@ -1063,8 +1156,18 @@ mod tests {
             std::thread::spawn(move || run(shared, 0, tx))
         };
         rx.recv().unwrap();
-        *shared.input.lock().unwrap() = RigInput { throttle: 1.0, auto_shift: true, ..Default::default() };
-        std::thread::sleep(Duration::from_millis(400));
+        // Keep the watchdog fed the way the webview would.
+        let feeder = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                for _ in 0..40 {
+                    *shared.input.lock().unwrap() = RigInput { throttle: 1.0, auto_shift: true, ..Default::default() };
+                    shared.touch();
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })
+        };
+        feeder.join().unwrap();
         let snap = *shared.snapshot.lock().unwrap();
         shared.running.store(false, Ordering::SeqCst);
         th.join().unwrap();
@@ -1073,6 +1176,62 @@ mod tests {
         assert!(snap.stats.tick_us_avg < 300.0, "tick too slow: {} us", snap.stats.tick_us_avg);
         assert!(snap.stats.overruns < snap.stats.ticks / 10, "overruns {}", snap.stats.overruns);
         assert!(snap.pt.engine_rpm > 2000.0);
+    }
+
+    /// The webview stops sending frames: the car must hold, not drive off on
+    /// the last throttle it was given.
+    #[test]
+    fn watchdog_holds_the_car_when_the_webview_goes_silent() {
+        let rig = Rig::new();
+        let shared = rig.shared.clone();
+        shared.running.store(true, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let th = {
+            let shared = shared.clone();
+            std::thread::spawn(move || run(shared, 0, tx))
+        };
+        rx.recv().unwrap();
+        *shared.input.lock().unwrap() = RigInput { throttle: 1.0, auto_shift: true, ..Default::default() };
+        shared.touch();
+        // One frame's worth, then silence.
+        std::thread::sleep(Duration::from_millis(600));
+        let snap = *shared.snapshot.lock().unwrap();
+        shared.running.store(false, Ordering::SeqCst);
+        th.join().unwrap();
+        // 250 ms of full throttle from rest in first is well under a metre;
+        // 600 ms would be several.
+        assert!(snap.state.x < 0.6, "car kept driving after the webview went silent: x = {}", snap.state.x);
+        assert_eq!(snap.applied.throttle, 0.0);
+        assert_eq!(snap.ffb.command, 0.0);
+    }
+
+    /// Respawn with the rim off-centre must not thump the driver.
+    #[test]
+    fn respawn_keeps_the_rim_state() {
+        let mut m = FfbMixer::default();
+        let cfg = FfbConfig { gain: 1.0, damping: 1.0, ..Default::default() };
+        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0 };
+        for _ in 0..20 {
+            let _ = m.mix(0.001, &cfg, true, &tel_with_rim(0.0), 90.0, 56.0, true, &feel);
+        }
+        // What apply_command(Respawn) does to the mixer.
+        m.kick = 0.0;
+        m.phase = 0.0;
+        m.friction_state = 0.0;
+        let o = m.mix(0.001, &cfg, true, &tel_with_rim(0.0), 90.0, 56.0, true, &feel);
+        assert!(o.damping.abs() < 0.5, "damping spike after respawn: {o:?}");
+        // And even a genuine 90 deg step is clamped to something a rim can do.
+        let o = m.mix(0.001, &cfg, true, &tel_with_rim(0.0), 0.0, 56.0, true, &feel);
+        assert!(o.command.abs() <= 1.0 && o.damping.is_finite(), "{o:?}");
+    }
+
+    #[test]
+    fn zero_command_stays_zero_with_a_min_force() {
+        let mut m = FfbMixer::default();
+        let cfg = FfbConfig { gain: 0.0, min_force: 0.05, ..Default::default() };
+        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0 };
+        let o = m.mix(0.001, &cfg, true, &tel_with_rim(-3.0), 0.0, 56.0, true, &feel);
+        assert_eq!(o.command, 0.0, "{o:?}");
     }
 
     #[test]
