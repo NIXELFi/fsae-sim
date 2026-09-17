@@ -20,7 +20,11 @@ mod wheel;
 /// ```text
 /// fsae-sim [--track autocross|endurance|mis] [--profile keyboard|gamepad-xbox|gamepad-ps|wheel]
 ///          [--tc on|off] [--abs on|off] [--auto-shift on|off]
-///          [--autostart] [--fullscreen] [--version]
+///          [--autostart] [--fullscreen] [--windowed] [--version]
+///
+/// By default the window comes up borderless and filling the screen (the
+/// game window most people expect); `--windowed` keeps a decorated 1600x900
+/// window centred on the screen instead.
 /// ```
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +36,8 @@ struct LaunchOptions {
     auto_shift: Option<bool>,
     autostart: bool,
     fullscreen: bool,
+    /// Decorated 1600x900 window instead of borderless full-screen.
+    windowed: bool,
     /// Arguments the parser did not understand, reported rather than ignored.
     unknown: Vec<String>,
 }
@@ -70,6 +76,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> LaunchOptions {
             "--auto-shift" | "--auto" => o.auto_shift = on_off(take().as_ref()),
             "--autostart" | "--start" => o.autostart = true,
             "--fullscreen" => o.fullscreen = true,
+            "--windowed" | "--window" => o.windowed = true,
             _ => o.unknown.push(a.to_string()),
         }
         i += 1;
@@ -107,7 +114,23 @@ fn main() {
         // The rig: vehicle model, steering wheel and force feedback on one
         // native thread at 1 kHz. The reason this shell has any code at all.
         .manage(rig::Rig::new())
+        .setup(|app| {
+            // The window is created hidden (tauri.conf.json) so this happens
+            // before the first paint: no decorated window flashing up and
+            // then jumping to the borderless one.
+            let windowed = app.state::<LaunchOptions>().windowed;
+            if let Some(w) = app.get_webview_window("main") {
+                if !windowed {
+                    let _ = w.set_decorations(false);
+                    let _ = w.maximize(); // the screen's usable area, on every platform
+                }
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+
             launch_options,
             rig::rig_status,
             rig::rig_start,
@@ -143,6 +166,7 @@ mod tests {
         assert_eq!(o.abs, Some(true));
         assert_eq!(o.auto_shift, None);
         assert!(o.autostart && o.fullscreen);
+        assert!(!o.windowed);
         assert!(o.unknown.is_empty());
     }
 

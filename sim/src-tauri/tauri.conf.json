@@ -20,6 +20,8 @@
         "fullscreen": false,
         "center": true,
         "focus": true,
+        "visible": false,
+        "backgroundColor": "#0b0d10",
         "theme": "Dark"
       }
     ],
