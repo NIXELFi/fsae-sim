@@ -30,6 +30,7 @@ export const DEFAULT_MIX = {
   tyres: 1.0,
   wind: 1.0,
   cones: 1.0,
+  cues: 0.8,
 };
 
 export const MIX_LABELS = {
@@ -38,6 +39,7 @@ export const MIX_LABELS = {
   tyres: "Tyres",
   wind: "Wind",
   cones: "Cone strikes",
+  cues: "Timing cues",
 };
 
 export class EngineAudio {
@@ -67,7 +69,17 @@ export class EngineAudio {
     this.master = ctx.createGain();
     // Honour the sound toggle: it is applied before the context exists.
     this.master.gain.value = this.enabled ? this.mix.master : 0;
-    this.master.connect(ctx.destination);
+    // A brick-wall on the way out. The engine model soft-clips its own
+    // output, but squeal, wind, a cone and a shift clunk all sum on top of
+    // it before the master, and at master 1.0 that hard-clipped.
+    this.limiter = ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = -6;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 12;
+    this.limiter.attack.value = 0.002;
+    this.limiter.release.value = 0.10;
+    this.master.connect(this.limiter);
+    this.limiter.connect(ctx.destination);
 
     // ---- engine: three harmonics through a throttle-controlled lowpass ----
     this.engineGain = ctx.createGain();
@@ -101,6 +113,7 @@ export class EngineAudio {
     const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
     const data = noiseBuf.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    this.noiseBuf = noiseBuf;   // one-shots take their own source off it
     this.noise = ctx.createBufferSource();
     this.noise.buffer = noiseBuf;
     this.noise.loop = true;
@@ -117,6 +130,13 @@ export class EngineAudio {
     this.induction = branch("bandpass", 700, 0.8, 0);
     this.squeal = branch("bandpass", 1350, 7.0, 0);
     this.wind = branch("lowpass", 520, 0.7, 0);
+    // A locked wheel is not a scrubbing one: it is a flat spot being dragged,
+    // lower and rougher than squeal. Was never voiced, so a braking lock-up
+    // sounded exactly like a power slide and ABS was inaudible.
+    this.lockup = branch("lowpass", 520, 1.2, 0);
+    // Off the course: gravel and grass under the floor. The only cue that
+    // the lap was void used to be a toast.
+    this.surface = branch("lowpass", 240, 0.9, 0);
 
     this.ready = true;
 
@@ -236,14 +256,26 @@ export class EngineAudio {
 
   /**
    * @param {object} s
-   *   rpm, throttle 0..1, torqueNm, speed m/s, slip 0..~2 (worst axle
-   *   utilisation), wheelspin 0..1, shifting bool
+   *   rpm, throttle 0..1, torqueNm, throttlePlate 0..1, limiter bool (the
+   *   ignition is being cut; torqueNm is then what the engine would make),
+   *   gear (0-based; a change is the shift clunk), speed m/s, slip 0..~2
+   *   (worst axle utilisation), wheelspin 0..1, lock 0..1, offTrack bool,
+   *   shifting bool
    */
   update(s, dt) {
     if (!this.ready || !this.enabled) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
     const glide = Math.max(0.012, Math.min(0.05, dt * 2));
+
+    // The dogs engaging. Voiced when the gear actually changes -- the end of
+    // the 100 ms cut -- which is also the only moment both the JS model, the
+    // rig and a replay agree on. A downshift gets the exhaust chuff of the
+    // blip on top.
+    if (s.gear != null) {
+      if (this._lastGear != null && s.gear !== this._lastGear) this.shiftClunk(s.gear < this._lastGear);
+      this._lastGear = s.gear;
+    }
 
     const firing = Math.max(20, (s.rpm / 30));
     const rev = Math.min(1, s.rpm / 9000);
@@ -262,6 +294,7 @@ export class EngineAudio {
         // through.
         throttle: s.shifting ? 0 : (s.throttlePlate ?? s.throttle),
         torqueNm: s.shifting ? 0 : (s.torqueNm ?? 0),
+        cut: !!s.limiter && !s.shifting,
       });
     } else {
       for (const { osc, mult } of this.oscs) {
@@ -290,26 +323,126 @@ export class EngineAudio {
     this.wind.g.gain.setTargetAtTime(
       Math.min(0.10, (s.speed / 32) ** 2 * 0.10) * this.mix.wind, now, glide);
     this.wind.f.frequency.setTargetAtTime(320 + s.speed * 22, now, glide);
+
+    const lock = Math.max(0, Math.min(1, s.lock ?? 0)) * Math.min(1, s.speed / 4);
+    this.lockup.g.gain.setTargetAtTime(0.22 * lock * this.mix.tyres, now, glide);
+    this.lockup.f.frequency.setTargetAtTime(380 + 320 * lock, now, glide);
+
+    // Gravel is not steady: a slow flutter is most of what makes it read as
+    // a surface rather than a hiss.
+    const off = s.offTrack ? Math.min(1, s.speed / 12) : 0;
+    const flutter = 0.7 + 0.3 * Math.sin(now * 41) * Math.sin(now * 7.3);
+    this.surface.g.gain.setTargetAtTime(0.16 * off * flutter * this.mix.tyres, now, glide);
+    this.surface.f.frequency.setTargetAtTime(200 + s.speed * 9, now, glide);
   }
 
-  /** One-shot clatter for a cone strike. */
+  /** Forget the last gear and clear the engine model: the car was respawned. */
+  reset() {
+    this._lastGear = null;
+    this.modelNode?.port.postMessage({ type: "reset" });
+  }
+
+  // ---- one-shots ----------------------------------------------------------
+
+  /** A short burst of the shared noise through one filter, decaying. */
+  burst({ type, freq, q, gain, decay, at }) {
+    if (gain < 1e-4) return;
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const f = ctx.createBiquadFilter();
+    f.type = type; f.frequency.value = freq; f.Q.value = q;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(gain, at);
+    g.gain.exponentialRampToValueAtTime(0.001, at + decay);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(at);
+    src.stop(at + decay + 0.02);
+  }
+
+  /** A pitched thud: a sine dropping in pitch as it decays. */
+  thump(freq, dur, gain, at) {
+    if (gain < 1e-4) return;
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(freq, at);
+    osc.frequency.exponentialRampToValueAtTime(freq * 0.55, at + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(gain, at);
+    g.gain.exponentialRampToValueAtTime(0.001, at + dur);
+    osc.connect(g); g.connect(this.master);
+    osc.start(at);
+    osc.stop(at + dur + 0.02);
+  }
+
+  /** A clean tone for a timing cue. */
+  beep(freq, dur, gain, at) {
+    if (gain < 1e-4) return;
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.linearRampToValueAtTime(gain, at + 0.008);
+    g.gain.setValueAtTime(gain, at + dur - 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    osc.connect(g); g.connect(this.master);
+    osc.start(at);
+    osc.stop(at + dur + 0.01);
+  }
+
+  /** The gearbox: dog ring clunk, and the blip's exhaust chuff on the way down. */
+  shiftClunk(down) {
+    if (!this.ready || !this.enabled) return;
+    const now = this.ctx.currentTime;
+    const lvl = this.mix.engine;
+    this.burst({ type: "bandpass", freq: 2400, q: 1.2, gain: 0.14 * lvl, decay: 0.05, at: now });
+    this.thump(75, 0.08, 0.16 * lvl, now);
+    if (down) this.burst({ type: "lowpass", freq: 420, q: 0.8, gain: 0.10 * lvl, decay: 0.14, at: now });
+  }
+
+  /**
+   * A timing cue: green, a sector, a lap, the flag, an excursion. Short
+   * tones, so they never fight the engine for attention -- just enough that
+   * the driver does not have to read the toast.
+   */
+  cue(kind) {
+    if (!this.ready || !this.enabled) return;
+    const seq = CUES[kind];
+    if (!seq) return;
+    const level = 0.16 * this.mix.cues;
+    let t = this.ctx.currentTime;
+    for (const [freq, dur] of seq) {
+      this.beep(freq, dur, level, t);
+      t += dur + 0.03;
+    }
+  }
+
+  /**
+   * A cone strike: hollow plastic against the nose. Was a square-wave sweep,
+   * which read as a game "boop" rather than a thing being hit.
+   */
   coneHit() {
     if (!this.ready || !this.enabled) return;
-    const ctx = this.ctx;
-    const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    osc.type = "square";
-    osc.frequency.setValueAtTime(220, now);
-    osc.frequency.exponentialRampToValueAtTime(90, now + 0.14);
-    const g = ctx.createGain();
-    // exponentialRampToValueAtTime cannot start from or reach zero, so a muted
-    // cone level has to skip the sound entirely rather than ramp to silence.
-    const peak = 0.28 * this.mix.cones;
+    const now = this.ctx.currentTime;
+    const peak = 0.5 * this.mix.cones;
     if (peak < 1e-4) return;
-    g.gain.setValueAtTime(peak, now);
-    g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-    osc.connect(g); g.connect(this.master);
-    osc.start(now);
-    osc.stop(now + 0.2);
+    this.burst({ type: "bandpass", freq: 900, q: 0.7, gain: peak, decay: 0.12, at: now });
+    this.burst({ type: "bandpass", freq: 2600, q: 1.5, gain: peak * 0.5, decay: 0.05, at: now });
+    this.thump(58, 0.07, peak * 0.9, now);
   }
 }
+
+/** Tone sequences for `cue`: [frequency Hz, duration s]. */
+const CUES = {
+  green: [[880, 0.14]],
+  sector: [[990, 0.08]],
+  sectorUp: [[1320, 0.07], [1760, 0.10]],
+  sectorDown: [[660, 0.12]],
+  lap: [[990, 0.08], [1320, 0.10]],
+  invalid: [[440, 0.16], [330, 0.18]],
+  off: [[330, 0.20]],
+  finish: [[1100, 0.08], [1100, 0.08], [1470, 0.18]],
+};

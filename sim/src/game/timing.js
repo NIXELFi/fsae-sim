@@ -93,6 +93,9 @@ export class Timing {
      * than reading them back later. Set by the run recorder; null otherwise.
      */
     this.onLap = null;
+    /** `(kind) => void` for the audio: green, sector, sectorUp, sectorDown,
+     *  lap, invalid, off, finish. */
+    this.onCue = null;
     this.reset();
   }
 
@@ -176,6 +179,7 @@ export class Timing {
         this.elapsed = 0;
         this.prevS = loc.s;
         this.say(this.track.closed ? "GREEN - lap 1" : "GREEN", 2);
+        this.onCue?.("green");
       }
       return;
     }
@@ -203,6 +207,7 @@ export class Timing {
         this.offCharged = true;
         this.offCourse++;
         this.say("OFF COURSE - LAP INVALID", 2.5);
+        this.onCue?.("off");
       }
     } else if (this.wasOffCourse) {
       this.wasOffCourse = false;
@@ -260,10 +265,12 @@ export class Timing {
       if (prevBest == null) {
         this.lastSplitDelta = null;
         this.say(`S${n} ${fmt(split)}`, 2);
+        this.onCue?.("sector");
       } else {
         this.lastSplitDelta = split - prevBest;
         const d = split - prevBest;
         this.say(`S${n} ${fmt(split)}  ${d < 0 ? "" : "+"}${d.toFixed(2)}`, 2);
+        this.onCue?.(d < 0 ? "sectorUp" : "sectorDown");
       }
       this.sectorIndex++;
       crossedThisFrame++;
@@ -282,6 +289,7 @@ export class Timing {
       this.completeLap();
       this.state = "finished";
       this.say("FINISH", 6);
+      this.onCue?.("finish");
     }
 
     this.prevS = loc.s;
@@ -357,6 +365,7 @@ export class Timing {
         entry.valid ? `LAP ${this.lap}  ${fmt(entry.total)}` : `LAP ${this.lap}  INVALID - OFF COURSE`,
         3,
       );
+      this.onCue?.(entry.valid ? "lap" : "invalid");
     }
 
     // Penalties are scored per lap, so the counters restart with the lap.

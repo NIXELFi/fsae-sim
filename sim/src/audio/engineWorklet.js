@@ -45,7 +45,7 @@ class EngineProcessor extends AudioWorkletProcessor {
       const m = e.data || {};
       switch (m.type) {
         case "operating-point":
-          this.engine.setOperatingPoint(m.rpm, m.throttle, m.torqueNm);
+          this.engine.setOperatingPoint(m.rpm, m.throttle, m.torqueNm, !!m.cut);
           break;
         case "running":
           this.engine.setRunning(!!m.running);

@@ -370,6 +370,7 @@ class Game {
       this.syncFfb();
     }
     this.timing = new Timing(track);
+    this.timing.onCue = (kind) => this.audio.cue(kind);
     // A new course means a new reference: a time-at-distance table for the
     // autocross means nothing on the endurance loop.
     this.deltaTimer = new DeltaTimer(track.length);
@@ -628,6 +629,7 @@ class Game {
       : Math.max(0, loc.index - 6);
     const p = this.track.poseAt(back);
     this.car.respawn(p.x, p.y, p.psi, 0);
+    this.audio.reset();
     this.timing.say("RECOVERED", 1.5);
   }
 
@@ -844,30 +846,7 @@ class Game {
     }
 
     // ---- audio ----
-    this.audio.update({
-      rpm: pt.engineRpm,
-      throttle,
-      // Indicated torque, not net: the sound model solves its heat release to
-      // reproduce this much combustion work, and an engine idling at zero NET
-      // torque is still burning fuel and still audible. This also carries the
-      // idle plate, so the idle note comes from the 14% opening the ETC really
-      // holds rather than from a closed throttle.
-      //
-      // On the rig the Rust model reports its own indicated torque, already
-      // zeroed on the limiter and the shift cut. The JS proxy's
-      // `indicatedTorque` reads `limiterCut` off a JS engine step that never
-      // runs natively, so on a wheel the audio heard full combustion at
-      // 14,500 rpm -- the exact bug the JS path fixed.
-      torqueNm: this.car.native ? pt.indicatedTorqueNm
-        : pt.shiftTimer > 0 ? 0 : pt.indicatedTorque(pt.engineRpm, throttle),
-      // Same for the throttle the sound sees.
-      throttlePlate: this.car.native ? (pt.shiftTimer > 0 ? 0 : pt.plate)
-        : pt.shiftTimer > 0 ? 0 : pt.platePosition(pt.engineRpm, throttle),
-      speed: this.car.speed,
-      slip: Math.max(tel.utilF, tel.utilR),
-      wheelspin: Math.max(0, tel.kappaR - 0.15),
-      shifting: pt.shiftTimer > 0,
-    }, dt);
+    this.audio.update(this.liveAudioState(throttle, tel, loc), dt);
 
     // ---- wheel rotation, so the rims visibly turn and spin ----
     // Wrapped to keep the angle small; at 25 m/s these turn 125 rad/s and the
@@ -919,6 +898,84 @@ class Game {
         this.finishSave = this.endRun("finished");
       }
     }
+  }
+
+  /**
+   * What the sound is generated from, this frame.
+   *
+   * Indicated torque, not net: the sound model solves its heat release to
+   * reproduce this much combustion work, and an engine idling at zero NET
+   * torque is still burning fuel and still audible. The plate, not the
+   * pedal: at idle the pedal is at rest and the plate is at 14%.
+   *
+   * On the rig the Rust model reports its own indicated torque, already
+   * zeroed on the limiter and the shift cut. The JS proxy's `indicatedTorque`
+   * reads `limiterCut` off a JS engine step that never runs natively, so on a
+   * wheel the audio used to hear full combustion at 14,500 rpm.
+   *
+   * The limiter itself is passed as a flag with the torque the engine WOULD
+   * be making: the model gates its cylinders at the stutter rate, which is
+   * what an ignition cut sounds like. Zero torque through a 15 ms level slew
+   * was a soft flutter.
+   */
+  liveAudioState(throttle, tel, loc) {
+    const pt = this.powertrain;
+    const rpm = pt.engineRpm;
+    const shifting = pt.shiftTimer > 0;
+    const plate = this.car.native ? pt.plate : pt.platePosition(rpm, throttle);
+    let torque = this.car.native ? pt.indicatedTorqueNm : pt.indicatedTorque(rpm, throttle);
+    // The rig does not report its limiter; the signature is unmistakable.
+    const cut = this.car.native
+      ? (!shifting && plate > 0.3 && torque <= 0 && rpm > SDM26.revLimitRpm - 300)
+      : !!pt.limiterCut;
+    if (cut) torque = plate * (pt.wotTorque(rpm) + pt.motoringTorque(rpm));
+    const lock = Math.max(0, -Math.min(tel.kappaF, tel.kappaR) - 0.2) * 2.5;
+    return {
+      rpm,
+      throttle,
+      torqueNm: shifting ? 0 : torque,
+      throttlePlate: shifting ? 0 : plate,
+      limiter: cut,
+      gear: pt.gear,
+      speed: this.car.speed,
+      slip: Math.max(tel.utilF, tel.utilR),
+      wheelspin: Math.max(0, tel.kappaR - 0.15),
+      lock: Math.min(1, lock),
+      offTrack: !!loc && !loc.onTrack && this.car.speed > 2,
+      shifting,
+    };
+  }
+
+  /**
+   * The same, read out of a recorded run. A replay used to be silent, and
+   * the log has everything the sound needs: rpm, plate, gear, speed, the
+   * slip ratios and the axle utilisations.
+   */
+  replayAudioState() {
+    const r = this.replay;
+    const pt = this.powertrain;
+    const rpm = r.value("engine.rpm");
+    const plate = r.value("engine.tps") / 100;
+    const shifting = r.valueAt("sim.shifting") > 0.5;
+    const cut = rpm >= SDM26.revLimitRpm - 150 && plate > 0.3;
+    const torque = plate * (pt.wotTorque(rpm) + pt.motoringTorque(rpm));
+    const kF = r.value("sim.kappa_front");
+    const kR = r.value("sim.kappa_rear");
+    const speed = r.value("drivetrain.vehicle_speed") / 3.6;
+    return {
+      rpm,
+      throttle: r.value("engine.aps") / 100,
+      torqueNm: shifting ? 0 : torque,
+      throttlePlate: shifting ? 0 : plate,
+      limiter: cut,
+      gear: Math.round(r.valueAt("engine.gear")) - 1,
+      speed,
+      slip: Math.max(r.value("sim.util_front"), r.value("sim.util_rear")),
+      wheelspin: Math.max(0, kR - 0.15),
+      lock: Math.min(1, Math.max(0, -Math.min(kF, kR) - 0.2) * 2.5),
+      offTrack: r.valueAt("sim.on_track") < 0.5 && speed > 2,
+      shifting,
+    };
   }
 
   /**
@@ -1249,7 +1306,12 @@ class Game {
     this.dom.pauseMenu.hidden = true;
     this.dom.replayOverlay.hidden = false;
     this.cameraIndex = 2; // chase: a replay is watched, not driven
-    this.audio.setEnabled(false);
+    // The engine plays from the log. `start` is a no-op once the context
+    // exists; from a launcher there was no gesture and it resumes on the
+    // first key or button.
+    this.audio.start();
+    this.audio.reset();
+    this.audio.setEnabled(this.dom.audioToggle?.checked ?? true);
     this.syncPointer();
 
     this.replayPanel = new ReplayPanel(this.dom.replayOverlay, replay, {
@@ -1357,6 +1419,8 @@ class Game {
     this.replayPanel?.destroy();
     this.replayPanel = null;
     this.dom.replayOverlay.hidden = true;
+    // Quiet until a drive starts it again (`enterSim` re-enables it).
+    this.audio.setEnabled(false);
     if (!keepMenu) {
       this.dom.menu.hidden = false;
       this.started = false;
@@ -1396,6 +1460,10 @@ class Game {
     r.advance(dt);
     this.applyReplayFrame();
     this.replayPanel?.paint(dt);
+    // Paused or scrubbing, the engine holds its breath rather than droning
+    // at whatever the frozen frame says.
+    this.audio.setRunning(r.playing && !document.hidden);
+    if (r.playing) this.audio.update(this.replayAudioState(), dt * (r.rate ?? 1));
   }
 
   applyReplayFrame() {

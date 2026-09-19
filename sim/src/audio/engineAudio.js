@@ -1166,6 +1166,14 @@ export class Synthesizer {
 // The whole thing
 // ---------------------------------------------------------------------------
 
+/**
+ * Rev limiter stutter: how many times a second the ignition comes back, and
+ * what fraction of each period it is on. A CBR600RR's soft-cut limiter chops
+ * at roughly this rate; the duty is what keeps it from reading as a misfire.
+ */
+export const LIMITER_STUTTER_HZ = 24;
+export const LIMITER_DUTY = 0.5;
+
 export const DEFAULT_AUDIO_CONFIG = {
   sampleRate: 48000,
   // 256 taps at 48 kHz covers the whole early-reflection structure the impulse
@@ -1216,8 +1224,11 @@ export class EngineAudio {
       throttle: 0,
       targetTorqueNm: 0,
       exhaustK: spec.gas.exhaustKMin,
+      /** On the rev limiter: the ignition is being cut, see `render`. */
+      cut: false,
     };
     this.cal = calibrate(spec, this.op);
+    this.cutPhase = 0;
 
     this.flow = new Float32Array(this.cylinders.length);
     this.valveArea = new Float32Array(this.cylinders.length);
@@ -1243,14 +1254,14 @@ export class EngineAudio {
    * Move to a new operating point. Call at the physics rate, not per sample:
    * it re-solves the heat release and may retune every delay line.
    */
-  setOperatingPoint(rpm, throttle, torqueNm) {
+  setOperatingPoint(rpm, throttle, torqueNm, cut = false) {
     const th = Math.min(Math.max(throttle, 0), 1);
     const load = Math.min(Math.max(torqueNm, 0) / 70, 1) * 0.6 + th * 0.4;
     const gas = this.spec.gas;
     const exhaustK = gas.exhaustKMin + (gas.exhaustKMax - gas.exhaustKMin) * load;
     const retune = Math.abs(exhaustK - this.op.exhaustK) > 5;
 
-    this.op = { rpm: Math.max(rpm, 0), throttle: th, targetTorqueNm: torqueNm, exhaustK };
+    this.op = { rpm: Math.max(rpm, 0), throttle: th, targetTorqueNm: torqueNm, exhaustK, cut: !!cut };
     this.cal = calibrate(this.spec, this.op);
     if (retune) this.exhaust.setGasState(gas, exhaustK);
 
@@ -1299,8 +1310,21 @@ export class EngineAudio {
     const levelK = 1 - Math.exp(-dt / 0.015);
     const ambient = this.spec.gas.ambientPa;
     const load = this.op.throttle;
+    // The rev limiter is a bang-bang ignition cut, not a fade. The game used
+    // to hand this model zero torque on the limiter, and the 15 ms level slew
+    // above turned the hardest sound an engine makes into a soft flutter. On
+    // the limiter the caller now passes the torque the engine WOULD make and
+    // sets `cut`, and the cylinders are gated here at the stutter rate --
+    // full combustion, then nothing, then full again -- which is what an
+    // ignition cut sounds like through a 4-1 pipe.
+    const cutPeriod = Math.max(1, Math.round(this.config.sampleRate / LIMITER_STUTTER_HZ));
 
     for (let s = 0; s < out.length; s++) {
+      let firing = this.running;
+      if (this.op.cut) {
+        this.cutPhase = (this.cutPhase + 1) % cutPeriod;
+        if (this.cutPhase >= cutPeriod * LIMITER_DUTY) firing = false;
+      }
       for (let i = 0; i < this.cylinders.length; i++) {
         const cyl = this.cylinders[i];
         let theta = this.crankDeg - cyl.phaseDeg;
@@ -1316,7 +1340,7 @@ export class EngineAudio {
         // can move, so the lag is smaller than the physical time constant and
         // the loop is stable.
         const back = this.exhaust.portPressure(i, ambient, area, cyl.portVelocity);
-        this.flow[i] = this.running
+        this.flow[i] = firing
           ? stepCylinder(this.spec, this.tables, cyl, this.crankDeg, dt, this.cal, this.op, back)
           : 0;
       }
