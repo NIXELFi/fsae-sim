@@ -56,6 +56,13 @@ const EDGE_ACTIONS = ACTIONS.filter(
   (a) => !HOLD_ACTIONS.has(a.id) && !REPEAT_ACTIONS.has(a.id),
 );
 
+/**
+ * Below this a steering command is noise -- a stick inside its deadzone, a key
+ * ramp with a millimetre left to unwind -- and crediting it to a device would
+ * let a controller left on the desk reclassify a whole session on a wheel.
+ */
+const SOURCE_THRESHOLD = 0.02;
+
 /** First virtual button index for a native base's hat switch: above 4 devices x 32 real buttons. */
 export const HAT_BASE = 128;
 
@@ -133,6 +140,26 @@ export class Input {
     this.nativeName = "wheel (native)";
     /** Every device the rig is reading, base first. Set by the game. */
     this.nativeDeviceNames = [];
+    /**
+     * WHAT ACTUALLY STEERED THE CAR THIS FRAME.
+     *
+     * "wheel" | "pad" | "key" | "mouse" | "none", written by whichever branch
+     * of `poll` produced the steering command, and classified from the DEVICE
+     * rather than from the profile. See `steerDeviceIsWheel`.
+     *
+     * This exists because the leaderboards are separated by device class and
+     * the profile is a dropdown. Separating boards by the profile separates
+     * them by what people SAY they drove with, which is worth nothing on a
+     * board anybody wants to top: pick "Controller", steer with the wheel
+     * anyway, and the controller record is yours. This is what the car was
+     * steered by.
+     *
+     * It is not tamper proof, and nothing that runs on the driver's own
+     * machine can be -- the run file is a JSON manifest they own. It removes
+     * the cheat that costs nothing, which is the only one that would actually
+     * happen on a student team.
+     */
+    this.steerSource = "none";
 
     // Typing a throttle-map value into a number field must not also stand on
     // the throttle, so keys aimed at a form control never reach the car.
@@ -346,6 +373,28 @@ export class Input {
     return preset;
   }
 
+  /**
+   * Is the thing currently supplying the steering axis a wheel?
+   *
+   * Asked of the DEVICE, never of the profile. A driver is free to steer a
+   * MOZA base through the controller profile -- it reads an axis and the base
+   * has axes -- and that has to come out as a wheel, because it was one.
+   *
+   * Two pieces of evidence, in order:
+   *  - the rig opened this device natively. It only does that for a force
+   *    feedback base, so a base whose vendor string nobody has seen before
+   *    still lands here.
+   *  - the vendor string says wheel. `detectProfile` already carries the
+   *    brand list, and it is the same list that picks the starting profile.
+   *
+   * Both are things the hardware reports about itself. Neither is something
+   * the driver picks from a menu, which is the whole point.
+   */
+  steerDeviceIsWheel() {
+    if (this.nativeDevice?.present) return true;
+    return detectProfile(this.padName || "") === "wheel";
+  }
+
   /** Rumble. Ignored silently on pads or browsers without an actuator. */
   rumble(strong, weak, ms) {
     const p = this.pad();
@@ -424,6 +473,9 @@ export class Input {
     const p = this.pad();
     const prof = this.profile;
     let steer = 0, throttle = 0, brake = 0, launch = false;
+    // Written by whichever branch below ends up owning `steer`. See
+    // `this.steerSource`, which it is published to at the bottom.
+    let source = "none";
 
     // How much of the car's lock is usable at this speed; see
     // `controlProfiles.usableLockFrac`. It applies to every control that has
@@ -454,6 +506,11 @@ export class Input {
         // Negative because pushing the stick left must steer left, and the
         // vehicle model takes left as positive.
         steer = -applySteeringCurve(prof.steering, raw) * lockFrac;
+      }
+      // An axis is steering. WHICH axis is a question about the hardware, and
+      // deliberately not about `prof.kind` -- that is the dropdown.
+      if (Math.abs(steer) > SOURCE_THRESHOLD) {
+        source = this.steerDeviceIsWheel() ? "wheel" : "pad";
       }
 
       const readPedal = (which) => {
@@ -543,6 +600,10 @@ export class Input {
       const damp = (stc.yawDampPerDegS ?? 0) * Math.min(1, Math.max(0, ((this.carSpeed ?? 0) - 4) / 8));
       cmd -= (this.carYawRateDegS ?? 0) * damp;
       steer = clamp(cmd, -1, 1);
+      // A key is down, or the ramp it left behind is still unwinding. Either
+      // way the keyboard is what is steering: the ramp is this branch's own
+      // output, not a second device.
+      if (Math.abs(steer) > SOURCE_THRESHOLD || kSteer !== 0) source = "key";
     }
 
     // ---- mouse: a virtual rim ----
@@ -573,6 +634,7 @@ export class Input {
       const ex = mouse.expo ?? 1;
       const f = this.mouseSteerFiltered;
       steer = Math.sign(f) * Math.pow(Math.abs(f), ex) * lockFrac;
+      if (Math.abs(steer) > SOURCE_THRESHOLD) source = "mouse";
     } else if (keySteering) {
       // A key took over: fold the rim back to where the car is pointed so
       // letting go does not snap to a stale mouse position.
@@ -620,6 +682,7 @@ export class Input {
     };
     this._prevKeys = new Set(k);
 
+    this.steerSource = source;
     this.state.steer = clamp(steer, -1, 1);
     this.state.throttle = clamp(throttle, 0, 1);
     this.state.brake = clamp(brake, 0, 1);

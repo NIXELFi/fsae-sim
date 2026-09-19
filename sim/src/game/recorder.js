@@ -346,6 +346,14 @@ export class Recorder {
     this._brakingS = 0;
     this._offTrackS = 0;
     this._ffbClippedS = 0;
+    /**
+     * Seconds of steering credited to each thing that can steer, from
+     * `Input.steerSource` -- observed, not declared. See `detectInputClass`.
+     *
+     * Time weighted rather than counted in frames so a run logged on a 60 Hz
+     * laptop and one on a 240 Hz rig describe the same driving.
+     */
+    this._steerS = { wheel: 0, pad: 0, key: 0, mouse: 0 };
   }
 
   /**
@@ -431,6 +439,7 @@ export class Recorder {
     if (ctx.brake > 0.05) this._brakingS += dt;
     if (!ctx.onTrack && sp > 2) this._offTrackS += dt;
     if (ctx.ffbClipped) this._ffbClippedS += dt;
+    if (this._steerS[ctx.steerSource] != null) this._steerS[ctx.steerSource] += dt;
     const p = this._peak;
     if (sp > p.speed) p.speed = sp;
     if (ctx.rpm > p.rpm) p.rpm = ctx.rpm;
@@ -706,12 +715,59 @@ export class Recorder {
       truncated: this.truncated,
       channels: CHANNEL_IDS,
       derivedChannels: DERIVED_CHANNELS,
+      /**
+       * What was actually steering, in seconds, beside `profile`, which is
+       * what the driver chose from a menu. The two disagreeing is not an
+       * error: it is a wheel driven through the controller profile, and the
+       * boards need to know it was a wheel.
+       */
+      inputSources: Object.fromEntries(
+        Object.entries(this._steerS).map(([k, v]) => [k, round(v, 2)]),
+      ),
+      /** `inputSources` reduced to a leaderboard class, or null when nobody
+       *  steered long enough to say. See `detectInputClass`. */
+      detectedInput: detectInputClass(this._steerS),
       laps: this.laps,
       events: this.events,
       stats: this.stats(),
     };
   }
 }
+
+/**
+ * Reduce observed steering time to the class a leaderboard ranks within.
+ *
+ * Returns "wheel", "controller", "keyboard" or null. The mouse folds into the
+ * keyboard because it is the keyboard profile's own steering mode, not a
+ * fourth kind of rig: a board that split them would have one entry on it.
+ *
+ * Whichever source steered for longest wins. A driver who genuinely swaps
+ * devices mid-session lands on the board for the one they drove most of the
+ * run with, which is the honest answer to a question that has no clean one.
+ *
+ * Null below `MIN_STEER_S`, because a run where nobody meaningfully steered
+ * -- the car was staged, or rolled a few metres -- has no evidence in it, and
+ * guessing from a tenth of a second of noise is worse than saying so. Helios
+ * falls back to the declared profile there, which is all it ever had.
+ */
+export function detectInputClass(steerS) {
+  const s = steerS ?? {};
+  const byClass = {
+    wheel: s.wheel ?? 0,
+    controller: s.pad ?? 0,
+    keyboard: (s.key ?? 0) + (s.mouse ?? 0),
+  };
+  const total = byClass.wheel + byClass.controller + byClass.keyboard;
+  if (!(total >= MIN_STEER_S)) return null;
+  let best = null;
+  for (const [k, v] of Object.entries(byClass)) {
+    if (best == null || v > byClass[best]) best = k;
+  }
+  return byClass[best] > 0 ? best : null;
+}
+
+/** Steering time a run needs before its inputs are evidence of anything. */
+export const MIN_STEER_S = 3;
 
 function fmtNum(v, dp) {
   if (!Number.isFinite(v)) return "0";

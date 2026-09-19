@@ -901,6 +901,9 @@ class Game {
     c.brakeBiasFront = SDM26.brakeBiasFront;
     c.roadWheelDeg = tel.steerDeg ?? (this.car.delta * 180) / Math.PI;
     c.steerInput = inp.steer;
+    // What steered, observed rather than declared; the recorder totals it and
+    // the leaderboards are separated by it. See `Input.steerSource`.
+    c.steerSource = this.input.steerSource;
     c.ffbCommand = this.ffb.last?.command ?? 0;
     c.ffbClipped = !!this.ffb.last?.clipped;
     // The JS model runs two rear wheels through the differential; the native
