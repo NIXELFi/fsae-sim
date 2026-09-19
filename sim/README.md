@@ -90,6 +90,28 @@ there: the raw time, the cones and off-courses it cost, and the score. From it
 you can run it again (`Enter`), watch the replay (`W`), keep driving (`Esc`),
 go to the home screen (`H`) or quit (`Q`). It comes up two seconds after the
 line, so the roll-out and the time on the dash are still yours to see.
+Endurance and the venue never end on their own, so the pause card has **End
+session** for them: the lap table, the best, the theoretical best and the
+sectors, on the same card.
+
+The pause card also carries the things a driver stops to change -- camera,
+overlay density, which dash, traction control, master volume -- so changing
+one no longer means going Home, which ends the recording.
+
+**Everything on screen answers to the pad.** The d-pad (or a wheel's hat)
+moves, `A` selects, `B` backs out, the shift paddles switch tabs and `Menu`
+starts the engine, on the home screen, on both cards and in the replay
+(`A` plays, left/right step a second, up/down change speed, paddles jump
+five seconds, `B` closes). A driver on the rig should never have to reach for
+a mouse. The Controls tab prints the key reference from the live bindings
+table, so it is never out of date with a rebinding.
+
+The **Runs** tab lists the archive for the current course (or every course).
+**Replay** watches a run; **Chase** puts its best lap on the live delta,
+switching course first if it was set elsewhere; and while watching a replay,
+the Ghost picker in the session panel puts any other run on that course in
+the scene beside it. The session card says what the delta is chasing and the
+archive best on the course. A replay plays the engine from the log.
 
 Steering uses a 10% deadzone and a 1.7-power response curve. That curve is not
 a feel preference: full lock is 46 deg and the tyre peaks at 7.3 deg of slip, so
@@ -204,8 +226,16 @@ is where the car's corners actually are.
   motion blur instead.
 - **The cockpit camera is rigidly bolted to the chassis**, so the dash and wheel
   never move relative to your head and the roll you see is the world rolling.
-  Chase damps roll and pitch, because a chase camera that rolls with the car is
-  unwatchable.
+  The driver's head is not: it leans outboard, slides under braking and leads
+  into the corner, all from lateral and longitudinal g. Chase damps roll and
+  pitch, because a chase camera that rolls with the car is unwatchable, and
+  has its own heading -- a damped follower on the car's, pulled toward the
+  velocity vector -- so the car yaws inside the frame under oversteer.
+- **The body rolls and pitches about the CG, on its springs.** The wheels hang
+  off an unsprung frame that only translates and yaws, so they stay on the
+  road and the travel between wheel and arch is visible from outside.
+- **A struck cone tumbles away from the car** over a third of a second,
+  about the base edge on the far side, and you feel it through the camera.
 
 There are no hands on the wheel. At 179 deg of lock a glove modelled at 3 o'clock
 swings round to 10 o'clock, high enough to break the horizon in the middle of
