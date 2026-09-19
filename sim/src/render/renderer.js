@@ -31,6 +31,8 @@ import { buildEnvironmentMesh } from "./envmesh.js";
 // Far enough that a cone arrives out of the fog rather than popping in on
 // the endurance straights; the instance buffer holds 4096, plenty.
 const CONE_DRAW_RANGE = 280; // m
+/** How solid the replay ghost is drawn. */
+const GHOST_ALPHA = 0.55;
 const SHADOW_SIZE = 2048;     // texels, per cascade
 // Two cascades: a tight box for the car's own shadow and a wide one so the
 // cones down the course carry shadows instead of popping into them.
@@ -615,6 +617,7 @@ in vec3 vNormal;
 in vec3 vWorld;
 uniform vec4 uOverride;   // rgb to blend toward, alpha = how much
 uniform vec3 uMaterial;   // roughness, metalness, clearcoat
+uniform float uAlpha;     // 1 for the car; less for a ghost, which is blended
 ${COMMON_FS}
 out vec4 frag;
 void main() {
@@ -630,6 +633,7 @@ void main() {
   float sh = shadowAt(vWorld, n);
   vec3 c = shade(base, n, vWorld, sh, uMaterial.x, uMaterial.y, uMaterial.z);
   frag = finish(applyFog(c, vWorld));
+  frag.a = uAlpha;
 }`;
 
 // Depth-only programs for the shadow pass. Same attribute layout as the lit
@@ -1474,6 +1478,7 @@ export class Renderer {
       this.setCommon(uc, eye);
       gl.uniformMatrix4fv(uc.uViewProj, false, this.viewProj);
       gl.uniform4f(uc.uOverride, 0, 0, 0, 0);
+      gl.uniform1f(uc.uAlpha, 1);
       gl.uniform3f(uc.uMaterial, 0.88, 0.0, 0.0);   // matte scenery
       identity(this._a);
       gl.uniformMatrix4fv(uc.uModel, false, this._a);
@@ -1513,12 +1518,12 @@ export class Renderer {
     this.drawInstanced(this.pole);
     gl.disable(gl.CULL_FACE);
 
-    // The ghost before the live car: `drawCar` ends with the dash screen,
-    // which binds its own texture on unit 0 where the lit programs expect
-    // the near shadow cascade. Anything lit after it samples the dash as a
-    // depth map. The depth test sorts the two cars whichever is drawn first.
-    this.drawGhost(s, eye);
+    // The ghost AFTER the live car, because it is translucent and has to
+    // blend over whatever is behind it. `drawCar` ends with the dash screen,
+    // which leaves its texture on unit 0 where the lit programs expect the
+    // near shadow cascade, so `drawGhost` rebinds the cascades first.
     this.drawCar(s, eye);
+    this.drawGhost(s, eye);
 
     // --- sky, last: its quad sits at z = 0.9999, so wherever anything was
     // drawn the depth test rejects it before the (expensive) sky shader runs.
@@ -1641,14 +1646,38 @@ export class Renderer {
     this._ghostOv[3] = g.tint ?? 0.8;
   }
 
-  /** Body and wheels of the ghost, tinted. No dash, no steering wheel. */
+  /**
+   * Body and wheels of the ghost, tinted and translucent. No dash, no
+   * steering wheel.
+   *
+   * Translucent, and drawn even when it overlaps the live car. It used to be
+   * hidden inside a car's length, on the reasoning that two cars in one
+   * place is z-fighting -- but two laps by the same driver on the same
+   * course ARE in one place for most of the lap, and a ghost that vanishes
+   * whenever it is close and sits behind the chase camera whenever it is
+   * slower reads as no ghost at all. Blended at half strength it shows
+   * through the live car instead, which is what a ghost is for.
+   */
   drawGhost(s, eye) {
     if (!this._ghostOn) return;
     const gl = this.gl;
     const uc = this.u.car;
     gl.useProgram(this.progCar);
+    // The dash screen left its texture on unit 0; the cascades go back.
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.shadow[0].tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.shadow[1].tex);
     this.setCommon(uc, eye);
     gl.uniformMatrix4fv(uc.uViewProj, false, this.viewProj);
+    gl.uniform1f(uc.uAlpha, GHOST_ALPHA);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // Depth is tested, not written: the ghost's own back faces would
+    // otherwise punch holes in its front ones, and the sky quad's depth
+    // trick (drawn last, rejected where anything was written) must not see
+    // a translucent car as solid.
+    gl.depthMask(false);
     const ov = this._ghostOv;
     gl.uniform4f(uc.uOverride, ov[0], ov[1], ov[2], ov[3]);
     const part = (mesh, model, mat) => {
@@ -1664,6 +1693,9 @@ export class Renderer {
       part(this.car.rim, this._ghostWheelMats[i], MAT.rim);
     }
     gl.frontFace(gl.CCW);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.uniform1f(uc.uAlpha, 1);
     gl.uniform4f(uc.uOverride, 0, 0, 0, 0);
   }
 
@@ -1760,6 +1792,7 @@ export class Renderer {
     gl.useProgram(prog);
     this.setCommon(uc, eye);
     gl.uniformMatrix4fv(uc.uViewProj, false, this.viewProj);
+    gl.uniform1f(uc.uAlpha, 1);
 
     // Material per part: roughness, metalness, clearcoat.
     const part = (mesh, model, ov, mat) => {

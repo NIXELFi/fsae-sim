@@ -1601,11 +1601,9 @@ class Game {
     if (t > g.duration + 0.5) return null;   // the ghost's run has ended
     g.seek(Math.min(t, g.duration));
     const gs = g.readSample();
-    // Two cars in the same place at the same instant is not a comparison, it
-    // is z-fighting. Below a car's length apart the ghost has nothing to say,
-    // so it is not drawn -- which is also exactly the moment the gap readout
-    // beside it is telling the driver they are level.
-    if (Math.hypot(gs.x - this.car.X, gs.y - this.car.Y) < 2.2) return null;
+    // Drawn even on top of the live car: it is translucent now, and two laps
+    // by one driver overlap for most of a lap. Hiding it inside a car's
+    // length was most of why "the ghost does not work".
     return {
       x: gs.x, y: gs.y, psi: gs.yawRad,
       rollRad: gs.rollRad, pitchRad: gs.pitchRad,
