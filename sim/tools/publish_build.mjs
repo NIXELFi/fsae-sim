@@ -25,6 +25,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -66,6 +67,34 @@ if (!fs.existsSync(exePath)) {
 
 const bytes = fs.statSync(exePath).size;
 const sha256 = crypto.createHash("sha256").update(fs.readFileSync(exePath)).digest("hex");
+
+// The version in the feed has to be the version the BINARY calls itself.
+//
+// Helios decides whether an update is available by running the installed
+// executable with --version and comparing that against the feed. Publish a
+// 0.1.0 binary as "0.2.0" and every rig that takes the update goes on being
+// told 0.2.0 is available, forever, because the thing it just installed
+// still says 0.1.0. Nothing downstream can detect that; only here, where
+// both numbers are in the same room, can it be caught.
+{
+  const out = spawnSync(exePath, ["--version"], { encoding: "utf8", timeout: 15000 });
+  const said = (out.stdout || "").trim().split(/\s+/).pop();
+  if (!said) {
+    console.error(`publish_build: ${EXE_NAME} --version printed nothing; cannot check the version`);
+    process.exit(1);
+  }
+  if (said !== VERSION) {
+    console.error(
+      `publish_build: the build calls itself ${said}, but you asked to publish it as ${VERSION}.\n` +
+      `  Helios compares the feed's version against what the executable prints, so these\n` +
+      `  must agree -- otherwise everyone who installs ${VERSION} is told forever that\n` +
+      `  ${VERSION} is available.\n` +
+      `  Fix sim/src-tauri/Cargo.toml (and sim/package.json) and rebuild.`,
+    );
+    process.exit(1);
+  }
+  console.log(`version ${said} (the build agrees)`);
+}
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const KEY = process.env.SUPABASE_SERVICE_KEY || "";
@@ -157,13 +186,27 @@ async function ensureBucket() {
   console.log(`bucket  ${BUCKET} (created, public)`);
 }
 
-async function upload(objPath, body, contentType) {
+/**
+ * Put one object in the bucket.
+ *
+ * `cacheControl` matters more than it looks, and getting it wrong is silent.
+ * Supabase serves public storage through a CDN, and its default is an hour.
+ * The EXECUTABLE wants that and more -- its path carries the version, so it
+ * can never change under a given url and caching it forever is free speed.
+ * `feed.json` is the opposite: it is the one mutable object in here, and the
+ * first time a second build was published the CDN went on serving the old
+ * feed from the edge. The upload succeeded, the origin had the new build, and
+ * Helios could not see it. A published fix that reaches nobody is worse than
+ * an unpublished one, because everybody believes it shipped.
+ */
+async function upload(objPath, body, contentType, cacheControl) {
   const url = `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${objPath}`;
   const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${KEY}`,
       "Content-Type": contentType,
+      "Cache-Control": cacheControl,
       // Replace rather than fail when the same version is published twice.
       "x-upsert": "true",
     },
@@ -249,9 +292,35 @@ for (const b of carried) console.log(`        carrying over ${b.platform} ${b.ve
 feed.builds = [entry, ...carried];
 
 console.log("\nuploading the executable...");
-await upload(objectPath, fs.readFileSync(exePath), "application/octet-stream");
+// Immutable: the version is in the path, so this object can never change.
+await upload(objectPath, fs.readFileSync(exePath), "application/octet-stream",
+  "public, max-age=31536000, immutable");
 console.log("uploading the feed...");
-await upload("feed.json", JSON.stringify(feed, null, 2), "application/json");
+// Mutable, and the whole point of it is to be read after it changes.
+await upload("feed.json", JSON.stringify(feed, null, 2), "application/json",
+  "no-cache, max-age=0");
+
+// Read it back through the public url the way Helios will, and say so if the
+// CDN has not caught up -- the upload succeeding is not the same as the feed
+// being visible, which is the distinction that cost an afternoon.
+{
+  const url = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/feed.json`;
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    const live = await res.json();
+    const seen = live?.builds?.find((b) => b.platform === PLATFORM)?.version;
+    if (seen !== VERSION) {
+      console.warn(
+        `\nWARNING: the public feed still reads ${seen ?? "nothing"} for ${PLATFORM}.\n` +
+        `  The upload went through -- this is the CDN edge serving the old copy.\n` +
+        `  Helios busts the cache when it reads the feed, so it will see ${VERSION};\n` +
+        `  a plain browser may not for a while.`,
+      );
+    }
+  } catch {
+    console.warn("\n(could not read the feed back to check it; the upload succeeded)");
+  }
+}
 
 console.log(`\npublished ${VERSION} for ${PLATFORM}`);
 console.log(`feed: ${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/feed.json`);
