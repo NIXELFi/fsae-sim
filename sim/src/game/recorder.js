@@ -645,7 +645,16 @@ export class Recorder {
         // `null` is a sector that was never timed, which is why this reads
         // `!= null` and not a truthiness test: a genuine 0 would be absurd,
         // but so would silently treating an untimed sector as the quickest.
-        if (v != null && (best == null || v < best)) best = v;
+        if (v == null) continue;
+        // And a split whose PREDECESSOR was never timed is not this sector's
+        // time either: the clock for it started at the last boundary that
+        // was crossed, so it spans two sectors. `Timing.foldSectorBests`
+        // already refuses these; this fold did not, so `run.json` could carry
+        // a spanning split as a sector best and a theoretical best built on
+        // it -- and Helios folds `bestSectors` into the team records. The
+        // two folds are one rule and have to stay one rule.
+        if (i > 0 && l.sectors[i - 1] == null) continue;
+        if (best == null || v < best) best = v;
       }
       bestSectors.push(best);
     }

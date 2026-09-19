@@ -145,6 +145,34 @@ section("A run that chased a reference says so, even when it never beat it");
   ok("no reference is null, not an empty object", openRecorder().toManifest().reference === null);
 }
 
+section("A split that spans two sectors is not a sector best");
+{
+  // THE BUG THIS EXISTS FOR: `Timing.foldSectorBests` skips a split whose
+  // predecessor is null, because `sectorStart` is still back at the last
+  // boundary that WAS crossed and the split covers two sectors. The
+  // recorder's own fold in `stats()` did not, so `run.json` could carry a
+  // spanning split as a sector best and a theoretical best built on it --
+  // and Helios folds `bestSectors` into the team records.
+  const rec = openRecorder();
+  const ctx = makeContext();
+  rec.markLine();
+  for (let i = 0; i < 400; i++) rec.tick(0.01, ctx);
+  // A clean lap: 10 / 12 / 9.
+  rec.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true }, [10, 12, 9]);
+  // A lap that jumped the second boundary: S2 was never timed and the final
+  // split ran from the first boundary to the line. 5 s for "S3" is quicker
+  // than anything -- because it is not S3.
+  rec.recordLap({ lap: 2, raw: 30, cones: 0, off: 0, total: 30, valid: true }, [10.5, null, 5]);
+  // And a lap where only S1 was skipped, so S2 spans S1 and S2 but S3 is honest.
+  rec.recordLap({ lap: 3, raw: 30.5, cones: 0, off: 0, total: 30.5, valid: true }, [null, 21, 8.5]);
+  rec.finish();
+  const st = rec.toManifest().stats;
+  ok("S1 best is the quickest honest S1", st.bestSectors[0] === 10, String(st.bestSectors[0]));
+  ok("S2 best ignores the split that spanned S1 and S2", st.bestSectors[1] === 12, String(st.bestSectors[1]));
+  ok("S3 best ignores the split that spanned S2 and S3", st.bestSectors[2] === 8.5, String(st.bestSectors[2]));
+  ok("so the theoretical best is 10 + 12 + 8.5", st.theoreticalBestS === 30.5, String(st.theoreticalBestS));
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
   console.error(`${failures} FAILED`);
