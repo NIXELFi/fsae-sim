@@ -240,7 +240,24 @@ export class BicycleModel {
     // slip angle than it has, so the car is a little soft at a crawl; the
     // standstill scrub and jacking terms in the force feedback carry the feel
     // down there instead.
-    const uSafe = Math.max(Math.abs(u), 3.0);
+    //
+    // That floor was the wrong cure. `atan2(v + a r, 3.0)` is not a slip
+    // angle at 0.4 m/s, it is a lie about the kinematics: a car creeping at
+    // full lock has its front tyre rolling along the steered direction and
+    // nearly zero slip, and the floor reported forty-odd degrees instead. The
+    // tyre then made a kilonewton sideways, the car snapped into a slide and
+    // a spin at walking pace, and because the relaxation rate used |u| the
+    // lagged angle could not correct while the motion was sideways. That is
+    // the "sliding for no reason at a standstill" the rig reported.
+    //
+    // So: the kinematics use the real forward speed with only a singularity
+    // guard, and the loop gain is bounded a different way -- the LATERAL
+    // FORCE is faded in with speed below 3 m/s (`lowSpeed`, further down).
+    // The gain the lateral equation sees is C/u times that fade, which is
+    // what the floor bounded, and the angle is now the angle. Above 3 m/s
+    // nothing changes at all.
+    const uKin = Math.max(Math.abs(u), 0.5);
+    const lowSpeed = Math.min(1, V / 3.0);
 
     // ---- aero (2026 CFD map) ----
     const q = 0.5 * p.airDensityKgM3 * V * V;
@@ -279,9 +296,12 @@ export class BicycleModel {
     const muXR = axleMu(p.muLong, FzR, dFzR, this.Fz0, p.tireLoadSensitivity);
 
     // ---- slip angles with relaxation-length lag ----
-    const aFraw = d - Math.atan2(v + this.a * r, uSafe);
-    const aRraw = -Math.atan2(v - this.b * r, uSafe);
-    const relaxRate = Math.min(Math.abs(u) / p.relaxLengthM, 1 / dt); // stable at rest
+    const aFraw = d - Math.atan2(v + this.a * r, uKin);
+    const aRraw = -Math.atan2(v - this.b * r, uKin);
+    // On the distance the tyre rolls in ANY direction: a car sliding sideways
+    // is rolling its tyres sideways, and a lag that only counted forward
+    // travel froze the slip angle for the whole slide.
+    const relaxRate = Math.min(V / p.relaxLengthM, 1 / dt); // stable at rest
     this.aF += (aFraw - this.aF) * Math.min(1, relaxRate * dt);
     this.aR += (aRraw - this.aR) * Math.min(1, relaxRate * dt);
 
@@ -316,6 +336,11 @@ export class BicycleModel {
     const fRR = tyreForces(this.aR, kRR, FzRR, muYRR, muXRR);
 
     const fF = tyreForces(this.aF, kF, FzF, muYF, muXF);
+    // The low-speed fade; see `uKin`. Lateral only: longitudinal force is
+    // what gets the car moving in the first place.
+    fF.fy *= lowSpeed;
+    fRL.fy *= lowSpeed;
+    fRR.fy *= lowSpeed;
     const fR = {
       fx: fRL.fx + fRR.fx,
       fy: fRL.fy + fRR.fy,

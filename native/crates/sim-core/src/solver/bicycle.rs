@@ -205,12 +205,15 @@ impl BicycleSolver {
 
         let (u, v, r) = (self.s.u, self.s.v, self.s.r);
         let speed = u.hypot(v);
-        // Speed floor in the slip-angle denominator; see bicycle.js. It also
-        // sets the lateral loop gain (dFy/dv goes as C_alpha/u_safe), and at
-        // 0.6 m/s that was high enough to ring at 30-85 Hz below about 2.5 m/s.
-        // Nothing above 3 m/s is affected, because up there the floor is not
-        // the value being used.
-        let u_safe = u.abs().max(3.0);
+        // The slip-angle kinematics use the real forward speed with only a
+        // singularity guard, and the lateral force is faded in with speed
+        // below 3 m/s instead. The old 3 m/s floor in the denominator bounded
+        // the lateral loop gain but lied about the angle: a car creeping at
+        // full lock reported forty-odd degrees of front slip, made a
+        // kilonewton sideways and snapped into a slide at walking pace. See
+        // bicycle.js, which this mirrors operation for operation.
+        let u_kin = u.abs().max(0.5);
+        let low_speed = (speed / 3.0).min(1.0);
 
         let p_a = self.c.params.a();
         let p_b = self.c.params.b();
@@ -230,11 +233,12 @@ impl BicycleSolver {
         let (d_fz_f, d_fz_r) = self.lateral_transfer(self.ay);
 
         // Slip angles with relaxation lag.
-        let a_f_raw = d - (v + p_a * r).atan2(u_safe);
-        let a_r_raw = -(v - p_b * r).atan2(u_safe);
+        let a_f_raw = d - (v + p_a * r).atan2(u_kin);
+        let a_r_raw = -(v - p_b * r).atan2(u_kin);
         let relax_len = self.c.tyre.relaxation_length();
+        // On the distance rolled in ANY direction, so a slide relaxes too.
         let blend = if relax_len > 0.0 {
-            ((u.abs() / relax_len) * dt).min(1.0)
+            ((speed / relax_len) * dt).min(1.0)
         } else {
             1.0
         };
@@ -265,10 +269,16 @@ impl BicycleSolver {
         let u_rr = u + r * half_track_r;
         let k_rl = (self.w_rl * radius - u_rl) / k_den;
         let k_rr = (self.w_rr * radius - u_rr) / k_den;
-        let f_rl = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rl }, fz_rl);
-        let f_rr = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rr }, fz_rr);
+        let mut f_rl = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rl }, fz_rl);
+        let mut f_rr = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rr }, fz_rr);
 
         let mut af = self.axle_forces(Slip { alpha: self.a_f, kappa: k_f }, fz_f, d_fz_f);
+        // The low-speed fade (see `u_kin`), lateral only, before the grip
+        // factor -- the same order as the JS build.
+        af.fy *= low_speed;
+        af.align_nm *= low_speed;
+        f_rl.fy *= low_speed;
+        f_rr.fy *= low_speed;
         let ar = AxleForces {
             fx: f_rl.fx + f_rr.fx,
             fy: f_rl.fy + f_rr.fy,

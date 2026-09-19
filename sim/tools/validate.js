@@ -110,6 +110,31 @@ console.log("\nSKIDPAD  (steady 9.125 m radius, real SDM26 run = 5.02 s)");
   check("lateral acceleration", g, 1.30, 1.58, " g");
 }
 
+// ------------------------------------------------------------- low speed ---
+// A car creeping off the line at full lock turns; it does not slide. The old
+// 3 m/s floor in the slip-angle denominator reported forty degrees of front
+// slip at walking pace, and the car snapped sideways and spun from a
+// standstill on the rig. Kinematic yaw rate is u tan(delta) / L; the model
+// should sit near it, with the lateral velocity no more than the rear-axle
+// offset b r plus a little.
+console.log("\nLOW SPEED  (full lock, creeping off the line)");
+{
+  const { car } = fresh();
+  car.respawn(0, 0, 0, 0);
+  car.steeringServo = { maxRateDegPerS: 1e6, accelDegPerS2: 1e9, lagS: 0.001 };
+  const dt = 1 / 500;
+  let peakSlide = 0;
+  for (let i = 0; i < 4 * 500; i++) {
+    car.step(dt, { steer: 1, throttle: 0.15, brake: 0 });
+    // The slide: lateral velocity beyond what the yaw rate accounts for.
+    peakSlide = Math.max(peakSlide, Math.abs(car.v - car.b * car.r));
+  }
+  const kinematic = (car.u * Math.tan(car.delta)) / SDM26.wheelbaseM;
+  check("yaw rate vs kinematic at 4 s", car.r / kinematic, 0.7, 1.3, "x");
+  check("peak slide velocity", peakSlide, 0, 0.6, " m/s");
+  check("still going forward", car.u, 0.8, 4, " m/s");
+}
+
 // ------------------------------------------------------------------ accel ---
 // FSAE 75 m acceleration. Helios pins muLong so this lands ~4.2 s -- but the
 // lap sim's launch is traction-limited by construction, so to compare like for

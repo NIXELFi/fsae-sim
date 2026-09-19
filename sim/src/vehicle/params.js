@@ -355,7 +355,7 @@ export const SDM26 = {
   // EST: how much surface texture comes through the seat. 1.0 is the baseline
   // that felt right for a 267 kg car on a lot; 0 is a perfectly smooth world.
   // Purely a camera effect -- it does not touch the physics.
-  vibrationScale: 1.0,
+  vibrationScale: 0.2,
 
   // EST: driver eye point, relative to the CG (x forward, z up).
   eyeAheadOfCgM: -0.15,
@@ -375,9 +375,9 @@ export const SDM26 = {
   // small -- centimetres and a couple of degrees -- and together they are a
   // large part of why a rig reads as a car rather than a screen. Purely
   // camera: none of this touches the physics.
-  headLatMPerG: 0.022,
+  headLatMPerG: 0.011,
   headLongMPerG: 0.018,
-  headYawDegPerG: 2.2,
+  headYawDegPerG: 1.1,
 };
 
 /**
