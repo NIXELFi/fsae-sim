@@ -15,8 +15,9 @@
 // with a SHA-256 in it rather than anything cleverer: Helios verifies the hash
 // before it installs, so the transport only has to be reachable, not trusted.
 //
-// The bucket must exist and be public-read. Create it once:
-//   Supabase dashboard -> Storage -> New bucket -> name "sim", public.
+// The bucket is created on the first publish if it is not there, public-read,
+// so there is no dashboard step. Creating it needs the service key the upload
+// already needs, and a bucket that exists is left alone.
 //
 // Decoupling this from the Helios release is the whole point. A new simulator
 // is a new row in this feed, not a new Helios installer for fifty people.
@@ -98,6 +99,64 @@ if (!SUPABASE_URL || !KEY) {
   process.exit(1);
 }
 
+/**
+ * Make sure the bucket exists, and is public.
+ *
+ * There used to be a sentence in the README asking whoever published to go and
+ * click through the Supabase dashboard first. That is a step that gets done
+ * once, by one person, and is then a mystery to everybody else -- and the
+ * failure when it has not been done is a 400 from an upload, which reads like
+ * a broken script rather than a missing bucket.
+ *
+ * PUBLIC on purpose. What is in here is a build of a driving simulator, the
+ * feed names its SHA-256, and Helios verifies that hash before a byte becomes
+ * executable -- so the transport only has to be reachable, not trusted. A
+ * private bucket would mean shipping a credential to every rig that wants to
+ * download a game.
+ */
+async function ensureBucket() {
+  const head = await fetch(`${SUPABASE_URL}/storage/v1/bucket/${BUCKET}`, {
+    headers: { Authorization: `Bearer ${KEY}`, apikey: KEY },
+  });
+  if (head.ok) {
+    const info = await head.json().catch(() => ({}));
+    if (info.public === false) {
+      throw new Error(
+        `the "${BUCKET}" bucket exists but is private; Helios downloads it without ` +
+        `credentials, so make it public in the dashboard (Storage -> ${BUCKET} -> ` +
+        `Settings -> Public bucket)`,
+      );
+    }
+    console.log(`bucket  ${BUCKET} (exists, public)`);
+    return;
+  }
+  if (head.status !== 404 && head.status !== 400) {
+    throw new Error(`could not check the "${BUCKET}" bucket: ${head.status} ${await head.text()}`);
+  }
+  const made = await fetch(`${SUPABASE_URL}/storage/v1/bucket`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${KEY}`,
+      apikey: KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ id: BUCKET, name: BUCKET, public: true }),
+  });
+  if (!made.ok) {
+    const body = await made.text();
+    // Two publishes at once, or a bucket that was there after all.
+    if (made.status === 409) {
+      console.log(`bucket  ${BUCKET} (already there)`);
+      return;
+    }
+    throw new Error(
+      `could not create the "${BUCKET}" bucket: ${made.status} ${body}\n` +
+      `  (this needs a SERVICE-ROLE key, not the anon key)`,
+    );
+  }
+  console.log(`bucket  ${BUCKET} (created, public)`);
+}
+
 async function upload(objPath, body, contentType) {
   const url = `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${objPath}`;
   const res = await fetch(url, {
@@ -146,6 +205,11 @@ async function readFeed() {
   if (!Array.isArray(json?.builds)) return { error: "feed.json has no builds array" };
   return { feed: json };
 }
+
+// Before the feed is even read: on a fresh project there is no bucket, and
+// every call below would come back as a 400 that reads like a broken script
+// rather than like a missing bucket.
+await ensureBucket();
 
 const read = await readFeed();
 if (read.error) {

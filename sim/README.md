@@ -1042,7 +1042,10 @@ tools/
   check_shaders.mjs imports every render module and checks each shader literal
                     (a backtick in a GLSL comment silently truncates a shader)
   make_sample_run.mjs  a robot driver that files real runs, for demos and tests
-  publish_build.mjs a build to the feed Helios downloads from
+  publish_build.mjs a build to the feed Helios downloads from. Needs
+                    SUPABASE_URL + SUPABASE_SERVICE_KEY; creates the bucket on
+                    the first run, so there is no dashboard step. --dry-run
+                    prints what it would publish and touches nothing.
 src/
   vehicle/      params, paramMeta (provenance), tyre, powertrain, bicycle,
                 ETC map, live setup adjustments, modules + library
