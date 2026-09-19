@@ -5,11 +5,16 @@
 // file reads whatever the active profile says. Adding a device means adding a
 // profile, not editing this.
 //
-// The Xbox layout below is still the reference for anything reporting the
-// Gamepad API's "standard" mapping, which is what an Xbox One/Series pad gives
-// on Windows over both USB and Bluetooth. Wheels do NOT use standard mapping
-// and their axis assignments vary by vendor, which is why they get a
-// calibration flow rather than a fixed table:
+// Nothing here names a key or a button any more. Every control is a binding in
+// the active profile, the settings panel rebinds them by watching what you
+// press, and the table of what the controls ARE lives in `controlBindings.js`.
+// What follows is the shipped default for a pad, not a rule.
+//
+// The Xbox layout below is the reference for anything reporting the Gamepad
+// API's "standard" mapping, which is what an Xbox One/Series pad gives on
+// Windows over both USB and Bluetooth. Wheels do NOT use standard mapping and
+// their axis assignments vary by vendor, which is why they get a detect-and-
+// calibrate flow rather than a fixed table:
 //
 //   axes[0]  left stick X      steering
 //   axes[1]  left stick Y      (unused)
@@ -25,7 +30,7 @@
 //   buttons[9] Menu            pause
 //
 // Steering gets a small deadzone and a squared response curve. The curve is not
-// a gimmick: full lock is 28 degrees and the tyre peaks at 8.5 degrees of slip,
+// a gimmick: full lock is 46 degrees and the tyre peaks at 7.3 degrees of slip,
 // so a linear stick makes the useful travel about a third of the range. Squaring
 // it puts the precision where the grip is.
 
@@ -34,7 +39,25 @@ import {
   applyPedal,
   applySteeringCurve,
   detectProfile, usableLockFrac, stepPedal } from "./controlProfiles.js";
-import { presetFor, presetPaths } from "./wheelPresets.js";
+import { roadFromRimDeg, rimFromRoadDeg } from "../vehicle/params.js";
+import { presetFor, presetPaths, PRESET_VERSION } from "./wheelPresets.js";
+import { ACTIONS, buttonSlot } from "./controlBindings.js";
+
+/**
+ * Held, not tapped. These are read as a level every frame and never appear in
+ * `edges`; the pedals and the steering keys are the obvious ones, and the
+ * launch assist is held because letting go is how you release the clutch.
+ */
+const HOLD_ACTIONS = new Set(["steerLeft", "steerRight", "throttle", "brake", "launch"]);
+/** Auto-repeat while held; see `applyRepeat`. */
+const REPEAT_ACTIONS = new Set(["setupUp", "setupDown"]);
+/** Everything else: one edge per press. */
+const EDGE_ACTIONS = ACTIONS.filter(
+  (a) => !HOLD_ACTIONS.has(a.id) && !REPEAT_ACTIONS.has(a.id),
+);
+
+/** First virtual button index for a native base's hat switch: above 4 devices x 32 real buttons. */
+export const HAT_BASE = 128;
 
 // Only used to decide whether the pad is being touched at all; the real
 // deadzone comes from the active profile.
@@ -54,13 +77,11 @@ export class Input {
     this.padName = "";
     this.usingPad = false;
 
-    // Edge-triggered actions, consumed once per frame by the game.
-    this.edges = {
-      upshift: false, downshift: false, reset: false, restart: false,
-      pause: false, camera: false, traction: false, mapEditor: false,
-      home: false,
-      setupPrev: false, setupNext: false, setupUp: false, setupDown: false,
-    };
+    // Edge-triggered actions, consumed once per frame by the game. Built from
+    // the action table rather than listed here, so an action that the settings
+    // panel offers to bind cannot be one the game never reads.
+    this.edges = {};
+    for (const a of ACTIONS) if (!HOLD_ACTIONS.has(a.id)) this.edges[a.id] = false;
     // D-pad up/down auto-repeat. At 0.1% a press, walking roll stiffness a few
     // points would be dozens of taps, so held presses repeat and then speed up.
     this._holdSince = { setupUp: 0, setupDown: 0 };
@@ -79,7 +100,10 @@ export class Input {
      */
     this.carSpeed = 0;
     this.carWheelbaseM = 1.53;
-    this.carPeakSlipDeg = 8.5;
+    // Overwritten at boot from the tyre model (`main.js`). The fallback is
+    // the tyre's actual peak, so a path that somehow skips that boot step
+    // behaves like the car rather than like a car from two revisions ago.
+    this.carPeakSlipDeg = 7.3;
     /** Ramped keyboard pedals (see controlProfiles.stepPedal) and their clock. */
     this.kbPedal = { throttle: 0, brake: 0 };
     this._kbPedalAt = 0;
@@ -136,19 +160,7 @@ export class Input {
     });
 
     addEventListener("gamepadconnected", (e) => {
-      this.padIndex = e.gamepad.index;
-      this.padName = e.gamepad.id;
-      // Pick a profile from the vendor string unless the driver has chosen one
-      // by hand. The Gamepad API gives a free-form id and nothing else, so this
-      // is pattern matching and will sometimes be wrong -- it only sets the
-      // starting point, and the choice is remembered once overridden.
-      if (!this.pinned) {
-        const guess = detectProfile(e.gamepad.id);
-        this.settings.setActive(guess);
-        this.profile = this.settings.active();
-        this.onProfileChange?.(guess, e.gamepad.id);
-      }
-      this.onPadChange?.(true, e.gamepad.id);
+      if (this.adoptPad(e.gamepad)) this.onPadChange?.(true, this.padName);
     });
     addEventListener("gamepaddisconnected", (e) => {
       if (e.gamepad.index === this.padIndex) {
@@ -164,6 +176,18 @@ export class Input {
     this.pinned = true;
     this.settings.pinned = true;
     this.settings.setActive(id);
+    this.profile = this.settings.active();
+    this.onProfileChange?.(id, this.padName);
+  }
+
+  /**
+   * Switch profile for this session only -- no save, no pin.
+   *
+   * `setProfile` is the driver choosing at the rig, and it should stick.
+   * This is a launcher describing a run, and it should not.
+   */
+  useProfileForSession(id) {
+    this.settings.useForSession(id);
     this.profile = this.settings.active();
     this.onProfileChange?.(id, this.padName);
   }
@@ -207,17 +231,64 @@ export class Input {
     const nd = this.nativeDevice;
     if (nd && nd.present) return this.syntheticPad(nd);
     const pads = navigator.getGamepads?.() ?? [];
-    if (this.padIndex != null && pads[this.padIndex]) return pads[this.padIndex];
-    // Some browsers only populate the array after the first button press, so
-    // adopt whatever shows up.
+    const cur = this.padIndex != null ? pads[this.padIndex] : null;
+    // Keep what we have, unless it is an unrecognised device: browsers only
+    // populate `getGamepads()` after the first input, so the first thing to
+    // show up can easily be the SpaceMouse rather than the wheel, and nothing
+    // else would ever look again.
+    if (cur && padRank(cur.id) > 1) return cur;
+    let best = cur ?? null;
     for (const p of pads) {
-      if (p && p.connected) {
-        this.padIndex = p.index;
-        this.padName = p.id;
-        return p;
-      }
+      if (!p || !p.connected) continue;
+      if (!best || padRank(p.id) > padRank(best.id)) best = p;
+    }
+    if (best) {
+      if (best !== cur) this.adoptPad(best);
+      return best;
     }
     return null;
+  }
+
+  /**
+   * Start reading this device, and guess a profile from it.
+   *
+   * Refuses to displace something better. A rig has more plugged in than a
+   * wheel -- a button box, a handbrake, a SpaceMouse on the CAD machine -- and
+   * every one of them enumerates as a gamepad. Taking the newest to announce
+   * itself is how a MOZA base ends up behind an "Unknown Gamepad" and the
+   * profile switches to a controller nobody is holding, which is exactly what
+   * this rig does with three devices attached.
+   *
+   * @returns true if the device was adopted
+   */
+  adoptPad(g) {
+    if (!g) return false;
+    // The rig is reading a wheel natively and `pad()` never looks at the
+    // Gamepad API while it is. Without this, a button box or a pad
+    // enumerating mid-session switched the live profile off `wheel` -- losing
+    // the force feedback, the rim mapping and the wheel's own bindings --
+    // while DirectInput carried on being the thing actually steering the car.
+    if (this.nativeDevice?.present) return false;
+    const pads = navigator.getGamepads?.() ?? [];
+    const cur = this.padIndex != null ? pads[this.padIndex] : null;
+    if (cur && cur.connected && cur.index !== g.index && padRank(cur.id) >= padRank(g.id)) {
+      return false;
+    }
+    this.padIndex = g.index;
+    this.padName = g.id;
+    // Pick a profile from the vendor string unless the driver has chosen one
+    // by hand. The Gamepad API gives a free-form id and nothing else, so this
+    // is pattern matching and will sometimes be wrong -- it only sets the
+    // starting point, and the choice is remembered once overridden.
+    if (!this.pinned) {
+      const guess = detectProfile(g.id);
+      if (guess !== this.settings.activeId) {
+        this.settings.setActive(guess);
+        this.profile = this.settings.active();
+        this.onProfileChange?.(guess, g.id);
+      }
+    }
+    return true;
   }
 
   /**
@@ -227,18 +298,19 @@ export class Input {
    */
   syntheticPad(nd) {
     // Buttons: 32 per device, base first, so a button box's buttons sit at
-    // 32 and up. The base's hat becomes the standard d-pad indices 12-15.
+    // 32 and up. The base's hat becomes four virtual buttons ABOVE every
+    // real one (HAT_BASE..HAT_BASE+3: up, down, left, right) -- it used to
+    // overwrite indices 12-15, which on a MOZA base are the shift paddles,
+    // so a paddle pull stepped the setup menu instead of shifting.
     const words = Array.isArray(nd.buttons) ? nd.buttons : [nd.buttons | 0];
     const buttons = [];
     for (const w of words) {
       for (let i = 0; i < 32; i++) buttons.push({ pressed: !!(w & (1 << i)), value: w & (1 << i) ? 1 : 0 });
     }
-    if (nd.pov >= 0) {
-      const dir = Math.round(nd.pov / 9000) % 4; // 0 up, 1 right, 2 down, 3 left
-      buttons[12] = { pressed: dir === 0, value: dir === 0 ? 1 : 0 };
-      buttons[15] = { pressed: dir === 1, value: dir === 1 ? 1 : 0 };
-      buttons[13] = { pressed: dir === 2, value: dir === 2 ? 1 : 0 };
-      buttons[14] = { pressed: dir === 3, value: dir === 3 ? 1 : 0 };
+    while (buttons.length < HAT_BASE) buttons.push({ pressed: false, value: 0 });
+    const dir = nd.pov >= 0 ? Math.round(nd.pov / 9000) % 4 : -1; // 0 up, 1 right, 2 down, 3 left
+    for (const [k, d] of [[0, 0], [1, 2], [2, 3], [3, 1]]) {
+      buttons[HAT_BASE + k] = { pressed: dir === d, value: dir === d ? 1 : 0 };
     }
     if (this._nativeAnnounced !== this.nativeName) {
       this._nativeAnnounced = this.nativeName;
@@ -262,10 +334,11 @@ export class Input {
    */
   applyWheelPreset(name) {
     const s = this.settings;
-    if (s.read("wheel", "wheel.presetApplied") === name) return null;
+    const stamp = `${name}@${PRESET_VERSION}`;
+    if (s.read("wheel", "wheel.presetApplied") === stamp) return null;
     const preset = presetFor(name);
     for (const [path, value] of Object.entries(presetPaths(preset))) s.set("wheel", path, value);
-    s.set("wheel", "wheel.presetApplied", name);
+    s.set("wheel", "wheel.presetApplied", stamp);
     this.lastPreset = preset;
     this.profile = s.active();
     return preset;
@@ -290,8 +363,11 @@ export class Input {
    *
    * "match-car" is the honest one: the rim turns through the car's real
    * steering ratio, so a driver's hand position corresponds to an actual front
-   * wheel angle. For SDM26 that is 28 degrees of lock through the measured
-   * 4.411 ratio, or 247 degrees at the rim lock to lock -- set the wheel's
+   * wheel angle. For SDM26 that is 46 degrees of lock, which the MEASURED
+   * rack (the toe-vs-rim table in `params.js`) puts at 179 degrees of rim
+   * either side -- 358 lock to lock. The nominal 4.411 ratio would say 203
+   * either side, and the difference is the rack's non-linearity, which is why
+   * the table is what the car steers through -- set the wheel's
    * driver software to 247 and what you feel is what the tyres are doing.
    * Leave a 900-degree wheel on 900 and this mapping correctly uses only the
    * first 27% of its travel,
@@ -308,12 +384,25 @@ export class Input {
     // Rim angle in degrees, from the -1..1 axis, with the centre trim applied.
     const rimDeg = raw * (rotation / 2) - (w.centreTrimDeg || 0);
 
-    const carRimHalf = (this.carLockDeg ?? 28) * (this.carSteeringRatio ?? 4) * 0.5;
+    // Rim travel to one side is the rack's MEASURED stop: 179 deg for SDM26,
+    // so 358 lock to lock. Not lock x a nominal constant ratio -- the real
+    // rack is progressive and the constant puts the stop 24 deg out.
+    const carRimHalf = this.carRimHalfDeg ?? 179;
     let norm;
     if (w.mapping === "match-car") {
-      // The car's rim travel is lock * ratio; anything beyond it is over-lock.
-      norm = rimDeg / Math.max(carRimHalf, 1e-6);
-      this.rim.halfLockDeg = carRimHalf;
+      // Through the car's measured rim -> road table, the same one the desktop
+      // rig steers by natively. Anything past the stop is over-lock.
+      const maxRoad = Math.max(this.carLockDeg ?? 46, 1e-6);
+      const road = roadFromRimDeg(this.carSteering, rimDeg);
+      norm = road / maxRoad;
+      // The end stop goes where the SOFT LOCK bites, which is where the road
+      // wheel reaches the car's live lock -- not at the rack's stop. They are
+      // the same place only at the default lock; see `rimFromRoadDeg`. Same
+      // reasoning and same formula as `rig.rs` on the desktop path.
+      this.rim.halfLockDeg = Math.min(
+        Math.abs(rimFromRoadDeg(this.carSteering, maxRoad)),
+        carRimHalf,
+      );
     } else {
       norm = rimDeg / (rotation / 2);
       this.rim.halfLockDeg = rotation / 2;
@@ -334,17 +423,35 @@ export class Input {
     const prof = this.profile;
     let steer = 0, throttle = 0, brake = 0, launch = false;
 
+    // How much of the car's lock is usable at this speed; see
+    // `controlProfiles.usableLockFrac`. It applies to every control that has
+    // no physical stop of its own -- keyboard, mouse AND stick.
+    //
+    // It used to be computed below the pad branch and therefore reached only
+    // the keyboard and the mouse, while both gamepad profiles declared
+    // `speedSensitive` and got nothing from it. That went unnoticed while full
+    // lock was 28 degrees; it went to 46 in the same change that added the
+    // declaration, so a full stick deflection at speed now asks for far more
+    // steering than the front axle can use.
+    const lockFrac = usableLockFrac(prof.steering?.speedSensitive, this.carSpeed, {
+      wheelbaseM: this.carWheelbaseM,
+      maxSteerDeg: this.carLockDeg ?? 46,
+      peakSlipAngleDeg: this.carPeakSlipDeg,
+    });
+
     if (p) {
       this.rawAxes = Array.from(p.axes);
       const axes = prof.axes || { steer: 0 };
       const raw = p.axes[axes.steer] ?? 0;
 
       if (prof.kind === "wheel") {
+        // A wheel has a real stop at a real angle and its own soft lock, so it
+        // is not capped here: the driver can see and feel where the lock is.
         steer = this.wheelSteer(raw, prof);
       } else {
         // Negative because pushing the stick left must steer left, and the
         // vehicle model takes left as positive.
-        steer = -applySteeringCurve(prof.steering, raw);
+        steer = -applySteeringCurve(prof.steering, raw) * lockFrac;
       }
 
       const readPedal = (which) => {
@@ -359,23 +466,23 @@ export class Input {
       brake = readPedal("brake");
 
       const B = prof.buttons || {};
-      const pressed = (i) => i != null && !!p.buttons[i]?.pressed;
-      const wasPressed = (i) => i != null && !!this._prevButtons[i];
+      // A negative index is "not bound to anything on this device" -- see
+      // `UNBOUND`. It has to be rejected here rather than relied on to index
+      // nothing, because `buttons[-1]` is undefined only by luck.
+      const bound = (i) => typeof i === "number" && i >= 0;
+      const pressed = (i) => bound(i) && !!p.buttons[i]?.pressed;
+      const wasPressed = (i) => bound(i) && !!this._prevButtons[i];
       const edge = (i) => pressed(i) && !wasPressed(i);
 
       launch = pressed(B.launch);
-      this.edges.upshift = edge(B.upshift);
-      this.edges.downshift = edge(B.downshift);
-      this.edges.reset = edge(B.reset);
-      this.edges.traction = edge(B.traction);
-      this.edges.camera = edge(B.camera);
-      this.edges.restart = edge(B.restart);
-      this.edges.pause = edge(B.pause);
-      this.edges.home = edge(B.home);
+      // Every edge action the device has a button for. `=` would be wrong:
+      // the keyboard is read after this and must be able to add to it.
+      for (const a of EDGE_ACTIONS) {
+        if (edge(B[buttonSlot(a)])) this.edges[a.id] = true;
+      }
 
-      // D-pad: left/right pick the setting, up/down move it.
-      this.edges.setupPrev = edge(B.dpadLeft);
-      this.edges.setupNext = edge(B.dpadRight);
+      // D-pad: left/right pick the setting (above, as setupPrev/setupNext),
+      // up/down move it and repeat while held.
       this.applyRepeat("setupUp", pressed(B.dpadUp), edge(B.dpadUp));
       this.applyRepeat("setupDown", pressed(B.dpadDown), edge(B.dpadDown));
 
@@ -389,19 +496,18 @@ export class Input {
     // Keyboard: always live, so the game is playable (and testable) without a
     // pad. Pad input wins whenever it is non-zero.
     const k = this.keys;
-    const kSteer = (k.has("ArrowLeft") || k.has("KeyA") ? 1 : 0) -
-                   (k.has("ArrowRight") || k.has("KeyD") ? 1 : 0);
-    const kThrottle = k.has("ArrowUp") || k.has("KeyW") ? 1 : 0;
-    const kBrake = k.has("ArrowDown") || k.has("KeyS") ? 1 : 0;
+    // The profile's key bindings. Every profile carries a set, because the
+    // keyboard stays live whatever is plugged in: a driver on a wheel still
+    // pauses and still goes home from the keyboard.
+    const K = prof.keys || {};
+    const held = (codes) => Array.isArray(codes) && codes.some((c) => k.has(c));
+    const kEdge = (code) => k.has(code) && !this._prevKeys.has(code);
+    const anyEdge = (codes) => Array.isArray(codes) && codes.some(kEdge);
 
-    // Digital steering only gets the lock the car can use at this speed; see
-    // controlProfiles.usableLockFrac. The same cap applies to the mouse, which
-    // has a position but no stop.
-    const lockFrac = usableLockFrac(prof.steering?.speedSensitive, this.carSpeed, {
-      wheelbaseM: this.carWheelbaseM,
-      maxSteerDeg: this.carLockDeg ?? 28,
-      peakSlipAngleDeg: this.carPeakSlipDeg,
-    });
+    const kSteer = (held(K.steerLeft) ? 1 : 0) - (held(K.steerRight) ? 1 : 0);
+    const kThrottle = held(K.throttle) ? 1 : 0;
+    const kBrake = held(K.brake) ? 1 : 0;
+
     // Wall-clock step for everything ramped below: poll() runs once per
     // rendered frame, and a ramp must not depend on the frame rate.
     const now = performance.now();
@@ -415,7 +521,7 @@ export class Input {
     // counter-steer, the reflex a driver has and a key does not. Both are
     // profile settings; zero ramps and zero damping give the old step.
     const stc = prof.steering ?? {};
-    const lock = Math.max(1, this.carLockDeg ?? 28);
+    const lock = Math.max(1, this.carLockDeg ?? 46);
     {
       const up = Math.max(stc.keyRampUpS ?? 0, 1e-3);
       const down = Math.max(stc.keyRampDownS ?? 0, 1e-3);
@@ -482,35 +588,34 @@ export class Input {
     }
     if (this.kbPedal.throttle > 0 && throttle === 0) throttle = this.kbPedal.throttle;
     if (this.kbPedal.brake > 0 && brake === 0) brake = this.kbPedal.brake;
-    if (k.has("Space")) launch = true;
+    if (held(K.launch)) launch = true;
 
-    const kEdge = (code) => k.has(code) && !this._prevKeys.has(code);
-    if (kEdge("ShiftRight") || kEdge("KeyE")) this.edges.upshift = true;
-    if (kEdge("ShiftLeft") || kEdge("KeyQ")) this.edges.downshift = true;
-    if (kEdge("KeyR")) this.edges.reset = true;
-    if (kEdge("Backspace")) this.edges.restart = true;
-    if (kEdge("KeyC")) this.edges.camera = true;
-    if (kEdge("KeyT")) this.edges.traction = true;
-    if (kEdge("KeyM")) this.edges.mapEditor = true;
-    if (kEdge("KeyH")) this.edges.home = true;
+    for (const a of EDGE_ACTIONS) {
+      if (anyEdge(K[a.id])) this.edges[a.id] = true;
+    }
+    if (!p) {
+      this.applyRepeat("setupUp", held(K.setupUp), anyEdge(K.setupUp));
+      this.applyRepeat("setupDown", held(K.setupDown), anyEdge(K.setupDown));
+    }
+
     // Walkaround camera nudges, live rather than edge-triggered so holding a
     // key sweeps smoothly.
+    //
+    // NOT rebindable, because in that camera the mouse already does all three
+    // -- drag turns and raises, the wheel zooms -- and these are the
+    // keyboard's copy of that, not a second set of controls.
+    //
+    // But they ARE live at the same time as the driving controls, and the
+    // claim that they are not is what made the old choice of keys wrong: `R`
+    // was also "put me back on course", so raising the orbit camera teleported
+    // the car onto the centreline, and `[` / `]` also stepped the live setup
+    // menu while you zoomed. These keys are now in `RESERVED_KEYS` and the
+    // test suite checks no shipped binding lands on one.
     this.walkaround = {
-      // Not Q/E: those are the gearshift. Comma and period sit next to each
-      // other and are otherwise unused.
       turn: (k.has("Comma") ? 1 : 0) - (k.has("Period") ? 1 : 0),
-      rise: (k.has("KeyR") ? 1 : 0) - (k.has("KeyF") ? 1 : 0),
-      zoom: (k.has("BracketRight") ? 1 : 0) - (k.has("BracketLeft") ? 1 : 0),
+      rise: (k.has("KeyG") ? 1 : 0) - (k.has("KeyF") ? 1 : 0),
+      zoom: (k.has("Quote") ? 1 : 0) - (k.has("Semicolon") ? 1 : 0),
     };
-    if (kEdge("Escape") || kEdge("KeyP")) this.edges.pause = true;
-
-    // Keyboard stand-in for the d-pad: [ ] pick the setting, - = move it.
-    if (kEdge("BracketLeft")) this.edges.setupPrev = true;
-    if (kEdge("BracketRight")) this.edges.setupNext = true;
-    if (!p) {
-      this.applyRepeat("setupUp", k.has("Equal"), kEdge("Equal"));
-      this.applyRepeat("setupDown", k.has("Minus"), kEdge("Minus"));
-    }
     this._prevKeys = new Set(k);
 
     this.state.steer = clamp(steer, -1, 1);
@@ -545,11 +650,20 @@ Input.prototype.applyRepeat = function applyRepeat(name, held, justPressed) {
   }
 };
 
-function analog(button) {
-  if (!button) return 0;
-  // Triggers report through .value; some drivers only set .pressed.
-  const v = typeof button.value === "number" ? button.value : 0;
-  return v > 0.02 ? Math.min(1, v) : button.pressed ? 1 : 0;
+/**
+ * How likely a connected device is to be the one being driven.
+ *
+ * A wheel beats a named controller beats anything that merely enumerated.
+ * Only used to choose between several at once; with one device plugged in it
+ * changes nothing.
+ */
+function padRank(id) {
+  if (detectProfile(id) === "wheel") return 3;
+  if (/xbox|xinput|microsoft|045e|dualshock|dualsense|playstation|sony|054c|wireless controller/i
+    .test(id || "")) {
+    return 2;
+  }
+  return 1;
 }
 
 // NaN fails both comparisons and would pass straight through into the car.

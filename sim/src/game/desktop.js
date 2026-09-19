@@ -28,6 +28,77 @@ export async function toggleFullscreen() {
 }
 
 /**
+ * Ask the shell to close this window, the same way the title bar's X does.
+ *
+ * Goes through `close()` rather than `destroy()` on purpose: a close REQUEST
+ * runs `onWindowClose` first, so a run still being written out gets finished
+ * before the window goes. Destroying here would skip that and lose the run.
+ */
+export async function closeAppWindow() {
+  const win = currentWindow();
+  if (!win?.close) return false;
+  try {
+    await win.close();
+    return true;
+  } catch (e) {
+    console.error("could not close the window", e);
+    return false;
+  }
+}
+
+/**
+ * Run `fn` when the user closes the window, and hold the close open until it
+ * has finished (or until `deadlineMs` has passed, because a window that will
+ * not close is worse than a lost run).
+ *
+ * `beforeunload` cannot do this. Saving a run is an IPC round trip, and a
+ * `beforeunload` handler that starts one returns immediately: the webview then
+ * tears down with the write in flight, and whether the run survives is a race
+ * the driver has no way to see. Tauri asks the frontend BEFORE it closes, and
+ * the close can be deferred -- which is the only point at which there is still
+ * a window alive to finish the write.
+ *
+ * Two things about Tauri v2 that the obvious implementation gets wrong:
+ *
+ *   - A close request that is NOT prevented ends in `destroy()`, not
+ *     `close()`. So there is no "prevent the first one and let the second one
+ *     through": `close()` merely raises another request, which this listener
+ *     prevents again, and the window never goes away. Every request is
+ *     prevented and the window is destroyed here, explicitly, once.
+ *   - `destroy()` therefore needs `core:window:allow-destroy`, which is in
+ *     `capabilities/default.json` for exactly this reason.
+ *
+ * A second X arriving while the save is still running is prevented and
+ * ignored, rather than cutting the write short.
+ *
+ * @returns a function that unsubscribes. No-op outside the desktop shell,
+ *          where `beforeunload` remains the only hook there is.
+ */
+export function onWindowClose(fn, deadlineMs = 4000) {
+  const win = currentWindow();
+  if (!win?.onCloseRequested) return () => {};
+  let closing = false;
+  const pending = win.onCloseRequested(async (event) => {
+    event.preventDefault();
+    if (closing) return;
+    closing = true;
+    try {
+      await Promise.race([
+        Promise.resolve(fn()).catch((e) => console.error("shutdown work failed", e)),
+        new Promise((r) => setTimeout(r, deadlineMs)),
+      ]);
+    } finally {
+      try {
+        await win.destroy();
+      } catch (e) {
+        console.error("could not close the window", e);
+      }
+    }
+  });
+  return () => { pending.then?.((un) => un?.()); };
+}
+
+/**
  * Make the webview behave like a game window rather than a web page: no
  * right-click menu (the ETC editor uses right-click to delete a breakpoint),
  * no text selection from dragging, no browser zoom shortcuts, and F11 for
@@ -90,6 +161,18 @@ export const rigNative = {
   stop: () => invoke("rig_stop").then((s) => s ?? NO_RIG).catch(() => NO_RIG),
   /** Inputs in, latest snapshot out. Once per frame. */
   frame: (input) => invoke("rig_frame", { input }),
-  /** Fire-and-forget: respawn, parameters, barrier, control config. */
-  command: (command) => { invoke("rig_command", { command }).catch(() => {}); },
+  /**
+   * Fire-and-forget: respawn, parameters, barrier, control config.
+   *
+   * Failures were swallowed silently. They are rare, but a dropped `respawn`
+   * is the one that shows: the webview has already put the car on the line
+   * while the rig has not, and the only symptom is a second of frozen car
+   * before the gate in `NativeCar.apply` gives up. Saying so in the console
+   * turns that into something findable.
+   */
+  command: (command) => {
+    invoke("rig_command", { command }).catch((err) => {
+      console.error(`rig command "${command?.kind}" failed`, err);
+    });
+  },
 };

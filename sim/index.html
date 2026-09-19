@@ -117,6 +117,24 @@
   }
   button.secondary:hover { border-color: var(--gold); }
   .note { font-size: 12px; color: var(--dim); }
+  .pane input[type="text"] {
+    width: 100%; box-sizing: border-box; padding: 8px 10px; font: inherit; font-size: 13px;
+    color: var(--text); background: rgba(255,255,255,.04);
+    border: 1px solid rgba(255,255,255,.14); border-radius: 6px;
+  }
+  .pane input[type="text"]:focus { outline: none; border-color: var(--accent); }
+  .runs-list { max-height: 292px; overflow-y: auto; display: grid; gap: 6px; padding-right: 4px; }
+  .run-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 6px 10px; align-items: center;
+    padding: 8px 10px; border: 1px solid rgba(255,255,255,.10); border-radius: 6px;
+    background: rgba(255,255,255,.025);
+  }
+  .run-row .who { font-size: 12.5px; }
+  .run-row .who b { font-weight: 600; }
+  .run-row .meta { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); font-family: var(--mono); }
+  .run-row .time { font-family: var(--mono); font-size: 14px; color: var(--accent); text-align: right; }
+  .run-row button { padding: 5px 10px; font-size: 12px; }
+  .run-row .right { display: flex; gap: 6px; align-items: center; }
   .note.error { color: var(--bad); }
 
   /* ---------------- course pane ---------------- */
@@ -179,7 +197,8 @@
   .ctl-row .ctl-value { font: 12px var(--mono); color: var(--dim); text-align: right; }
   .ctl-row.changed .ctl-value { color: var(--gold); }
   .ctl-row .ctl-hint { grid-column: 1 / -1; color: var(--dim-2); font-size: 11.5px; margin-top: -2px; }
-  .ctl-row.ctl-cal { grid-template-columns: 110px auto 1fr; }
+  /* label, the detect button, what it reads now, and a way back to the default */
+  .ctl-row.ctl-cal { grid-template-columns: 110px auto 1fr auto; }
   .ctl-row.ctl-cal .ctl-value { text-align: left; }
   .ctl-check { display: flex; gap: 8px; align-items: center; font-size: 12.5px; margin: 6px 0; cursor: pointer; }
   .ctl-check input { accent-color: var(--gold); }
@@ -189,6 +208,33 @@
     padding: 8px 10px; margin: 6px 0; white-space: pre-wrap; max-height: 150px; overflow: auto;
   }
   .ctl-reset { margin-top: 12px; }
+
+  /* ---- bindings ----
+     Three columns: what it does, what it is on the keyboard, what it is on
+     the device. Each cell is a button you click and then press the thing. */
+  .bind-legend { display: grid; grid-template-columns: 1fr 120px 120px; gap: 8px 10px;
+    padding: 0 0 4px; font-size: 11px; color: var(--dim-2); text-transform: uppercase; letter-spacing: .06em; }
+  .bind-legend .c { text-align: center; }
+  .bind-row { display: grid; grid-template-columns: 1fr 120px 120px; gap: 8px 10px; align-items: center;
+    padding: 3px 0; border-top: 1px solid rgba(255,255,255,0.05); }
+  .bind-row:first-of-type { border-top: 0; }
+  .bind-row > span.bind-what { font-size: 12.5px; }
+  .bind-row .bind-hold { color: var(--dim-2); font-size: 11px; margin-left: 6px; }
+  .bind-key {
+    font: 600 11.5px var(--mono); color: var(--text); background: var(--field);
+    border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; width: 100%;
+    cursor: pointer; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .bind-key:hover:not(:disabled) { border-color: var(--gold); }
+  .bind-key:disabled { opacity: 0.3; cursor: default; }
+  .bind-key.unset { color: var(--dim-2); font-weight: 400; }
+  .bind-key.listening { border-color: var(--gold); color: var(--gold); }
+  .bind-key.changed { border-color: rgba(255,198,0,0.45); }
+  .bind-msg { font-size: 11.5px; color: var(--gold); min-height: 1.4em; margin: 8px 0 0; }
+  .bind-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  @media (max-width: 1080px) {
+    .bind-legend, .bind-row { grid-template-columns: 1fr 96px 96px; }
+  }
   .ctl-ffb-meter { position: relative; height: 10px; margin: 8px 0 4px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; }
   .ctl-ffb-meter::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,0.35); }
   .ctl-ffb-fill { position: absolute; top: 0; bottom: 0; left: 50%; width: 0; background: #7fc8ff; }
@@ -325,6 +371,224 @@
   }
   button#start:hover:not(:disabled) { background: #ffd04a; }
   button#start:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+
+  /* ================= replay overlay ================= */
+  #replayOverlay { position: fixed; inset: 0; z-index: 40; pointer-events: none; }
+  #replayOverlay[hidden] { display: none; }
+  /* The scene is the window. Everything else floats on top of it and can be
+     got out of the way, because the thing being reviewed is the driving --
+     three fixed panels and a seven-lane trace strip left a letterbox in the
+     middle roughly the size of a postcard. Columns are narrower, the panels
+     collapse individually, and `.rp-bare` hides the lot. */
+  .rp-root {
+    position: absolute; inset: 0;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas: "head head head" "left . right" "foot foot foot";
+    gap: 10px; padding: 10px;
+    font-family: var(--sans); color: var(--text);
+    pointer-events: none;
+  }
+  /* Cinematic: every overlay gone but the one line telling you how to get it
+     back. The transport keeps working on the keyboard. */
+  .rp-root.rp-bare > .rp-head,
+  .rp-root.rp-bare > .rp-side,
+  .rp-root.rp-bare > .rp-foot { display: none; }
+  .rp-hint {
+    position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+    font-size: 11px; color: rgba(255,255,255,.5); letter-spacing: .04em;
+    background: rgba(0,0,0,.35); padding: 4px 10px; border-radius: 999px;
+    backdrop-filter: blur(6px); pointer-events: none; opacity: 0;
+    transition: opacity .25s;
+  }
+  .rp-root.rp-bare .rp-hint { opacity: 1; }
+
+  /* A panel that has been rolled up keeps only its title bar. */
+  .rp-side.collapsed > *:not(.rp-side-head) { display: none; }
+  .rp-side.collapsed { min-height: 0; }
+  .rp-side-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin: -2px 0 6px;
+  }
+  .rp-side-head b {
+    font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .10em; color: var(--dim-2);
+  }
+  .rp-roll {
+    background: none; border: 0; color: var(--dim-2); cursor: pointer;
+    font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+  }
+  .rp-roll:hover { color: var(--text); background: var(--field); }
+  .rp-root > * { pointer-events: auto; }
+
+  .rp-head {
+    grid-area: head; display: flex; align-items: center; gap: 14px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 7px 12px; backdrop-filter: blur(8px);
+    pointer-events: auto;
+  }
+  .rp-title { display: grid; gap: 1px; min-width: 190px; }
+  .rp-title b { font-size: 15px; letter-spacing: .01em; }
+  .rp-title span { font-size: 12.5px; color: var(--dim); }
+  .rp-title small { font-size: 11px; color: var(--dim-2); }
+  .rp-headline { display: flex; gap: 20px; flex: 1; flex-wrap: wrap; }
+  .rp-headline div { display: grid; gap: 1px; }
+  .rp-headline span { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim-2); }
+  .rp-headline b { font-family: var(--mono); font-size: 15px; color: var(--gold); font-weight: 600; }
+  .rp-headbtns { display: flex; gap: 8px; }
+
+  .rp-side {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 9px 11px; backdrop-filter: blur(8px);
+    overflow-y: auto; align-self: start; max-height: 100%;
+    pointer-events: auto;
+    /* Narrow enough to leave the scene the middle of the screen. */
+    width: 186px;
+  }
+  .rp-right.rp-side { width: 216px; }
+  .rp-left { grid-area: left; }
+  .rp-right { grid-area: right; }
+  .rp-side h4 {
+    margin: 12px 0 6px; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .10em; color: var(--dim-2);
+  }
+  .rp-side h4:first-child { margin-top: 0; }
+
+  .rp-bars { display: grid; gap: 5px; margin-bottom: 10px; }
+  .rp-bar { position: relative; height: 16px; background: var(--field); border-radius: 3px; overflow: hidden; }
+  .rp-bar i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--ok); display: block; }
+  .rp-bar.rp-brake i { background: var(--bad); }
+  .rp-bar span {
+    position: absolute; inset: 0; display: flex; align-items: center; padding-left: 7px;
+    font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--text);
+    mix-blend-mode: difference;
+  }
+
+  /* Throttle and brake as a shape, not a number. Sits with the bars it
+     explains, above the readouts. */
+  .rp-pedalgraph { position: relative; margin: 0 0 9px; }
+  .rp-pedalgraph canvas { display: block; width: 100%; border-radius: 4px; }
+  /* Under the graph, not on it: on it, the label sat in the middle of the
+     trace it was labelling and was unreadable against either colour. */
+  .rp-pedalspan {
+    display: block; margin-top: 2px; text-align: right;
+    font-family: var(--mono); font-size: 9px; color: var(--dim-2);
+    pointer-events: none;
+  }
+
+  .rp-readouts { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; margin: 0; }
+  .rp-readouts dt { font-size: 11.5px; color: var(--dim); }
+  .rp-readouts dd { margin: 0; font-family: var(--mono); font-size: 12px; text-align: right; }
+
+  .rp-laps { display: grid; gap: 3px; max-height: 190px; overflow-y: auto; }
+  .rp-lap {
+    display: grid; grid-template-columns: 26px 54px 1fr auto; gap: 6px; align-items: baseline;
+    width: 100%; text-align: left; padding: 5px 7px; font: inherit;
+    background: rgba(255,255,255,.03); border: 1px solid transparent; border-radius: 4px;
+    color: var(--text); cursor: pointer;
+  }
+  .rp-lap:hover { background: rgba(255,255,255,.07); }
+  .rp-lap.now { border-color: var(--gold); }
+  .rp-lap.best .t { color: var(--gold); }
+  .rp-lap .n { font-size: 11px; color: var(--dim); }
+  .rp-lap .t { font-family: var(--mono); font-size: 12.5px; }
+  .rp-lap .g { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .rp-lap .s { grid-column: 2 / -1; font-family: var(--mono); font-size: 10px; color: var(--dim-2); }
+  .rp-lap .p { font-size: 10px; color: var(--warn); }
+
+  .rp-delta { display: grid; gap: 1px; }
+  .rp-delta b { font-family: var(--mono); font-size: 22px; font-weight: 600; }
+  .rp-delta b.up { color: var(--ok); }
+  .rp-delta b.down { color: var(--bad); }
+  .rp-delta small { font-size: 10.5px; color: var(--dim-2); }
+
+  .rp-ghost { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; }
+  .rp-ghost span { color: var(--dim); }
+  .rp-ghost b { font-family: var(--mono); font-size: 13px; }
+  .rp-ghost b.up { color: var(--ok); }
+  .rp-ghost b.down { color: var(--bad); }
+
+  .rp-events { display: grid; gap: 2px; max-height: 150px; overflow-y: auto; }
+  .rp-ev { display: grid; grid-template-columns: 38px 62px 1fr; gap: 5px; font-size: 11px; align-items: baseline; }
+  .rp-ev .t { font-family: var(--mono); color: var(--dim-2); }
+  .rp-ev .k { color: var(--text); }
+  .rp-ev .d { font-family: var(--mono); color: var(--dim); font-size: 10px; }
+  .rp-ev.cone .k { color: var(--warn); }
+  .rp-ev.off-course .k { color: var(--bad); }
+  .rp-ev.lap .k { color: var(--gold); }
+  .rp-empty { margin: 0; font-size: 11px; color: var(--dim-2); }
+
+  .rp-foot {
+    grid-area: foot;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 8px 14px 10px; backdrop-filter: blur(8px);
+    pointer-events: auto;
+  }
+  /* Rolled up: transport and scrub bar only, so the strip costs 60px instead
+     of 380. The traces are what you open when you want them. */
+  .rp-foot.traces-off .rp-traces { display: none; }
+  .rp-transport { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+  .rp-transport button {
+    padding: 5px 11px; font-size: 12px; background: var(--field); color: var(--text);
+    border: 1px solid var(--line-2); border-radius: 5px; cursor: pointer; font-family: var(--sans);
+  }
+  .rp-transport button:hover { border-color: var(--gold); }
+  .rp-transport .rp-play { min-width: 46px; }
+  .rp-rates { display: flex; gap: 3px; margin-left: 8px; }
+  .rp-rates button { padding: 4px 8px; font-family: var(--mono); font-size: 11px; }
+  .rp-rates button.on { background: var(--gold-dim); border-color: var(--gold); color: var(--gold); }
+  .rp-clock { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .rp-clock b { color: var(--text); font-weight: 600; }
+
+  /* The trace strip. Shares the scrub bar's x-axis, so the canvas is inset by
+     the label gutter and the playhead is positioned against the canvas, not
+     the strip. */
+  .rp-traces {
+    position: relative; margin: 0 0 6px; padding-left: 108px;
+    cursor: pointer; touch-action: none;
+  }
+  .rp-traces canvas { display: block; border-radius: 4px; }
+  .rp-trace-head {
+    position: absolute; top: 0; bottom: 0; left: 0; width: 2px; margin-left: -1px;
+    background: rgba(255,255,255,.85); box-shadow: 0 0 5px rgba(255,255,255,.5);
+    pointer-events: none;
+  }
+  .rp-traces .rp-trace-head { left: 0; }
+  .rp-trace-keys {
+    position: absolute; left: 0; top: 0; width: 104px;
+    display: flex; flex-direction: column; gap: 3px; pointer-events: none;
+  }
+  .rp-key {
+    display: flex; flex-direction: column; justify-content: center; gap: 1px;
+    padding-right: 6px; box-sizing: border-box;
+  }
+  .rp-key b { font-size: 10.5px; font-weight: 600; color: var(--dim); line-height: 1.15; }
+  .rp-key i { font-family: var(--mono); font-size: 9.5px; color: var(--dim-2); font-style: normal; }
+  .rp-key u { display: inline-block; width: 12px; height: 2px; margin-right: 3px; border-radius: 1px; }
+  .rp-key u.flag { height: 3px; }
+
+  /* Inset by the same gutter as the traces above it, so the scrub head and
+     the trace playhead are the same instant at the same x. */
+  .rp-scrub { position: relative; height: 20px; cursor: pointer; touch-action: none; margin-left: 108px; }
+  .rp-track { position: absolute; left: 0; right: 0; top: 7px; height: 6px; background: var(--field); border-radius: 3px; }
+  .rp-played { position: absolute; left: 0; top: 7px; height: 6px; width: 0; background: var(--gold); border-radius: 3px; }
+  .rp-marks { position: absolute; inset: 0; }
+  .rp-marks i { position: absolute; top: 2px; width: 2px; height: 16px; margin-left: -1px; border-radius: 1px; }
+  .rp-marks .m-lap { background: rgba(255,255,255,.55); }
+  .rp-marks .m-cone { background: var(--warn); top: 5px; height: 10px; }
+  .rp-marks .m-off { background: var(--bad); top: 5px; height: 10px; }
+  .rp-head-mark {
+    position: absolute; top: 1px; width: 3px; height: 18px; margin-left: -1.5px;
+    background: #fff; border-radius: 2px; box-shadow: 0 0 6px rgba(255,255,255,.7);
+  }
+
+  /* A narrow window loses the side panels rather than squeezing the scene. */
+  @media (max-width: 1100px) {
+    .rp-root { grid-template-columns: 1fr; grid-template-areas: "head" "." "foot"; }
+    .rp-side { display: none; }
+  }
+
   #loadNote { min-height: 1.4em; }
   #loadNote:empty { display: none; }
   .session .hint { color: var(--dim-2); font-size: 11.5px; margin-top: 4px; }
@@ -423,20 +687,32 @@
   .etc-actions { display: flex; gap: 6px; margin-top: 10px; }
   .etc-msg { font-size: 11.5px; color: var(--gold); min-height: 1.4em; margin: 10px 0 0; }
 
-  #pauseMenu {
+  #pauseMenu, #finishMenu {
     position: absolute; inset: 0; z-index: 5; display: flex; align-items: center;
     justify-content: center; background: rgba(6,8,11,0.45);
   }
   /* The id rule above outranks the UA's [hidden] { display: none }. */
-  #pauseMenu[hidden], #pauseMenu button[hidden] { display: none; }
-  #pauseMenu .pause-card {
+  #pauseMenu[hidden], #pauseMenu button[hidden],
+  #finishMenu[hidden], #finishMenu button[hidden] { display: none; }
+  .pause-card {
     display: flex; flex-direction: column; gap: 8px; min-width: 260px;
     background: rgba(12,15,20,0.92); border: 1px solid var(--line); border-radius: 10px;
     padding: 18px 20px 16px;
   }
-  #pauseMenu h2 { margin: 0 0 6px; font: 600 15px var(--mono); letter-spacing: .08em; color: var(--text); }
-  #pauseMenu button { display: flex; justify-content: space-between; align-items: center; gap: 16px; width: 100%; text-align: left; }
-  #pauseMenu kbd { font: 600 11px var(--mono); color: var(--dim); }
+  .pause-card h2 { margin: 0 0 6px; font: 600 15px var(--mono); letter-spacing: .08em; color: var(--text); }
+  .pause-card button { display: flex; justify-content: space-between; align-items: center; gap: 16px; width: 100%; text-align: left; }
+  .pause-card kbd { font: 600 11px var(--mono); color: var(--dim); }
+
+  /* The finish card carries a result as well as a menu, so it is a little
+     wider and the scoreboard sits between the two. */
+  #finishMenu .pause-card { min-width: 320px; }
+  #finishMenu .fin-head { margin: -4px 0 2px; font-size: 11.5px; color: var(--dim); }
+  .fin-stats { display: grid; grid-template-columns: 1fr auto; gap: 2px 18px; margin: 2px 0 10px; font-size: 12.5px; }
+  .fin-stats .k { color: var(--dim); }
+  .fin-stats .v { font-family: var(--mono); text-align: right; color: var(--text); }
+  .fin-stats .total { color: var(--gold); font-weight: 600; }
+  .fin-stats .v.pen { color: var(--bad); }
+  .fin-stats .rule { grid-column: 1 / -1; height: 1px; background: var(--line); margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -446,14 +722,30 @@
   <div id="pauseMenu" hidden>
     <div class="pause-card" role="dialog" aria-label="Paused">
       <h2>PAUSED</h2>
-      <button id="pauseResume" class="secondary" type="button"><span>Resume</span><kbd>Esc</kbd></button>
-      <button id="pauseRestart" class="secondary" type="button"><span>Restart run</span><kbd>Backspace</kbd></button>
-      <button id="pauseHome" class="secondary" type="button"><span>Home screen and settings</span><kbd>H</kbd></button>
+      <button id="pauseResume" class="secondary" type="button"><span>Resume</span><kbd data-key="pause">Esc</kbd></button>
+      <button id="pauseRestart" class="secondary" type="button"><span>Restart run</span><kbd data-key="restart">Backspace</kbd></button>
+      <button id="pauseHome" class="secondary" type="button"><span>Home screen and settings</span><kbd data-key="home">H</kbd></button>
       <button id="pauseQuit" class="secondary" type="button" hidden><span>Quit</span></button>
     </div>
   </div>
 
+  <!-- Autocross is one timed run, so it has an end. The card is what happens
+       there: the score, and every way out of the run. See `showFinishMenu`. -->
+  <div id="finishMenu" hidden>
+    <div class="pause-card" role="dialog" aria-label="Run complete">
+      <h2 id="finishTitle">RUN COMPLETE</h2>
+      <p class="fin-head" id="finishHead"></p>
+      <div class="fin-stats" id="finishStats"></div>
+      <button id="finishAgain" class="secondary" type="button"><span>Run it again</span><kbd>Enter</kbd></button>
+      <button id="finishWatch" class="secondary" type="button" hidden><span>Watch the replay</span><kbd>W</kbd></button>
+      <button id="finishRoll" class="secondary" type="button"><span>Keep driving</span><kbd data-key="pause">Esc</kbd></button>
+      <button id="finishHome" class="secondary" type="button"><span>Home screen and settings</span><kbd data-key="home">H</kbd></button>
+      <button id="finishQuit" class="secondary" type="button" hidden><span>Quit</span><kbd>Q</kbd></button>
+    </div>
+  </div>
+
   <div id="etcOverlay" hidden></div>
+  <div id="replayOverlay" hidden></div>
 
   <div id="menu">
     <section class="shell" aria-label="Session setup">
@@ -468,6 +760,7 @@
         <button class="tab" role="tab" data-pane="controls" aria-selected="false">Controls</button>
         <button class="tab" role="tab" data-pane="audio" aria-selected="false">Audio</button>
         <button class="tab" role="tab" data-pane="vehicle" aria-selected="false">Vehicle model<span class="n" id="paramBadge"></span></button>
+        <button class="tab" role="tab" data-pane="runs" aria-selected="false">Runs<span class="n" id="runsBadge"></span></button>
       </div>
 
       <div class="panes">
@@ -493,6 +786,36 @@
           </div>
         </div>
 
+        <!-- ============ Runs ============ -->
+        <div class="pane" data-pane="runs" role="tabpanel">
+          <div class="course-grid">
+            <div>
+              <h3>Recording</h3>
+              <p class="lead">
+                Every run is logged at 100 Hz and written where Helios can find it:
+                lap and sector times, the whole car state, and enough of it to replay
+                the drive. Put your name on it so the times are yours.
+              </p>
+              <label class="field" for="driverName">Driver</label>
+              <input id="driverName" type="text" maxlength="64" placeholder="Your name" autocomplete="off">
+              <label class="field" for="sessionName" style="margin-top:12px">Session label <span style="opacity:.65">(optional)</span></label>
+              <input id="sessionName" type="text" maxlength="96" placeholder="e.g. Tuesday test, rear ARB stiff" autocomplete="off">
+              <div class="checks" style="margin-top:14px">
+                <label class="check"><input type="checkbox" id="recordToggle" checked>
+                  <span><b>Record runs</b><small>Off means this drive is not written anywhere.</small></span></label>
+              </div>
+              <p class="note" style="margin-top:12px">Saving to <code id="runsDir">-</code></p>
+            </div>
+            <div>
+              <h3>Recorded runs</h3>
+              <p class="lead">Newest first. Replay drives the car from the log.</p>
+              <div id="runsList" class="runs-list">
+                <p class="note">Nothing recorded yet.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- ============ Car ============ -->
         <div class="pane" data-pane="car" role="tabpanel">
           <div class="car-grid">
@@ -510,6 +833,21 @@
                   <span><b>Engine audio</b><small>Physical exhaust model; levels are in the Audio tab.</small></span></label>
               </div>
             </div>
+            <div>
+              <h3>Dash</h3>
+              <p class="lead">The car carries a real AiM Strada on the column, above the wheel. If reading it at its real size does not suit you, the old screen dash is still here.</p>
+              <div class="checks">
+                <label class="field">
+                  <span>Which dash</span>
+                  <select id="dashMode">
+                    <option value="auto">The car's, plus an overlay from outside cameras</option>
+                    <option value="car">The car's only</option>
+                    <option value="overlay">Screen overlay, always</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
             <div>
               <h3>Throttle map</h3>
               <p class="lead">Accelerator pedal to throttle plate. The map is applied before traction control, the engine and the audio see "throttle".</p>
@@ -580,6 +918,8 @@
         <dt>Throttle</dt><dd id="sEtc"><span class="off">-</span></dd>
         <dt>Controls</dt><dd id="sControls"><b>-</b></dd>
         <dt>Pad</dt><dd><span id="padStatus">not detected</span></dd>
+        <dt>Driver</dt><dd id="sDriver"><span class="off">unnamed</span></dd>
+        <dt>Logging</dt><dd id="sRecording"><b>on</b></dd>
       </dl>
       <div class="actions">
         <button id="start" disabled>Start engine</button>

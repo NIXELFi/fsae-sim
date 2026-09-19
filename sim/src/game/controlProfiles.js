@@ -24,9 +24,15 @@
 // the *software* is willing to move the wheel; on a real wheel they describe
 // how fast arms and a steering rack actually can.
 //
-// Force feedback is not implemented. The fields are reserved and documented so
-// the force feedback mix (`forceFeedback.js`) reads the wheel profile's
-// `forceFeedback` block; the other profiles carry a disabled stub.
+// Force feedback IS implemented, and the wheel profile's `forceFeedback` block
+// is what configures it: `forceFeedback.js` mixes it in the browser and
+// `rig.rs` on the desktop, at 1 kHz, straight out to the base over
+// DirectInput. (This comment used to say it was not implemented, which was
+// true for about a week and has been wrong ever since -- in the header of the
+// file that configures it.) The other profiles carry a disabled stub, because
+// nothing else here has a motor.
+
+import { defaultKeys, UNBOUND } from "./controlBindings.js";
 
 const STORAGE_KEY = "fsae-sim.controls.v1";
 
@@ -35,15 +41,15 @@ const STORAGE_KEY = "fsae-sim.controls.v1";
  *
  * All angles are at the ROAD WHEEL, matching `BicycleModel.delta` and
  * `SDM26.steerRateDegS`. Divide by `steeringRatio` for hand-wheel figures --
- * with SDM26's 4.0, 360 deg/s at the road wheel is 1440 deg/s at the rim,
- * which is about as fast as anyone moves a wheel in a save.
+ * with SDM26's 4.411, 360 deg/s at the road wheel is about 1590 deg/s at the
+ * rim, which is about as fast as anyone moves a wheel in a save.
  */
 function steering(over) {
   return {
     /**
      * Front slip-angle cap, deg, or 0 for none. With it, the road wheel is
      * never commanded past the angle that puts the front tyre this far
-     * into slip against the car's actual motion. The tyre peaks at 8.5 deg;
+     * into slip against the car's actual motion. The tyre peaks at 7.3 deg;
      * 10 lets a keyboard driver lean on the front without being able to
      * throw it away. A wheel gets 0: the driver has force feedback.
      */
@@ -163,9 +169,9 @@ export function stepSteering(state, targetDeg, cfg, dt) {
  * at a given speed, 0..1.
  *
  * A key has no position, only "on", so on a keyboard the software decides
- * how far the wheel goes. Without this it went to full lock -- 28 degrees --
+ * how far the wheel goes. Without this it went to full lock -- 46 degrees --
  * at any speed, and at 15 m/s the useful steer for the car's whole 1.6 g is
- * about 6 degrees of Ackermann plus 8.5 degrees of slip. Holding a key for
+ * about 6 degrees of Ackermann plus 7.3 degrees of slip. Holding a key for
  * 200 ms put the front tyres 10 degrees past their peak, and the car spun.
  * No hand does that: a driver with a wheel winds on roughly what the corner
  * needs. So the lock a key can reach is the Ackermann angle for `ayG` at this
@@ -184,7 +190,7 @@ export function usableLockFrac(cfg, speedMps, car) {
   if (!cfg || !(car && car.maxSteerDeg > 0)) return 1;
   const v2 = Math.max(speedMps, 0.1) ** 2;
   const ackermannDeg = ((car.wheelbaseM * cfg.ayG * 9.81) / v2) * (180 / Math.PI);
-  const usable = ackermannDeg + (car.peakSlipAngleDeg ?? 8.5) + cfg.marginDeg;
+  const usable = ackermannDeg + (car.peakSlipAngleDeg ?? 7.3) + cfg.marginDeg;
   return Math.min(1, usable / car.maxSteerDeg);
 }
 
@@ -267,8 +273,12 @@ export const PROFILES = {
       // Ramped: 0 to full in 0.4 s on the way down, off in 0.1 s. See
       // `stepPedal`. The brake is quicker to full because a hard stop is
       // still a hard stop; ABS (on by default for this profile) does the rest.
-      throttle: pedal({ source: "KeyW", isAxis: false, rampUpPerS: 2.5, rampDownPerS: 10 }),
-      brake: pedal({ source: "KeyS", isAxis: false, rampUpPerS: 4, rampDownPerS: 10 }),
+      // `source` is null: on the keyboard a pedal is whatever `keys.throttle`
+      // and `keys.brake` say, and naming a key here as well was a second
+      // answer to the same question that nothing read. The ramp rates are
+      // what this block is for.
+      throttle: pedal({ source: null, isAxis: false, rampUpPerS: 2.5, rampDownPerS: 10 }),
+      brake: pedal({ source: null, isAxis: false, rampUpPerS: 4, rampDownPerS: 10 }),
       clutch: pedal({ source: null }),
     },
     // A key is a step, so the driver aids are on by default here: traction
@@ -277,6 +287,7 @@ export const PROFILES = {
     // locked front does not steer. Both are still toggles on the home screen
     // and on T.
     assistDefaults: { traction: true, abs: true },
+    keys: defaultKeys(),
     forceFeedback: { enabled: false, supported: false },
   },
 
@@ -292,8 +303,13 @@ export const PROFILES = {
       lagS: 0.06,
       slipCapDeg: 10,
       rateSpeedRefMps: 14,
+      // The rack's real limit is 46 deg of road wheel. A stick has no more
+      // feel than a key, so it gets the same speed-sensitive usable lock:
+      // full travel is the Ackermann angle for 1.4 g plus the tyre's peak
+      // slip plus a margin, which is what a driver would actually wind on.
+      speedSensitive: { ayG: 1.4, marginDeg: 3 },
       deadzone: 0.10,
-      // Full lock is 28 degrees and the tyre peaks at 8.5 degrees of slip, so a
+      // Full lock is 46 degrees and the tyre peaks at 7.3 degrees of slip, so a
       // linear stick puts the useful travel in the first third. Squaring it
       // moves the resolution to where the grip is.
       expo: 1.7,
@@ -308,7 +324,12 @@ export const PROFILES = {
       upshift: 5, downshift: 4, launch: 0, reset: 1, traction: 2, camera: 3,
       restart: 8, pause: 9, home: 10,
       dpadUp: 12, dpadDown: 13, dpadLeft: 14, dpadRight: 15,
+      // Nothing left on a pad worth spending on these, but they are in the
+      // map so the bindings panel can offer them. UNBOUND, not absent: an
+      // override can only reach a key the shipped default already has.
+      hudDensity: UNBOUND, dashMode: UNBOUND,
     },
+    keys: defaultKeys(),
     labels: { launch: "A", reset: "B", traction: "X", camera: "Y", upshift: "RB", downshift: "LB" },
     forceFeedback: { enabled: false, supported: false },
   },
@@ -326,6 +347,7 @@ export const PROFILES = {
       lagS: 0.06,
       slipCapDeg: 10,
       rateSpeedRefMps: 14,
+      speedSensitive: { ayG: 1.4, marginDeg: 3 },
       deadzone: 0.08,
       expo: 1.7,
     }),
@@ -339,7 +361,9 @@ export const PROFILES = {
       upshift: 5, downshift: 4, launch: 0, reset: 1, traction: 2, camera: 3,
       restart: 8, pause: 9, home: 10,
       dpadUp: 12, dpadDown: 13, dpadLeft: 14, dpadRight: 15,
+      hudDensity: UNBOUND, dashMode: UNBOUND,
     },
+    keys: defaultKeys(),
     labels: {
       launch: "Cross", reset: "Circle", traction: "Square", camera: "Triangle",
       upshift: "R1", downshift: "L1",
@@ -354,10 +378,18 @@ export const PROFILES = {
     // The driver's hands are the input, so the software should get out of the
     // way. Deadzone zero and linearity one are not tuning choices -- either one
     // set otherwise is a defect on a device that measures rim angle directly.
+    // No lag, and rate/acceleration ceilings far above any hand. On a device
+    // that measures rim angle directly, a first-order lag between the rim and
+    // the road wheel is pure latency -- and worse, a delayed spring IS negative
+    // damping: the old 15 ms fed about -0.11 N.m.s/rad back into the force
+    // feedback, roughly three times the damping the mixer adds, which is what
+    // made the rim feel rubbery and overshoot centre. The hand is the only
+    // rate limit a wheel needs. (`advance_steer_capped` floors lagS at 1e-4,
+    // so zero is safe and simply leaves the rate limit.)
     steering: steering({
-      maxRateDegPerS: 720,
-      accelDegPerS2: 12000,
-      lagS: 0.015,
+      maxRateDegPerS: 3000,
+      accelDegPerS2: 1e6,
+      lagS: 0,
       deadzone: 0,
       expo: 1,
     }),
@@ -374,10 +406,12 @@ export const PROFILES = {
        * important setting for a wheel and the one most often got wrong.
        *
        * "match-car" is the honest option: the rim turns through the car's real
-       * ratio, so SDM26's 28 degrees of lock through its measured 4.411 ratio is
-       * 247 degrees rim, lock to lock. Set `rotationDeg` to 247 in the driver and the wheel
-       * and the car agree exactly -- what you feel is what the front tyres are
-       * doing.
+       * rack, which is PROGRESSIVE -- about 5.3 deg of rim per road degree on
+       * centre and 3.4 past 90 deg -- and whose measured stop is 179 deg each
+       * way, so 358 lock to lock. Not lock times a nominal ratio: that puts
+       * the stop 24 degrees out. Set `rotationDeg` to 358 in the driver and
+       * the wheel and the car agree exactly -- what you feel is what the front
+       * tyres are doing.
        *
        * "scale-to-lock" maps whatever rotation the wheel is set to onto full
        * lock. More forgiving on a 900-degree wheel nobody wants to reconfigure,
@@ -424,18 +458,27 @@ export const PROFILES = {
         isAxis: true,
         rawMin: 1,
         rawMax: -1,
-        // A load cell measures force, not travel, and force rises much faster
-        // than displacement near the stop. Above 1 makes early travel less
-        // sensitive, which is what makes threshold braking possible.
-        gamma: 1.6,
+        // Linear by default, as AC is on the same pedals. A load cell
+        // measures force rather than travel, so a gamma above 1 can suit one
+        // -- but it cannot be the default: the preset cannot tell an SR-P
+        // load cell from an SR-P Lite or a G29, both of which measure travel,
+        // and on those a gamma above 1 pushes all the modulation into the last
+        // third of the pedal, which is the opposite of threshold braking.
+        // Raise it to 1.2-1.6 by hand on a load cell if you prefer it.
+        gamma: 1,
       }),
       clutch: pedal({ source: 3, isAxis: true, rawMin: 1, rawMax: -1 }),
     },
     buttons: {
-      upshift: 4, downshift: 5, launch: 0, reset: 1, traction: 2, camera: 3,
+      // MOZA base, measured 2026-09-17: right paddle 13, left paddle 12.
+      // The hat is delivered as virtual buttons 128-131 (see `HAT_BASE` in
+      // input.js) so it can never collide with a real button.
+      upshift: 13, downshift: 12, launch: 0, reset: 1, traction: 2, camera: 3,
       restart: 8, pause: 9, home: 10,
-      dpadUp: 12, dpadDown: 13, dpadLeft: 14, dpadRight: 15,
+      dpadUp: 128, dpadDown: 129, dpadLeft: 130, dpadRight: 131,
+      hudDensity: UNBOUND, dashMode: UNBOUND,
     },
+    keys: defaultKeys(),
     forceFeedback: {
       /**
        * Rim torque from the vehicle model, out to a direct-drive wheel.
@@ -455,21 +498,47 @@ export const PROFILES = {
       /**
        * Master gain on the whole mix. 1.0 = the model's torque, unscaled.
        *
-       * SDM26 puts about 9 N.m per g into a 4:1 rack, so an unscaled mix
-       * clips a small base from well under 1 g -- and the clip erases the
-       * very thing worth feeling, the rim going light as the front starts
-       * to slide. The preset derives this from the rated torque
-       * (`defaultGainFor`): about 0.5 on a 5 N.m base, 1.0 from 11 N.m up.
+       * SDM26 puts about 12 N.m per g into the rim through its 4.411 rack,
+       * and the aligning torque peaks near 15 N.m at about 4 degrees of front
+       * slip. An unscaled mix therefore clips a small base from under 1 g --
+       * and the clip erases the very thing worth feeling, the rim going light
+       * as the front starts to slide. The preset derives this from the rated
+       * torque (`defaultGainFor`) so the TORQUE PEAK lands at full output:
+       * about 0.37 on a 5.5 N.m base, 1.0 from 15 N.m up. Above that the
+       * `gamma` and `knee` below keep the shape inside the motor.
        */
-      gain: 0.5,
+      gain: 0.37,
       /** Self-aligning torque from the front tyres. The signal itself. */
       alignTorqueGain: 1.0,
       /** Wheelspin, lockup, kerbs and grass, as vibration. */
       roadTextureGain: 0.35,
       /** Rim-speed damping: fraction of rated torque at 10 rad/s of rim. */
-      damping: 0.15,
+      damping: 0.10,
       /** Coulomb friction, fraction of rated torque. The rack and the column. */
       friction: 0.04,
+      /**
+       * Power-law lift on the normalised command, applied before the knee.
+       * Below 1.0 it raises the small on-centre torques toward where the motor
+       * and the driver's hands can read them -- the same job AC's
+       * `ff_post_process` GAMMA does. 1.0 turns it off.
+       */
+      gamma: 0.75,
+      /**
+       * Where the soft knee starts, as a fraction of rated torque. Above it
+       * the command is compressed with a tanh instead of clipped, so the
+       * torque peak and the fall-off past it stay readable as an arc rather
+       * than flattening into a ceiling. 1.0 turns it off (hard clip).
+       */
+      knee: 0.6,
+      /**
+       * Coulomb resistance of a stationary tyre being twisted against the
+       * ground, as a fraction of rated torque. Faded in as the tyre's own
+       * aligning torque fades out below walking pace, so the paddock has
+       * weight instead of feeling like a menu.
+       */
+      parkFriction: 0.10,
+      /** Damping inside the end stop only, so the stop does not bounce. */
+      stopDamping: 0.35,
       /** Stiffness of the stop past the car's lock. */
       softLockGain: 1.0,
       /** Lift torques below this fraction of rated, past the motor's cogging. */
@@ -584,6 +653,19 @@ export class ControlSettings {
       this.activeId = id;
       this.save();
     }
+  }
+
+  /**
+   * Use a profile for THIS session without remembering it.
+   *
+   * A launcher saying "start on the wheel" is describing the run, not
+   * reconfiguring the rig. Persisting it -- and pinning it, which is what
+   * `setActive` plus `Input.setProfile` do together -- would leave the next
+   * person at that rig stuck on somebody else's device with auto-detection
+   * switched off.
+   */
+  useForSession(id) {
+    if (PROFILES[id]) this.activeId = id;
   }
 
   /**
@@ -755,7 +837,7 @@ export function editableSettings(profile) {
         { path: "forceFeedback.maxForceNm", label: "Wheel rated torque", unit: " N.m",
           min: 1, max: 35, step: 0.5, note: "What the base is rated for. Set from the preset when the base is recognised." },
         { path: "forceFeedback.gain", label: "Overall gain", unit: "",
-          min: 0, max: 3, step: 0.05, note: "1.0 is the model unscaled (~9 N.m per g). Small bases clip sooner; the preset picks a fit." },
+          min: 0, max: 3, step: 0.05, note: "1.0 is the model unscaled (~12 N.m per g at the rim). Small bases clip sooner; the preset picks a fit." },
         { path: "forceFeedback.alignTorqueGain", label: "Tyre aligning torque", unit: "",
           min: 0, max: 2, step: 0.05 },
         { path: "forceFeedback.roadTextureGain", label: "Slip and surface texture", unit: "",
@@ -768,6 +850,20 @@ export function editableSettings(profile) {
           min: 0, max: 1, step: 0.05 },
         { path: "forceFeedback.minForce", label: "Minimum force", unit: "",
           min: 0, max: 0.2, step: 0.005, note: "Lifts small torques over the motor's cogging." },
+        // These four were in the profile, pushed to the rig and doing real
+        // work, but had no row -- so the only way to change them was to edit
+        // this file. They are the four a driver most wants on a new base.
+        { path: "forceFeedback.gamma", label: "On-centre lift (gamma)", unit: "",
+          min: 0.4, max: 1.5, step: 0.05,
+          note: "Below 1 raises the small on-centre torques toward where your hands can read them. 1.0 is off." },
+        { path: "forceFeedback.knee", label: "Soft-knee start", unit: "",
+          min: 0.3, max: 1, step: 0.05,
+          note: "Where the peak starts compressing instead of clipping, as a fraction of rated torque. 1.0 is a hard clip." },
+        { path: "forceFeedback.parkFriction", label: "Standing-still friction", unit: "",
+          min: 0, max: 0.4, step: 0.01,
+          note: "A stationary tyre twisting against the ground. What the paddock feels like." },
+        { path: "forceFeedback.stopDamping", label: "End-stop damping", unit: "",
+          min: 0, max: 1, step: 0.05, note: "Stops the end stop bouncing." },
       ],
     });
   }

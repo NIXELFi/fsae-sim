@@ -12,6 +12,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager};
 
 mod rig;
+mod runs;
 mod wheel;
 
 /// What a launcher (Helios, a shortcut, a script) can ask for on the command
@@ -20,6 +21,9 @@ mod wheel;
 /// ```text
 /// fsae-sim [--track autocross|endurance|mis] [--profile keyboard|gamepad-xbox|gamepad-ps|wheel]
 ///          [--tc on|off] [--abs on|off] [--auto-shift on|off]
+///          [--driver NAME] [--driver-id ID] [--replay RUN] [--ghost RUN]
+///          [--reference RUN]
+///          [--no-record]
 ///          [--autostart] [--fullscreen] [--windowed] [--version]
 ///
 /// By default the window comes up borderless and filling the screen (the
@@ -38,6 +42,29 @@ struct LaunchOptions {
     fullscreen: bool,
     /// Decorated 1600x900 window instead of borderless full-screen.
     windowed: bool,
+    /// Who is driving. Stamped into every run this launch records, so a
+    /// leaderboard can be a leaderboard rather than a list of files.
+    driver: Option<String>,
+    /// The launcher's ID for that person -- a Helios account id. A run
+    /// carrying one was started by somebody Helios had signed in; a run
+    /// without one was somebody typing a name into the simulator, and the
+    /// leaderboard treats the two differently.
+    driver_id: Option<String>,
+    /// Open straight into the replay of a recorded run (id or path) instead
+    /// of the launch screen.
+    replay: Option<String>,
+    /// A second run to draw alongside the replay as a ghost.
+    ghost: Option<String>,
+    /// A recorded run whose best lap becomes the live delta's reference, so
+    /// the driver is chasing a real lap from the first corner instead of
+    /// waiting for lap two.
+    reference: Option<String>,
+    /// Drive without writing a run. Off by default: the whole point is that
+    /// every lap the team drives is kept.
+    no_record: bool,
+    /// A label for the session -- test day, setup change, driver coaching --
+    /// carried into the manifest so runs can be grouped later.
+    session: Option<String>,
     /// Arguments the parser did not understand, reported rather than ignored.
     unknown: Vec<String>,
 }
@@ -74,6 +101,13 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> LaunchOptions {
             "--tc" | "--traction" => o.traction = on_off(take().as_ref()),
             "--abs" => o.abs = on_off(take().as_ref()),
             "--auto-shift" | "--auto" => o.auto_shift = on_off(take().as_ref()),
+            "--driver" => o.driver = take(),
+            "--driver-id" => o.driver_id = take(),
+            "--replay" => o.replay = take(),
+            "--ghost" => o.ghost = take(),
+            "--reference" | "--ref" => o.reference = take(),
+            "--session" => o.session = take(),
+            "--no-record" | "--norecord" => o.no_record = true,
             "--autostart" | "--start" => o.autostart = true,
             "--fullscreen" => o.fullscreen = true,
             "--windowed" | "--window" => o.windowed = true,
@@ -132,6 +166,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
 
             launch_options,
+            runs::save_run,
+            runs::load_run,
+            runs::list_runs,
+            runs::runs_directory,
             rig::rig_status,
             rig::rig_start,
             rig::rig_stop,
@@ -153,8 +191,51 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Split a command line the way a shell would: on whitespace, but keeping
+    /// a double-quoted run together as one argument.
+    ///
+    /// Plain `split_whitespace` does not, and the session test below passes
+    /// `--session "setup B"` -- which tokenized to `--session`, `"setup`, `B"`,
+    /// so `session` came out as `Some("\"setup")` and `B"` landed in
+    /// `unknown`. The test passed only because it asserted on neither. A
+    /// launcher really does pass a session name with a space in it.
     fn args(s: &str) -> Vec<String> {
-        s.split_whitespace().map(String::from).collect()
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut in_quotes = false;
+        let mut started = false;
+        for c in s.chars() {
+            match c {
+                '"' => {
+                    in_quotes = !in_quotes;
+                    started = true;
+                }
+                c if c.is_whitespace() && !in_quotes => {
+                    if started {
+                        out.push(std::mem::take(&mut cur));
+                        started = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    started = true;
+                }
+            }
+        }
+        if started {
+            out.push(cur);
+        }
+        out
+    }
+
+    #[test]
+    fn the_test_helper_keeps_a_quoted_argument_together() {
+        assert_eq!(
+            args("--session \"setup B\" --track mis"),
+            vec!["--session", "setup B", "--track", "mis"],
+        );
+        assert_eq!(args("  --a   --b  "), vec!["--a", "--b"]);
+        assert_eq!(args("--empty \"\""), vec!["--empty", ""]);
     }
 
     #[test]
@@ -167,6 +248,45 @@ mod tests {
         assert_eq!(o.auto_shift, None);
         assert!(o.autostart && o.fullscreen);
         assert!(!o.windowed);
+        assert!(o.unknown.is_empty());
+    }
+
+    #[test]
+    fn parses_a_helios_recording_launch() {
+        let o = parse_args(args(
+            "--track autocross --driver Nick --session \"setup B\" --autostart",
+        ));
+        assert_eq!(o.driver.as_deref(), Some("Nick"));
+        assert_eq!(o.track.as_deref(), Some("autocross"));
+        // The whole point of the quoted argument: a session name with a space
+        // in it has to arrive as one value.
+        assert_eq!(o.session.as_deref(), Some("setup B"));
+        assert!(o.autostart);
+        assert!(!o.no_record);
+        assert!(o.replay.is_none());
+        assert!(o.unknown.is_empty(), "unexpected leftovers: {:?}", o.unknown);
+    }
+
+    #[test]
+    fn parses_an_authenticated_driver() {
+        let o = parse_args(args("--driver Nick --driver-id 8f14e45f-ceea-467a-9c1e-1b2c3d4e5f60"));
+        assert_eq!(o.driver.as_deref(), Some("Nick"));
+        assert_eq!(o.driver_id.as_deref(), Some("8f14e45f-ceea-467a-9c1e-1b2c3d4e5f60"));
+    }
+
+    #[test]
+    fn parses_a_reference_lap() {
+        let o = parse_args(args("--track autocross --reference 20260918-142233-autocross-9f3a"));
+        assert_eq!(o.reference.as_deref(), Some("20260918-142233-autocross-9f3a"));
+        assert!(o.replay.is_none(), "a reference is for a DRIVE, not a replay");
+        assert!(o.unknown.is_empty());
+    }
+
+    #[test]
+    fn parses_a_replay_launch() {
+        let o = parse_args(args("--replay 20260918-142233-autocross-9f3a --ghost other-run"));
+        assert_eq!(o.replay.as_deref(), Some("20260918-142233-autocross-9f3a"));
+        assert_eq!(o.ghost.as_deref(), Some("other-run"));
         assert!(o.unknown.is_empty());
     }
 

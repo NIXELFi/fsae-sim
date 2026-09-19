@@ -13,6 +13,18 @@
 /**
  * @param {object} v  the live SDM26 params object
  */
+/**
+ * The parameter paths `buildAdjustments` can move, in the same order.
+ *
+ * It lives here rather than beside the code that needs it because the failure
+ * it prevents is silent: the run recorder snapshots the car's setup from the
+ * spec sheet's editable list, and NEITHER of these is on it. A run's manifest
+ * claimed to record "the setup this was driven with" while omitting the only
+ * two things a driver can change from inside the car. Add an item below and
+ * add its path here, and the recorder picks it up.
+ */
+export const ADJUSTABLE_PATHS = ["roll.rsdFront", "brakeBiasFront"];
+
 export function buildAdjustments(v) {
   return [
     {

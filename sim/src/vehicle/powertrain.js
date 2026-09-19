@@ -31,6 +31,12 @@ function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
 /** Width of the soft rev limiter, rpm below the limit. */
 const LIMITER_BAND_RPM = 300;
+/**
+ * How long the clutch stays dumped after launch control is released, s.
+ * Long enough to cover the engagement; after it the clutch is governed the
+ * ordinary way again.
+ */
+const LAUNCH_DUMP_S = 0.8;
 
 export class Powertrain {
   /**
@@ -53,6 +59,9 @@ export class Powertrain {
     this.limiterCut = false;
     this.slipping = true;
     this.clutchSlipRpm = 0;
+    /** Launch control: driver holding it, and how long since they dropped it. */
+    this.launchHeld = false;
+    this.launchDumpS = 0;
     this.stalled = false;
   }
 
@@ -63,14 +72,19 @@ export class Powertrain {
       // Below the sweep's first point, fall away toward a plausible idle
       // torque rather than holding 61 N.m down to zero rpm.
       //
-      // The 0.56 floor is not a guess any more. It is pinned by the measured
-      // idle point: the engine idles at 2000 rpm with the plate at 14%, so at
-      // 2000 rpm a 14% opening must exactly balance friction. Solving
-      //     drag / (wot + drag) = 0.14   with drag = 5.54 N.m
-      // gives wot(2000) = 34 N.m, which is 0.56 of the 61 N.m peak. That also
-      // lands squarely in the 55-70% of peak a naturally aspirated four
-      // normally makes at 2000 rpm. The previous 0.35 was invented, and it
-      // could not sustain an idle at any plate opening.
+      // The 0.56 floor is not a guess. It is pinned by the measured idle
+      // point: the engine idles at 2000 rpm with the plate at 22%
+      // (`idleThrottleFrac`), so at 2000 rpm a 22% opening must exactly
+      // balance friction. Solving
+      //     drag / (wot + drag) = 0.22   with drag = 5.543 N.m
+      // gives wot(2000) = 19.65 N.m. This floor is a fraction of the SWEEP'S
+      // FIRST POINT -- 35.461 N.m at 4000 rpm, not the peak -- so
+      // 19.65 / 35.461 = 0.554, which is the 0.56 here.
+      //
+      // That is 34% of the 57.82 N.m peak, lower than the 55-70% a naturally
+      // aspirated four is usually quoted at 2000 rpm; this engine peaks near
+      // 11k, so a low fraction down there is expected. Kept identical to the
+      // Rust port in `powertrain.rs`.
       const f = Math.max(0, rpm - this.v.idleRpm) / Math.max(1, p[0].rpm - this.v.idleRpm);
       return p[0].torqueNm * (0.56 + 0.44 * Math.min(1, f));
     }
@@ -116,7 +130,9 @@ export class Powertrain {
    * Throttle plate position, 0..1, for a driver demand.
    *
    * The plate does not fully close at idle: the ETC holds it open a little to
-   * keep the engine alive, and on SDM26 that idle position is 14%. The floor
+   * keep the engine alive, and on SDM26 that idle position is 22%
+   * (`idleThrottleFrac`; see the note in `tools/validate.js` about how
+   * that squares with the measured sheet). The floor
    * fades out as revs rise, because a real ETC *does* close on the overrun --
    * that is what engine braking is, and holding 14% all the way up the range
    * would delete most of it.
@@ -167,6 +183,23 @@ export class Powertrain {
   }
 
   /** Net crankshaft torque for a throttle demand 0..1. */
+  /**
+   * Launch control. Held, the engine sits on the LC limiter with the clutch
+   * out; released, the clutch is DUMPED rather than fed in, which is what the
+   * driver does and what makes a competitive start.
+   */
+  setLaunch(held) {
+    if (this.launchHeld && !held) this.launchDumpS = LAUNCH_DUMP_S;
+    this.launchHeld = !!held;
+  }
+
+  /** The rev limit in force. Launch control lowers it while it is held. */
+  limitRpm() {
+    return this.launchHeld
+      ? Math.min(this.v.launchRpm ?? 7000, this.v.revLimitRpm)
+      : this.v.revLimitRpm;
+  }
+
   engineTorque(rpm, throttle) {
     if (this.shiftTimer > 0) return -this.motoringTorque(rpm) * 0.5; // ignition cut
 
@@ -185,7 +218,7 @@ export class Powertrain {
     // camera. Over the last LIMITER_BAND_RPM the net torque blends toward
     // pure drag, so the engine settles where torque meets load instead of
     // cycling. At the limit itself it is the same full cut as before.
-    const soft = clamp((rpm - (this.v.revLimitRpm - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM, 0, 1);
+    const soft = clamp((rpm - (this.limitRpm() - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM, 0, 1);
     if (soft > 0) t -= soft * (t + drag);
     // For the audio: the ignition is being cut once we are deep in the band.
     this.limiterCut = soft >= 0.5;
@@ -241,13 +274,67 @@ export class Powertrain {
     // letting the engine stall, and what a slipper clutch does for them.
     // Without it a tall-gear roll-down dragged the engine to zero rpm.
     if (throttle < 0.05 && clutchSideRpm < this.v.idleRpm * 0.95) return 0;
-    if (speed > 4) return full;
-    // Below walking pace the clutch is being managed, and with the driver off
-    // the pedal it is fully in. The old floor of 0.1 meant it always carried
-    // about 26 N.m, which is several times what the engine makes at idle -- so
-    // a stationary car dragged its own engine down to 1600 rpm and it could
-    // never actually idle. A real FSAE car does not creep; you slip the clutch.
-    return full * Math.min(1, throttle * 1.15);
+    // The driveline turning the engine rather than the other way round: the
+    // clutch is in, and this is engine braking, not a launch.
+    if (clutchSideRpm >= this.engineRpm) return full;
+    // Caught up: there is nothing left to slip.
+    // 7000 to match `Powertrain::default()` in the Rust port: a fallback
+    // that differs between the two builds is a divergence waiting for the
+    // day something forgets to set the real value.
+    const target = this.v.launchRpm ?? 7000;
+    // Launch control held: the driver has the clutch in and the engine on the
+    // LC limiter, waiting. Nothing goes through until the pedal comes up.
+    if (this.launchHeld) return 0;
+    // ...and once it does, it is DUMPED, not fed in. That is what the driver
+    // actually does and it is worth several tenths: the clutch slams to full
+    // capacity, the crank drops off the LC rpm into the tyres, and the rears
+    // light up. The progressive engagement below is the soft start you get
+    // when nobody is using launch control.
+    if (this.launchDumpS > 0) return full;
+    if (clutchSideRpm >= target) return full;
+    // Rolling: the clutch is in. A launch in first has the driveline catching
+    // the crank at about 11 m/s, so past 12 there is nothing left to slip and
+    // the capacity must stop depending on engine speed -- both because a
+    // slipping clutch in normal driving is wrong, and because that dependence
+    // feeds back into the engine speed that computes it, which is how the two
+    // builds drifted apart on the parity drive.
+    if (speed > 12) return full;
+
+    // Pulling away. The clutch is a torque the driver holds, not a switch.
+    //
+    // It used to pass the whole 220 N.m at full throttle, which is a dump:
+    // against an engine making 20 N.m at idle it dragged the crank to about
+    // 1000 rpm and took 1.4 s to climb back, so the car left the line on a
+    // third of the traction it had.
+    //
+    // The fix has to be a FRACTION OF WHAT THE ENGINE IS MAKING RIGHT NOW, not
+    // of what it would make at the launch rpm. Anchoring it to the launch rpm
+    // and leaning on a proportional term gave zero capacity below 8500 and
+    // 166 N.m at 10 000: the car got no drive at all until the crank came up,
+    // then the clutch grabbed. At a crawl that snapped the car sideways.
+    //
+    // Below the target, pass about half of what the engine makes -- enough to
+    // move the car, and the rest revs the crank toward the launch rpm. At the
+    // target, pass all of it, so the engine sits steady and everything it
+    // makes goes to the road. Above it, pass more than it makes and the crank
+    // is pulled back down. That is what a left foot does.
+    const avail = this.wotTorque(this.engineRpm) * Math.min(1, throttle * 1.15);
+    const frac = 0.5 + 0.5 * (this.engineRpm / target);
+    const slipping = Math.max(0, Math.min(full, avail * frac));
+    // ...blended into the full capacity as the slip closes, because by then it
+    // is not being slipped any more. The blend has to be CONTINUOUS: a plain
+    // threshold here is a cliff with 200 N.m on the other side of it, and the
+    // parity drive sits right on it, so one ulp of difference between JS Math
+    // and Rust libm flipped the branch and the two builds walked apart.
+    // ...blended into the full capacity as the DRIVELINE spins up toward the
+    // launch rpm, which is what "the car has pulled away" actually means.
+    // It must NOT key off the slip: in a low gear the engine sits a few
+    // hundred rpm above the clutch at any normal throttle, and a slip-based
+    // blend had the clutch giving way in ordinary driving -- which is also
+    // what broke the JS/Rust parity, because the capacity then fed back into
+    // the engine speed that computed it.
+    const w = Math.max(0, Math.min(1, clutchSideRpm / target));
+    return slipping + (full - slipping) * w;
   }
 
   /**
@@ -260,12 +347,21 @@ export class Powertrain {
    * @returns {{wheelTorqueNm:number, addedWheelInertia:number, locked:boolean}}
    */
   step(dt, throttle, rearWheelOmega, speed) {
+    if (this.launchDumpS > 0) this.launchDumpS = Math.max(0, this.launchDumpS - dt);
     if (this.shiftTimer > 0) {
       this.shiftTimer -= dt;
       if (this.shiftTimer <= 0 && this.pendingGear != null) {
+        const downshift = this.pendingGear < this.gear;
         this.gear = this.pendingGear;
         this.pendingGear = null;
         this.shiftTimer = 0;
+        // Auto-blip on a downshift (see powertrain.rs): rev-match before the
+        // clutch comes back in, so it never lands by dragging the rear axle
+        // down to crank speed.
+        if (downshift) {
+          const matched = rearWheelOmega * this.ratio() * RADS_TO_RPM;
+          this.engineRpm = clamp(matched, this.v.idleRpm, this.v.revLimitRpm - LIMITER_BAND_RPM);
+        }
       }
     }
 

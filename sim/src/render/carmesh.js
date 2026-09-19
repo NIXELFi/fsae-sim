@@ -29,9 +29,19 @@ const RIM_FACE = [0.46, 0.47, 0.51];
 const METAL = [0.42, 0.44, 0.48];
 const DASH_LCD = [0.055, 0.085, 0.075];
 // Steering wheel, matched to the team's wheel asset.
-const CARBON_PLATE = [0.135, 0.138, 0.142];
+// Carbon reads far darker in the cockpit's shadow than it does in a studio
+// render, and at 0.135 the plate was a black void with some gold on it.
+const CARBON_PLATE = [0.175, 0.180, 0.190];
+/** Recesses and the lightening slot -- the same material, in shadow. */
+const CARBON_DARK = [0.085, 0.088, 0.095];
+const DASH_CASE = [0.055, 0.056, 0.060];
+const DASH_BEZEL = [0.030, 0.031, 0.034];
+const DASH_BUTTON = [0.30, 0.31, 0.33];
 const GRIP = [0.072, 0.074, 0.080];
 const AMBER = [0.95, 0.62, 0.12];
+const AMBER_LIT = [1.0, 0.80, 0.34];
+/** The domed face of a button, which catches the light the barrel does not. */
+const GOLD_LIT = [1.0, 0.88, 0.42];
 const EMBLEM = [0.86, 0.87, 0.88];
 
 // Real SDM26 dimensions (Helios spec sheet).
@@ -55,7 +65,12 @@ export const GEO = {
   // Driver's eye, and where the wheel sits relative to it.
   // Wheel centre sits low enough that the driver looks OVER the rim, which is
   // where it is in the car -- put it at eye height and it blocks the course.
-  steerCentre: [0.28, 0.50, 0],
+  // Dropped 30 mm when the dash went on the column: the dash sits above the
+  // wheel, the eye is at 0.70, and with the column at 0.50 the panel's top
+  // edge came within 60 mm of the driver's eye line and filled the windscreen.
+  // Lower the column, the whole assembly follows, and you look DOWN at the
+  // dash the way you do in the car.
+  steerCentre: [0.28, 0.435, 0],
   steerTiltRad: (22 * Math.PI) / 180,
   // The team's actual wheel (see packages/widgets/src/steering-wheel/assets):
   // a carbon plate with two kidney cut-outs, grips wrapping their outer edge,
@@ -65,6 +80,30 @@ export const GEO = {
   steerHalfHeight: 0.074,
   /** Steering ratio: 28 deg of lock becomes ~112 deg of wheel rotation. */
   steeringRatio: 4.0,
+
+  // ---- the dash ----
+  //
+  // An AiM MXS Strada, at its real size. The CASE is 137 x 84 mm and the
+  // display inside it is a 5-inch 800x480 panel, 108 x 65 mm. Those two are
+  // different rectangles and the difference matters: the screen quad shows
+  // only the display, and the bezel around it is geometry.
+  //
+  // It is on the column shroud ABOVE the wheel and does not turn with it.
+  // Positions are in the steering column's own frame: +x across the wheel
+  // face, +y up it, +z away from the driver.
+  //
+  // NO extra rake. The column's own 22 degrees already lean the face back and
+  // up toward a driver whose eye is 100 mm above it and behind it; adding more
+  // points the screen past them at the sky, which is what the first attempt
+  // did and it looked exactly as wrong as it was.
+  dashCentre: [0, 0.128, 0.018],
+  /** The DISPLAY, 108 x 65 mm. What the screen quad is sized from. */
+  dashHalfWidth: 0.054,
+  dashHalfHeight: 0.0324,
+  /** The CASE, 137 x 84 mm. */
+  dashCaseHalfWidth: 0.0685,
+  dashCaseHalfHeight: 0.042,
+  dashTiltRad: 0,
 };
 
 class Builder {
@@ -175,6 +214,41 @@ class Builder {
 
   polyTube(points, r, segs, color) {
     for (let i = 0; i < points.length - 1; i++) this.tube(points[i], points[i + 1], r, segs, color);
+  }
+
+  /**
+   * Sweep a circular section along a path that lies in the XY plane.
+   *
+   * `polyTube` cannot do this: it builds each segment as its own `tube`, so
+   * every segment picks its own rotational frame from its own axis and gets
+   * its own end caps. The result is a chain of separately-capped sausages
+   * whose rings do not line up -- fine for a straight suspension link, wrong
+   * for anything that curves, where it reads as a row of blocks.
+   *
+   * Here the frame is continuous: at each point the section is swept in the
+   * plane of the path's own normal and z, so consecutive rings share an
+   * orientation and the whole thing lofts as one surface with two caps.
+   */
+  sweepXY(path, r, segs, color) {
+    const rings = path.map((pt, i) => {
+      const prev = path[Math.max(0, i - 1)];
+      const next = path[Math.min(path.length - 1, i + 1)];
+      // In-plane normal: the tangent turned a quarter turn.
+      let nx = -(next[1] - prev[1]);
+      let ny = next[0] - prev[0];
+      const len = Math.hypot(nx, ny) || 1;
+      nx /= len;
+      ny /= len;
+      const out = [];
+      for (let k = 0; k < segs; k++) {
+        const a = (k / segs) * Math.PI * 2;
+        const c = Math.cos(a) * r;
+        const d = Math.sin(a) * r;
+        out.push([pt[0] + nx * c, pt[1] + ny * c, pt[2] + d]);
+      }
+      return out;
+    });
+    this.loft(rings, color);
   }
 
   mesh() {
@@ -561,70 +635,150 @@ function ringZ(r, z, segs) {
 function buildSteeringWheel() {
   const b = new Builder();
 
-  // Laid out from the team's wheel asset: a carbon plate with two kidney
-  // cut-outs, the grips wrapping their outer edge, gold buttons in the top
-  // corners, amber paddles either side of the logo, three gold rotaries along
-  // the bottom. There is NO display screen on the real wheel -- the centre
-  // carries the Sparky mark, and putting a lit panel there was the single most
-  // wrong thing about the previous version.
-  const PLATE_HW = 0.090;   // carbon plate half-width
-  const HH = GEO.steerHalfHeight;
-  const PT = 0.009;         // plate thickness
-  const PZ = -PT / 2;       // plate sits just in front of the hub plane
+  // Modelled from the team's own wheel -- the render in
+  // `helios/packages/widgets/src/steering-wheel/assets/wheel.png`, which is
+  // the wheel that is actually bolted to the car.
+  //
+  // Reading that image: a near-square carbon plate with two big kidney
+  // cut-outs, a suede D-grip wrapping the outside of each cut-out, two gold
+  // buttons in the top corners, two amber rockers either side of the centre,
+  // the Sparky mark in the middle, and three gold rotaries along the bottom.
+  // There is NO screen on it -- the dash is a separate Strada unit on the
+  // scuttle, which is why the HUD draws one there and not here.
+  //
+  // Everything is in metres in the wheel's own plane: +x right, +y up, and -z
+  // toward the driver, so a part that stands proud has a more negative z.
+  const HW = GEO.steerHalfWidth;    // 104 mm: the outside of the grips
+  const HH = GEO.steerHalfHeight;   //  72 mm: the top of the plate
+  const PT = 0.009;                 // plate thickness
+  const PZ = -PT / 2;
 
-  // Cut-out bounds: the plate is built as bars around the holes rather than
-  // subtracted, which keeps it low-poly and needs no CSG.
-  const COL_HW = 0.027;     // centre column half-width
-  const RAIL_X = 0.078;     // inner edge of the outer rail
-  const TOP_Y = 0.038;      // bottom of the top bar
-  const BOT_Y = -0.046;     // top of the bottom bar
+  // The grips sit at the outer edge; the plate's bars run out to their centres
+  // so there is no gap between plate and grip.
+  const GRIP_R = 0.016;
+  const GRIP_CX = HW - GRIP_R;
+  const PLATE_HW = GRIP_CX;
+
+  // The cut-outs. Everything else about the plate is the material left around
+  // them, which keeps this low-poly and needs no CSG.
+  const COL_HW = 0.026;   // centre column half-width
+  const TOP_Y = 0.036;    // underside of the top bar
+  const BOT_Y = -0.042;   // top of the bottom bar
 
   const bar = (cx, cy, w, h, colour) => b.box(cx, cy, PZ, w, h, PT, colour);
 
-  bar(0, (TOP_Y + HH) / 2, PLATE_HW * 2, HH - TOP_Y, CARBON_PLATE);        // top
-  bar(0, (-HH + BOT_Y) / 2, PLATE_HW * 2, BOT_Y + HH, CARBON_PLATE);       // bottom
-  bar(0, (BOT_Y + TOP_Y) / 2, COL_HW * 2, TOP_Y - BOT_Y, CARBON_PLATE);    // centre
-  for (const s of [-1, 1]) {
-    bar(s * (RAIL_X + PLATE_HW) / 2, (BOT_Y + TOP_Y) / 2,
-        PLATE_HW - RAIL_X, TOP_Y - BOT_Y, CARBON_PLATE);                   // outer rails
+  bar(0, (TOP_Y + HH) / 2, PLATE_HW * 2, HH - TOP_Y, CARBON_PLATE);       // top
+  bar(0, (-HH + BOT_Y) / 2, PLATE_HW * 2, BOT_Y + HH, CARBON_PLATE);      // bottom
+  bar(0, (BOT_Y + TOP_Y) / 2, COL_HW * 2, TOP_Y - BOT_Y, CARBON_PLATE);   // centre
+
+  // The lightening slot across the top, and the shallow scallop under the
+  // logo -- both are recesses in the reference, so both are darker insets
+  // rather than raised parts.
+  b.box(0, HH - 0.013, PZ - PT * 0.30, 0.080, 0.010, PT * 0.55, CARBON_DARK);
+  b.box(0, BOT_Y + 0.008, PZ - PT * 0.30, 0.062, 0.007, PT * 0.55, CARBON_DARK);
+
+  // ---- grips ----
+  //
+  // A D in plan: an arc bulging outward from the cut-out, its ends turning
+  // back in toward the centre column, which is the shape your hand actually
+  // wraps. Swept as one continuous surface -- see `sweepXY`, and see the
+  // comment there for why the obvious `polyTube` is wrong for a curve.
+  const GZ = -0.016;          // stands proud toward the driver
+  const ARC_A = 0.0231;       // outward bulge
+  // Sized so the grip's top ends stop just under the plate's top bar: in the
+  // reference the two gold buttons sit on that bar, OUTBOARD and above the
+  // grips, and a taller arc swallows them.
+  const ARC_B = 0.0496;       // vertical half-extent
+  const ARC_CX = GRIP_CX - ARC_A;
+  const SPAN = (130 * Math.PI) / 180;
+  const N = 15;
+  for (const side of [-1, 1]) {
+    const path = [];
+    for (let i = 0; i < N; i++) {
+      const th = SPAN - (2 * SPAN * i) / (N - 1);
+      path.push([side * (ARC_CX + ARC_A * Math.cos(th)), ARC_B * Math.sin(th) - 0.004, GZ]);
+    }
+    b.sweepXY(side < 0 ? path.slice().reverse() : path, GRIP_R, 12, GRIP);
   }
 
-  // Lightening slot across the top of the plate.
-  b.box(0, HH - 0.014, PZ - PT * 0.35, 0.086, 0.011, PT * 0.5, [0.05, 0.052, 0.056]);
-
-  // Grips: rounded verticals wrapping the outside of each cut-out, standing
-  // proud toward the driver. A tube keeps them round for eight triangles a ring.
-  const GRIP_R = 0.019;
-  const gx = GEO.steerHalfWidth - GRIP_R;
-  for (const s of [-1, 1]) {
-    b.tube([s * gx, -0.058, -0.020], [s * gx, 0.052, -0.020], GRIP_R, 8, GRIP);
+  // ---- gold buttons, top corners ----
+  // Out at the corners of the top bar, clear of the grips below them -- which
+  // is where they are on the real wheel and, less romantically, the only place
+  // a 23 mm button is not swallowed by a 32 mm grip.
+  for (const side of [-1, 1]) {
+    b.cylZ(side * 0.076, HH - 0.018, -0.013, 0.0115, 0.005, 12, GOLD);
+    b.discZ(side * 0.076, HH - 0.018, -0.018, 0.0115, 12, GOLD_LIT);
   }
 
-  // Gold buttons, top corners.
-  for (const s of [-1, 1]) {
-    b.cylZ(s * 0.062, HH - 0.019, -0.014, 0.011, 0.006, 10, GOLD);
-    b.discZ(s * 0.062, HH - 0.019, -0.020, 0.011, 10, GOLD);
+  // ---- amber rockers, either side of the mark ----
+  for (const side of [-1, 1]) {
+    b.box(side * 0.021, 0.021, -0.011, 0.011, 0.021, 0.005, AMBER);
+    // The lit face, so they read as switches and not as two orange smudges.
+    b.box(side * 0.021, 0.021, -0.014, 0.008, 0.017, 0.001, AMBER_LIT);
   }
 
-  // Amber paddle switches either side of the logo.
-  for (const s of [-1, 1]) {
-    b.box(s * 0.019, 0.020, -0.012, 0.010, 0.024, 0.006, AMBER);
+  // ---- three gold rotaries along the bottom ----
+  for (const side of [-1, 0, 1]) {
+    b.cylZ(side * 0.034, -0.058, -0.015, 0.0125, 0.007, 12, GOLD);
+    b.discZ(side * 0.034, -0.058, -0.022, 0.0125, 12, GOLD_LIT);
   }
 
-  // Three gold rotaries along the bottom bar.
-  for (const s of [-1, 0, 1]) {
-    b.cylZ(s * 0.035, -0.061, -0.016, 0.012, 0.008, 10, GOLD);
-    b.discZ(s * 0.035, -0.061, -0.024, 0.012, 10, [1.0, 0.84, 0.35]);
+  // ---- the Sparky mark ----
+  //
+  // A pitchfork, not a blank plate. It is about forty pixels on screen, so
+  // the actual devil is hopeless, but three tines and a shaft are instantly
+  // the right mark and a white rectangle is instantly nothing.
+  const MZ = -0.012;
+  const tineH = 0.019;
+  for (const side of [-1, 0, 1]) {
+    b.box(side * 0.0105, 0.006 + tineH / 2, MZ, 0.0045, tineH, 0.003, EMBLEM);
+  }
+  b.box(0, 0.005, MZ, 0.027, 0.005, 0.003, EMBLEM);     // crossbar
+  b.box(0, -0.008, MZ, 0.0055, 0.022, 0.003, EMBLEM);   // shaft
+
+  // No hands. Full lock swings a glove from 3 o'clock round to 10, high
+  // enough to break the horizon in the middle of the frame, and without
+  // modelled arms that reads as a floating black box on the road.
+  return b.mesh();
+}
+
+/**
+ * The dash unit's CASE -- the black shell the screen sits in.
+ *
+ * Only the case is here. The screen is a textured quad the renderer draws
+ * with its own unlit program, because it is a backlit LCD: shading it with the
+ * sun would make it darker in shadow, which is precisely wrong.
+ */
+function buildDashCase() {
+  const b = new Builder();
+  const sw = GEO.dashHalfWidth;        // the display
+  const sh = GEO.dashHalfHeight;
+  const cw = GEO.dashCaseHalfWidth;    // the case around it
+  const ch = GEO.dashCaseHalfHeight;
+  const D = 0.024;                     // 24 mm deep, as the real one is
+
+  // Shell, just behind the display plane.
+  b.box(0, 0, D / 2 + 0.001, cw * 2, ch * 2, D, DASH_CASE);
+
+  // The bezel: four bars of case material around the display, standing a
+  // fraction proud so the glass is recessed rather than painted on. The side
+  // bars are wide -- 14.5 mm -- because that is where the buttons live.
+  const lip = 0.0022;
+  const sideW = cw - sw;
+  const topH = ch - sh;
+  b.box(0, sh + topH / 2, -lip / 2, cw * 2, topH, lip, DASH_BEZEL);
+  b.box(0, -sh - topH / 2, -lip / 2, cw * 2, topH, lip, DASH_BEZEL);
+  for (const side of [-1, 1]) {
+    b.box(side * (sw + sideW / 2), 0, -lip / 2, sideW, sh * 2, lip, DASH_BEZEL);
+    // Three buttons down each side, which is what those bars are for.
+    for (let i = -1; i <= 1; i++) {
+      b.box(side * (sw + sideW / 2), i * 0.016, -lip - 0.0015,
+            sideW * 0.55, 0.005, 0.003, DASH_BUTTON);
+    }
   }
 
-  // Sparky mark in the centre. At this size it is a few pixels, so it is a
-  // light plate rather than an attempt at the actual pitchfork.
-  b.box(0, -0.004, -0.012, 0.030, 0.032, 0.004, EMBLEM);
-
-  // No hands. Full lock is 112 deg of wheel rotation, which swings a glove at
-  // 3 o'clock round to 10 o'clock -- high enough to break the horizon in the
-  // middle of the frame. Without modelled arms that reads as a floating black
-  // box sitting on the road, which is worse than no hands at all.
+  // The stalk down to the column shroud.
+  b.box(0, -ch - 0.020, D * 0.55, 0.024, 0.026, 0.016, DASH_CASE);
   return b.mesh();
 }
 
@@ -705,6 +859,7 @@ export function buildCarMeshes(params) {
     tire: buildTire(),
     rim: buildRim(),
     steeringWheel: buildSteeringWheel(),
+    dashCase: buildDashCase(),
   };
 }
 

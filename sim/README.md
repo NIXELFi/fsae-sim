@@ -43,6 +43,16 @@ fresh `index.html` alongside a stale `main.js` -- the page looks updated while
 the behaviour is yesterday's. `serve.py` is the same static server with caching
 switched off.
 
+Before you hand anything to anyone:
+
+```bash
+cd sim && npm test          # shaders, bindings, respawn, replay, delta, physics
+npm run smoke               # launches the built exe and interrogates it
+```
+
+`npm test` needs nothing installed -- every one of those is a plain Node script
+against the same modules the game loads.
+
 ## Controls
 
 | Xbox One | Keyboard | |
@@ -57,16 +67,38 @@ switched off.
 | D-pad < > | `[` `]` | Pick the setup item to adjust |
 | D-pad ^ v | `-` `=` | Adjust it, 0.1% a press |
 | L3 | `H` | Back to the home screen |
+| -- | `U` / `J` | Overlay density / which dash |
 | -- | `M` | Throttle-map editor |
 | -- | `F11` | Fullscreen |
 
+**Everything in the table above is rebindable** -- not `F11`, and not the
+walkaround camera's own nudges, which are the keyboard's copy of what the mouse
+already does in that view. Home screen -> Controls -> Bindings: click the cell
+for a control and press the key, button or paddle you want it to be. The same
+table drives what `Input` reads, so there is no such thing as a binding the
+panel offers and the game ignores. Binding something that is already taken
+moves it, and says so. Right-click a cell to clear it.
+
+Axes are found the same way: under **Axes and calibration**, click a pedal's
+row and sweep it end to end. The axis that moved is the one it binds to, and
+the travel it saw is the calibration -- one gesture for both, because wheels
+and pedal sets do not use a standard mapping and there is no table that is
+right for every device.
+
+Autocross ends at the finish line, and the end-of-run card is what happens
+there: the raw time, the cones and off-courses it cost, and the score. From it
+you can run it again (`Enter`), watch the replay (`W`), keep driving (`Esc`),
+go to the home screen (`H`) or quit (`Q`). It comes up two seconds after the
+line, so the roll-out and the time on the dash are still yours to see.
+
 Steering uses a 10% deadzone and a 1.7-power response curve. That curve is not
-a feel preference: full lock is 28 deg and the tyre peaks at 8.5 deg of slip, so a
-linear stick would compress everything that matters into the first third of the
-travel.
+a feel preference: full lock is 46 deg and the tyre peaks at 7.3 deg of slip, so
+a linear stick would compress everything that matters into the first sixth of
+the travel.
 
 Four cameras: cockpit (driver's eye, 0.66 m off the deck), nose, chase, and a
-free walkaround (`,` `.` turn, `R` `F` rise, `[` `]` zoom). The driving views all
+free walkaround (drag to turn and raise, wheel to zoom; `,` `.` `G` `F` `'` `;`
+on the keyboard). The driving views all
 of them carry the HUD, including live APS / TPS / brake bars -- APS against TPS
 is worth watching, because on anything but a linear pedal map the gap between
 those two bars *is* the map.
@@ -156,7 +188,8 @@ is where the car's corners actually are.
 
 - **Front wheels steer and spin.** Steer rotates about the kingpin, spin about
   the hub axis *after* the steer, so a steered wheel rolls about its own axis.
-  28 deg of lock gives 247 deg of steering-wheel rotation (4.411:1, measured).
+  The rack is progressive and was measured: 46 deg of lock, and 179 deg of rim
+  each way to reach it, so 358 lock to lock.
 - **The steering wheel is the team's own**, laid out from the asset in
   `packages/widgets/src/steering-wheel`: a carbon plate with two kidney
   cut-outs, grips wrapping their outer edge, gold buttons in the top corners,
@@ -174,7 +207,7 @@ is where the car's corners actually are.
   Chase damps roll and pitch, because a chase camera that rolls with the car is
   unwatchable.
 
-There are no hands on the wheel. At 247 deg of lock a glove modelled at 3 o'clock
+There are no hands on the wheel. At 179 deg of lock a glove modelled at 3 o'clock
 swings round to 10 o'clock, high enough to break the horizon in the middle of
 the frame; without modelled arms that reads as a floating black box sitting on
 the road.
@@ -331,12 +364,57 @@ with a measured understeer gradient (on the team's 2026-04-08 test plan; no
 result on Drive).
 
 Estimates the team has not measured are marked `EST` in `params.js`, each with
-its basis: driveline inertias, 28 deg lock (consistent with the MoTeC steering
-channel's 121-124 deg rim cap through the 4.411 ratio, but not a rack
-measurement), the 206 lbf pedal force behind the 1235 N.m max brake torque,
-0.35 m relaxation length, the 8.5 deg peak slip angle (the TTC fit peaks at
-12.4-12.9 deg, deliberately not used: see `tire.js`). Those are the numbers to
+its basis: driveline inertias, the 206 lbf pedal force behind the 1235 N.m max
+brake torque, and 0.35 m relaxation length. (Steering lock and the peak slip
+angle used to be on this list at 28 deg and 8.5 deg; both have since been
+measured -- 46 deg through the progressive rack, and 7.3 deg from the team's
+own tyre data.) Those are the numbers to
 replace first when real data exists.
+
+### The differential
+
+The rear axle is two wheels with a **Drexler Formula Student V3** between them,
+a 1.5-way Salisbury clutch-pack LSD, which is what SDM26 runs. It is modelled
+from the team's own April 2026 study ("The Differential Drexler Study"):
+
+```
+T_c = C |T_in| + B        the largest torque DIFFERENCE the pack can hold
+```
+
+`C` is the lock fraction of the ramp in use and `B` the breakaway preload. The
+study's central piece of advice is not to derive the internal geometry, because
+Drexler publishes neither the pin radius nor the mean clutch radius, but to
+back-calculate `C` from the lock percentages in the manual and carry it as one
+identified constant. Those are 30 deg -> 0.88, 40 -> 0.60, 45 -> 0.51,
+50 -> 0.42, 60 -> 0.29. The car ships on the default 40/50 ramps, so
+**0.60 on power and 0.42 on coast, with 25 N.m of preload** -- the same three
+numbers the Assetto Corsa mod is pinned to. All three are live in the spec
+sheet, because the study also warns that the manual is marketing-optimistic and
+that measured on-track values run 60-80% of it.
+
+The clutch opposes the wheel-speed difference, saturating at half the capacity,
+with a soft sign through the stick band so the split stays continuous at a
+500 Hz substep. Torque leaves the faster wheel and arrives at the slower one,
+and the driveline's reflected inertia is solved on the **carrier**, which turns
+at the mean of the two side gears -- hanging half of it on each wheel would make
+the axle behave far more locked than the clutch pack actually makes it.
+
+What that buys, and why it is worth two extra states:
+
+- **On a lift** the coast ramp drags the faster, outer wheel and steadies the
+  car. Measured in `validate.js`: a 16 m/s corner dropped to zero throttle
+  spikes the yaw rate 56% with an open diff and 12% with the Drexler, and body
+  slip goes from double figures to about a degree. This is the single largest
+  change to how the car behaves.
+- **On the throttle** it sends torque to the slower, inner wheel, and the inner
+  wheel pushing harder than the outer pushes the nose wide. That is power
+  understeer, and it is why going from open to the ramp the car runs moves the
+  steady-corner balance measurably toward the front.
+- **In a tight, low-speed corner** it lifts the inside rear and spins it, which
+  is the behaviour the study describes as the cost of a locked diff on an FSAE
+  autocross hairpin. Past about 0.6 of lock, more lock stops buying understeer
+  for exactly that reason; there is a genuine optimum per corner type rather
+  than a monotone trend.
 
 ## Powertrain
 
@@ -506,7 +584,7 @@ physically command, so each gets its own steering dynamics:
 All at the road wheel. Divide by the 4.411 steering ratio for rim figures.
 
 **On a keyboard the lock itself shrinks with speed**: Ackermann for 1.4 g plus
-the peak slip angle plus 3 deg, so all 28 deg below ~8 m/s, ~17 deg at 15 m/s, ~14.5 deg at
+the peak slip angle plus 3 deg, so all 46 deg below ~8 m/s, ~17 deg at 15 m/s, ~14.5 deg at
 20 m/s. A key has no position, and without this it went to full lock at any
 speed -- at 15 m/s that is 10 deg past the front tyres' peak, and the car spun.
 The keyboard pedals are ramped too (throttle 0->1 in 0.4 s, brake in 0.25 s,
@@ -525,14 +603,23 @@ steering motor can produce.
 
 The mapping from rim angle to road wheel is the setting that matters most:
 
-- **Match the car** -- the rim turns through SDM26's measured 4.411 ratio, so
-  its 28 deg of lock is **247 deg at the rim, lock to lock**. Set your wheel's driver
-  software to 247 deg and hand position *is* front-wheel angle. Leaving a 900 deg wheel at 900
-  makes this mapping use only the first 12% of its travel: correct, and it feels
-  wrong, because the wheel is configured wrong.
+- **Match the car** -- the rim turns the road wheels through SDM26's
+  **measured** rack: the toe-vs-steering-wheel table the team recorded on the
+  real car (`params.steering.rimToRoadDeg`, and the identical array in
+  `sim-core`'s `vehicle.rs`). That rack is *progressive* -- about 5.3 deg of
+  rim per road degree on centre, falling to 3.4 past 90 deg -- and it reaches
+  **46 deg of road wheel at 179 deg of rim, so 358 deg lock to lock**. Set both
+  your wheel's driver software and the rotation slider in the panel to 358 and
+  hand position *is* front-wheel angle, with the base's own stop at the car's.
+  The two settings must always agree; if they disagree everything downstream is
+  scaled by the ratio between them.
+
+  This replaced a constant 4.411 ratio to a 28 deg stop at 123.5 deg of rim,
+  which was 19% too quick on centre -- where most of the driving happens -- and
+  then hit a wall 18 deg of road wheel before the real rack does.
 - **Scale to lock** -- whatever rotation the wheel is set to becomes full lock.
   Nothing to reconfigure, but the ratio is then a fiction and the steering is
-  eight times slower than the real car's.
+  far slower than the real car's.
 
 Deadzone 0 and curve 1.00 are correct on a wheel and not defaults to tune away:
 the device measures hand position directly, so smoothing it discards real
@@ -584,13 +671,33 @@ noise on a scripted drive (`validate.js`, "RUST PARITY", against
 `data/vehicle-golden.json`). In a browser the JS model runs and the force
 feedback is computed for display only.
 
-SDM26 puts about 9 N.m per g into the rim, so an R5 clips from ~0.65 g up at
-unity gain. The default gain of 0.55 keeps most of the going-light signal
-inside the motor's range (it still clips above ~1.2 g); 0.4-0.45 is the
-honest choice if the cue at the limit matters more than weight mid-corner.
-Raise it on a stronger base. If the wheel pulls the wrong way, there is an
-**Invert** switch -- and that would be worth reporting, because the sign
-convention is worked out rather than guessed.
+SDM26 puts about **12 N.m per g** into the rim, and the aligning torque
+**peaks near 15 N.m at about 4 deg of front slip** -- well before the tyre's
+own force peak at 7.3 deg, which is exactly why the rim goes light before the
+front lets go. The peak is what the gain is set against: `defaultGainFor` is
+`rated / 15`, so 0.37 on a MOZA R5 and unity from 15 N.m up.
+
+Above that the mix is **compressed, not clipped**. A hard clamp at the rated
+torque erases the one cue the whole model exists to deliver: at the old gain an
+R5 sat pinned at full output from 0.8 g, through the 1.5 g torque peak, and
+through the fall-off past it, so the driver felt a wall and then a slightly
+lighter wall. Two settings shape it, both in the panel:
+
+- **`gamma` (0.75)** lifts everything below full scale, the job AC's
+  `ff_post_process` GAMMA does.
+- **`knee` (0.6)** bends everything above 60% of output through a tanh, so the
+  peak and the drop past it stay readable as an arc.
+
+On an R5 the command now runs 0.38 at 0.3 g, 0.83 at 1.0 g, 0.91 at the torque
+peak, and falls to 0.58 in a full slide -- a 36% drop the hands can read, where
+before it was a flat 1.00 from 0.8 g to 1.6 g. The **end stop** and the
+standstill terms sit outside that compressor: a stop that scaled with a taste
+setting was not a stop, and a stationary tyre being scrubbed about its kingpin
+has weight whatever the gain says.
+
+If the wheel pulls the wrong way, there is an **Invert** switch -- and that
+would be worth reporting, because the sign convention is worked out rather than
+guessed.
 
 **Any wheel, not one wheel.** The rig reads whatever DirectInput can see: the
 base plus up to three more devices (a separate pedal set, a shifter, a button
@@ -737,22 +844,36 @@ the team has real numbers for.
 
 | Check | Result | Reference |
 |---|---|---|
-| Skidpad lap, 9.125 m radius | **5.05 s** | SDM26 ran 5.02 s |
-| Skidpad lateral | 1.44 g | above mu because 11.4 m/s is worth ~250 N of downforce |
-| Limit balance, 10/15/20 m/s | front peaks first, utilF - utilR = +0.29 / +0.29 / +0.20 | pushes, peak body slip 2-4 deg |
-| Yaw mode at 15 m/s | 3.3 Hz, zeta 0.99 | linear 2-DOF from the model's stiffnesses |
-| Keyboard key held to the lock, 10/15 m/s | 1.39 / 1.57 g, body slip < 7 deg | pushes, does not spin |
+| Skidpad lap, 9.125 m radius | **5.21 s** | SDM26 ran 5.02 s |
+| Skidpad lateral | 1.35 g | above mu because 11 m/s is worth ~250 N of downforce |
+| Limit balance, 10/15/20 m/s | front peaks first, utilF - utilR = +0.43 / +0.45 / +0.43 | pushes, peak body slip 2-4 deg |
+| Yaw mode at 15 m/s | 4.5 Hz, zeta 0.99 | linear 2-DOF from the model's stiffnesses |
+| Keyboard key held to the lock, 10/15 m/s | 1.52 / 1.69 g, body slip < 4 deg | pushes, does not spin |
+| Tyre peak slip angle | 7.3 deg | team MF6.1 fit at the 10 psi the car runs |
 | Tyre past the peak | 94% at 2x, 89% at 3x peak slip | a slick keeps most of its force |
-| 75 m accel, managed launch | 4.76 s | QSS says 4.2 s -- see below |
-| 75 m accel, throttle pinned | 5.19 s | +0.43 s lost to wheelspin |
-| Braking from 25 m/s | 23.1 m, 1.74 g peak | -- |
-| Cornering stiffness | 307 N/deg per tyre (rear) | 10" slick at 655 N |
+| 75 m accel, managed launch | 4.79 s | QSS says 4.2 s -- see below |
+| 75 m accel, throttle pinned | 5.27 s | +0.48 s lost to wheelspin |
+| Braking from 25 m/s | 22.9 m, 1.90 g peak | -- |
+| Cornering stiffness | 407 N/deg per tyre (rear) | 10" slick at 655 N -- see below |
+| Steering rack | 46 deg of road wheel at 179 deg of rim, ratio 5.27 on centre to 3.4 at 90 deg | the team's measured toe-vs-rim table |
 | ETC map, 4000 random curves | 0 overshoot, 0 backwards steps | monotone guarantee |
-| Roll stiffness 40->70% front | radius 7.18 -> 7.45 m | monotonic understeer |
+| Roll stiffness 40->70% front | monotonic | monotonic understeer |
 | Brake bias sweep 48->75% | rear-locks-first -> front-locks-first | crossover ~57% |
 
 The skidpad is the anchor: it is a clean mu measurement, low speed, no gearing,
-no line freedom.
+no line freedom. **It has drifted**: 5.02 s real against 5.21 s here, where it
+used to sit at 5.05. Moving the tyre's peak slip angle from an estimated 8.5 deg
+to the team's measured 7.3 cost a little lateral on a skidpad, because a sharper
+tyre sits further along its own curve at a given angle and couples harder with
+the throttle the car is carrying. The honest repair is to re-pin `muLat`, and
+the right moment for that is when `frontGripFactor` stops carrying the car's
+entire understeer margin -- see the differential work in the dev plan. Widening
+the band again instead would be the wrong move.
+
+Cornering stiffness is above the 310-340 N/deg the team's own MF6.1 fit implies,
+and that is the price of a fixed-shape Magic Formula: `B`, and with it the
+stiffness, is whatever puts the peak where the data says it is. A load-dependent
+peak slip angle is the fix and is not done.
 
 The 75 m time is honestly slower than the lap sim's 4.2 s and the test band says
 so. This model carries driveline rotational inertia -- about +94 kg apparent in
@@ -773,21 +894,128 @@ WebGL 2.0 came up clean rather than just that nothing crashed.
 
 ## Known limitations
 
-- **One curvature spike below the car's turning circle.** The traced endurance
-  centreline has a single point at s ~ 607 m with a 2.83 m radius, against the
-  SDM26's 2.88 m kinematic minimum at full lock. It is one isolated point -- a
-  tracing artifact, not a real hairpin -- and you drive through it without
-  noticing, but the geometry is worth cleaning up at the source.
-- **Bicycle model, not four-corner.** Grip responds to lateral load transfer,
-  but there is no individual wheel state, no differential, and no per-corner
-  camber or toe. Setup work belongs in Helios Setup and Oracle; this is a
-  driving model.
+- **One curvature spike in the traced endurance centreline.** A single point at
+  s ~ 607 m has a 2.83 m radius. It used to be below the car's turning circle;
+  now that the rack's measured 46 deg of lock has replaced a 28 deg estimate the
+  kinematic minimum is 1.48 m, so the car goes round it. It is still a tracing
+  artifact rather than a real hairpin and still worth cleaning up at the source.
+- **75 m acceleration is about 0.8 s slower than the real car.** SDM26 runs
+  4.2-4.4 s; the model takes 5.15 s on the measured torque curve. This is a
+  defect, not a modelling choice, and `validate.js` says so where the check
+  lives. It is not engine power: 60% more torque buys 0.28 s. It is not
+  driveline inertia, grip, mass, drag or shift time either, each of which was
+  measured on its own and is worth between 0.02 and 0.17 s. What is left is
+  that the slip ratio is floored below 2 m/s, so nothing can manage wheelspin
+  at the moment a launch is decided.
+- **Single-track at the front, two wheels at the rear.** The front axle is one
+  unit: there is nothing between the front wheels but the road, and grip still
+  responds to lateral load transfer through the two contact patches. The rear
+  is two wheels with the differential between them (below). There is still no
+  per-corner camber or toe, and no front per-wheel state, so brake-pull under a
+  locked front and scrub-radius kick are not modelled. Setup work belongs in
+  Helios Setup and Oracle; this is a driving model.
+- **`frontGripFactor` (0.80) is still a hand-set understeer margin.** With one
+  tyre character at both ends the model was neutral to within 1% of force and
+  spun from any step steer, so the front is derated to make it push. The
+  differential now supplies real understeer on the throttle and real stability
+  on a lift, which is what that number was standing in for, so it should come
+  back toward 0.90 -- but only together with re-pinning `muLat` to the skidpad,
+  and only after someone has driven it.
 - **No tyre thermal or wear model.** mu is constant over a run.
 - **Flat ground.** The venue is a lot, so this costs less than it would
   elsewhere, but there is no surface elevation or grip variation.
 - **Suspension is a gradient, not a state.** Roll and pitch come from the
   validated deg/g gradients for camera and load transfer; there is no ride
   model, so kerb strikes and heave dynamics are not simulated.
+
+## Recording, replay and the delta
+
+Every run is logged. Not a summary -- the whole car, at 100 Hz, in a form that
+loads into Helios beside the real car's telemetry with no conversion step.
+
+100 Hz is a ceiling, not a promise: the sampler writes at most one row per
+simulation step, so a machine rendering at 60 fps logs at 60 Hz. The physics is
+frame-rate independent either way (it substeps at 500 Hz) but the LOG is not, so
+the manifest carries `sampleRateActualHz` alongside `sampleRateHz` -- what was
+achieved, next to what was asked for.
+
+A finished run is a directory:
+
+```
+%LOCALAPPDATA%\Helios\sim-runs\<runId>  run.json        who drove, on what, with which setup; lap and sector times;
+                  every cone, excursion, shift and flag; summary statistics
+  telemetry.csv   76 channels, sampled up to 100 Hz on the SIM clock
+```
+
+`FSAE_SIM_RUNS_DIR` moves it -- point it at a shared drive and the whole team's
+runs land in one place.
+
+**The channel names are Helios's own.** Engine speed is `engine.rpm`, lateral
+acceleration is `imu.lat_g`, the position is `gps.lat` / `gps.lon` projected onto
+the real venue. So a simulator run opens in the Logs module through exactly the
+same path as a test-day export and overlays on the same axes -- no importer, no
+mapping table, no "sim" special case anywhere in the pipeline. The channels only
+a model has (slip angles, how much grip each axle is using, the force-feedback
+command, distance round the course) are `sim.*`. A `system.beacon` pulse marks
+the start line and every lap, so Helios's lap detection finds exactly the laps
+the driver saw on the HUD rather than inferring them from the GPS trace.
+
+The pose is in there too -- `sim.pos_x`, `sim.pos_y`, `sim.yaw_deg`, the wheel
+angles -- which is what makes a run replayable. That is deliberate: the replay is
+driven from the same file the analysis reads, so it cannot drift from the numbers
+sitting next to it. Nothing is re-simulated.
+
+```bash
+fsae-sim --replay <runId>              # watch it back
+fsae-sim --replay <runId> --ghost <id> # with another run alongside
+```
+
+Space plays and pauses, the arrows step a second (hold shift for a tenth), up and
+down change speed, `L` jumps to the best lap, `C` changes camera, and the bar at
+the bottom scrubs -- with a tick for every lap, cone and excursion, so you can go
+straight to the moment rather than hunting for it.
+
+The **ghost** is placed by time into the lap, not by distance. Distance-matching
+pins it alongside you the whole way round and teaches nothing; on the clock it
+pulls away where it was quicker, which is the point. The gap NUMBER stays
+distance-based, because that is the only comparison that means anything once two
+laps diverge.
+
+### The delta
+
+While you drive, a delta against a reference lap: a signed number, a bar, and --
+under it -- the delta plotted against distance for the whole lap so far. That
+trace is the answer to *where* you are losing it. It is flat through the corners
+you matched and rises through the ones that cost you.
+
+The reference is your own best lap this session; it updates whenever you beat it.
+Or Helios can hand you one to chase from the first corner:
+
+```bash
+fsae-sim --reference <runId>   # your best from the archive, or a teammate's
+```
+
+Comparison is always against DISTANCE round the course, never the clock. Two laps
+pass the same cone at different clock readings, so "what was the clock at this
+instant" tells you nothing; "how long had it taken to reach this point" is the
+gap a pit wall reads off two transponders.
+
+## Helios
+
+Helios launches the simulator, keeps the archive and ranks the times. It is not
+required -- the simulator runs perfectly well on its own -- but a run started
+from Helios carries the driver's account with it, and that is what lets a lap
+time go on a leaderboard.
+
+Which settings belong where is written down in [docs/SETTINGS.md](docs/SETTINGS.md).
+The short version: **Helios owns the run, the simulator owns the rig.** Anything
+you can only get right with the wheel in your hands lives here and stays with
+this machine; anything describing what a particular run *is* comes in on the
+command line and applies to that session only.
+
+```bash
+fsae-sim --track autocross --profile wheel --driver "..." --driver-id <uuid>          --session "Tuesday test" --tc off --abs off --autostart
+```
 
 ## Layout
 
@@ -805,6 +1033,16 @@ tools/
   plan_view.py      draws the venue plan + cross-section for review
   validate.js       headless physics + ETC-map checks
   smoke_desktop.mjs launches the built exe and interrogates it over DevTools
+  test_replay.mjs   recorder -> CSV -> parser -> replay, against known answers
+  test_delta.mjs    the live delta, against laps whose gaps are arithmetic
+  test_bindings.mjs every control is bindable, and what you bind is what the
+                    game reads -- it drives a real Input and presses keys at it
+  test_timing.mjs   laps, sectors as DURATIONS, penalties, a jumped sector
+  test_respawn.mjs  a respawn is not undone by a snapshot from before it
+  check_shaders.mjs imports every render module and checks each shader literal
+                    (a backtick in a GLSL comment silently truncates a shader)
+  make_sample_run.mjs  a robot driver that files real runs, for demos and tests
+  publish_build.mjs a build to the feed Helios downloads from
 src/
   vehicle/      params, paramMeta (provenance), tyre, powertrain, bicycle,
                 ETC map, live setup adjustments, modules + library
@@ -812,13 +1050,22 @@ src/
   track/        course geometry, progress, cone strikes; venue.js for MIS
   render/       WebGL2 renderer, procedural SDM26 car geometry, venue mesh,
                 glbcar (CAD import)
+                post.js       HDR target, ambient occlusion, bloom, tonemap
+                ground.glsl.js  the lot: a height field, not a painted plane
   game/         input, control profiles + panel, HUD, timing, audio,
                 ETC editor, spec sheet, desktop shell
+                controlBindings.js  what the controls ARE, and rebinding them
+                recorder.js   the 100 Hz run log
+                runStore.js   reading and writing runs; the CSV parser
+                replay.js     playing a recorded run back
+                replayPanel.js  the replay's transport and instruments
+                delta.js      the live delta and its reference lap
   main.js       bootstrap and loop
 src-tauri/
   build.rs      stages the frontend into dist/ on every cargo build
   src/main.rs   the native window, the launch arguments, single-instance
   src/rig.rs    the vehicle model, wheel read and force feedback at 1 kHz
+  src/runs.rs   where a recorded run is filed, and how it is read back
   src/wheel.rs  DirectInput
   tauri.conf.json
 ```

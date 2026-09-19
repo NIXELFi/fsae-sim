@@ -39,6 +39,16 @@ const SHADOW_DEPTH = 90;      // m, half depth range of each cascade along the s
 // and by the depth-only program alike.
 const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_TINT = 5;
 
+/** The dash panel's texture, at the DISPLAY's own 108:65 -- not the case's.
+ *  Sized so the smallest type is still a couple of pixels tall from the
+ *  driver's seat, which is what decides it, not the panel's physical size. */
+const DASH_TEX_W = 768, DASH_TEX_H = 462;
+
+/** How bright the panel is, in the scene's linear units. A dash in daylight
+ *  is about as bright as sunlit white paper -- enough to read against the
+ *  sky, not so much that it glows. */
+const DASH_NITS = 1.9;
+
 // Sun: mid-afternoon, from the south-west, high enough that a 15 m grandstand
 // throws a shadow without the cones throwing 3 m ones.
 const SUN = normalize([0.42, 0.74, 0.52]);
@@ -89,6 +99,10 @@ const MAT = {
   tyre: [0.82, 0.0, 0.0],    // matte rubber
   rim: [0.42, 0.75, 0.0],    // cast wheel, metal
   wheel: [0.55, 0.0, 0.25],  // carbon plate with a light lacquer
+  // The dash case: a matte black moulding with no clearcoat. Drawn with
+  // `wheel` it caught the sky and read as bare aluminium, which is the one
+  // thing an AiM case is not.
+  dash: [0.88, 0.0, 0.0],
 };
 
 /** Linear radiance -> display encoding, for the clear colour only. */
@@ -279,6 +293,49 @@ vec4 finish(vec3 lin) {
   return vec4(pow(c, vec3(1.0 / 2.2)), 1.0);
 }
 `;
+
+// ---- the dash screen -------------------------------------------------------
+//
+// A backlit LCD, so it is UNLIT: shading it with the sun would make it darker
+// in shadow, which is the opposite of what a screen does. It still goes
+// through the same exposure, tonemap and vignette as everything else, because
+// a panel that skipped them would sit on top of the image rather than in it.
+//
+// The tonemap is repeated here rather than pulled from `COMMON_FS`: that chunk
+// also declares the shadow samplers, the sky uniforms and the fog, none of
+// which a lit panel has any use for, and a shader that declares uniforms
+// nobody sets is one that breaks the first time somebody tidies up.
+const SCREEN_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec2 aUv;
+uniform mat4 uViewProj;
+uniform mat4 uModel;
+out vec2 vUv;
+void main() {
+  vUv = aUv;
+  gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
+}`;
+
+const SCREEN_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;
+uniform sampler2D uPanel;
+uniform float uNits;
+uniform vec2 uInvRes;
+uniform float uExposure;
+out vec4 frag;
+
+vec3 aces(vec3 x) {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main() {
+  // The panel is authored in sRGB on a 2D canvas; the scene is linear.
+  vec3 lin = pow(texture(uPanel, vUv).rgb, vec3(2.2)) * uNits;
+  vec2 q = gl_FragCoord.xy * uInvRes - 0.5;
+  float vig = 1.0 - 0.32 * pow(dot(q, q) * 2.6, 1.3);
+  frag = vec4(pow(aces(lin * uExposure * vig), vec3(1.0 / 2.2)), 1.0);
+}`;
 
 const SKY_VS = `#version 300 es
 layout(location = 0) in vec2 aPos;
@@ -703,6 +760,7 @@ export class Renderer {
     this.progRibbon = program(gl, RIBBON_VS, RIBBON_FS);
     this.progProp = program(gl, PROP_VS, PROP_FS);
     this.progCar = program(gl, CAR_VS, CAR_FS);
+    this.progScreen = program(gl, SCREEN_VS, SCREEN_FS);
     this.progDepthCar = program(gl, DEPTH_CAR_VS, DEPTH_FS);
     this.progDepthProp = program(gl, DEPTH_PROP_VS, DEPTH_FS);
 
@@ -747,7 +805,13 @@ export class Renderer {
       tire: this.makeMesh(carMeshes.tire),
       rim: this.makeMesh(carMeshes.rim),
       steeringWheel: this.makeMesh(carMeshes.steeringWheel),
+      dashCase: this.makeMesh(carMeshes.dashCase),
     };
+
+    // The dash screen: a textured quad, and the canvas the HUD draws into.
+    this.dashScreen = this.makeScreenQuad(GEO.dashHalfWidth, GEO.dashHalfHeight);
+    this.dashPanel = this.makePanelTexture(DASH_TEX_W, DASH_TEX_H);
+    this.dashModel = mat4();
 
     this.viewProj = mat4();
     this.proj = mat4();
@@ -952,6 +1016,80 @@ export class Renderer {
     };
     gl.bindVertexArray(null);
     return { vao, count: mesh.count, buffers };
+  }
+
+  /**
+   * A flat quad in the XY plane with UVs, for the dash screen.
+   *
+   * Its own tiny VAO rather than a `makeMesh`: the car meshes carry a normal
+   * and a vertex colour, and this needs neither -- it needs a UV, at the
+   * attribute slot the car's normal uses.
+   */
+  makeScreenQuad(hw, hh) {
+    const gl = this.gl;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const pos = new Float32Array([
+      -hw, -hh, 0, hw, -hh, 0, hw, hh, 0,
+      -hw, -hh, 0, hw, hh, 0, -hw, hh, 0,
+    ]);
+    // Both axes flipped, for two different reasons.
+    //
+    // v, because a canvas's origin is top-left and GL's is bottom-left.
+    //
+    // u, because the steering column's frame has local +x pointing to the
+    // driver's LEFT: the basis maps it onto the car's -Z. The wheel does not
+    // care -- it is very nearly symmetric -- but a panel full of text does,
+    // and without this the dash renders as a mirror image.
+    const uv = new Float32Array([
+      1, 1, 0, 1, 0, 0,
+      1, 1, 0, 0, 1, 0,
+    ]);
+    const attach = (data, loc, size) => {
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+      return buf;
+    };
+    const buffers = { position: attach(pos, A_POS, 3), uv: attach(uv, A_NORMAL, 2) };
+    gl.bindVertexArray(null);
+    return { vao, count: 6, buffers };
+  }
+
+  /** An offscreen canvas and the texture it is uploaded to each frame. */
+  makePanelTexture(w, h) {
+    const gl = this.gl;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    // No mips: the panel is redrawn every frame and regenerating a chain each
+    // time costs more than the aliasing it would save at this size.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    return { canvas, ctx, tex, w, h, dirty: true };
+  }
+
+  /**
+   * Hand the dash a fresh face.
+   *
+   * Called by the game with the same `drawDash` the overlay uses, so the panel
+   * on the car and the panel on the screen can never disagree -- there is one
+   * renderer and one layout.
+   */
+  updateDashPanel(draw) {
+    const p = this.dashPanel;
+    if (!p?.ctx) return;
+    p.ctx.clearRect(0, 0, p.w, p.h);
+    draw(p.ctx, 0, 0, p.w, p.h);
+    p.dirty = true;
   }
 
   /** out = m0 * m1 * ... , without aliasing. */
@@ -1501,6 +1639,26 @@ export class Renderer {
       0, 0, 0, 1,
     ]);
     const sc = this.carModel?.steerCentre ?? GEO.steerCentre;
+
+    // The dash, FIRST, and without the wheel's rotation.
+    //
+    // It is bolted to the column shroud, not to the wheel, so it shares the
+    // column's frame and its tilt but not its spin -- which is the whole
+    // reason a grip sweeps across it at 90 degrees of lock instead of the
+    // dash swinging with the driver's hands. Drawn before the wheel so the
+    // depth buffer does the occluding; nothing here needs to know where the
+    // grips are.
+    const dc = GEO.dashCentre;
+    this.chain(this.model, [
+      this.chassis,
+      translation(T[0], sc[0], sc[1], sc[2]),
+      basis,
+      translation(T[1], dc[0], dc[1], dc[2]),
+      rotX(T[2], GEO.dashTiltRad),
+    ]);
+    this.dashModel.set(this.model);
+    part(this.car.dashCase, this.model, null, MAT.dash);
+
     this.chain(this.model, [
       this.chassis,
       translation(T[0], sc[0], sc[1], sc[2]),
@@ -1508,6 +1666,55 @@ export class Renderer {
       rotZ(T[1], -w.steerRad * (w.steerRatio ?? GEO.steeringRatio)),
     ]);
     part(this.car.steeringWheel, this.model, null, MAT.wheel);
+
+    // The screen last of the car's parts: it is the only thing drawn with a
+    // different program, and switching back and forth per object costs more
+    // than doing it once.
+    this.drawDashScreen();
+  }
+
+  /**
+   * The lit face of the dash.
+   *
+   * Its own program and its own VAO, so it is one state change and six
+   * vertices. The texture is only uploaded when the panel has actually been
+   * redrawn -- `updateDashPanel` sets the flag -- because `texImage2D` from a
+   * canvas is a GPU copy of a megabyte and doing it on a frame where nothing
+   * changed is pure waste.
+   */
+  drawDashScreen() {
+    const gl = this.gl;
+    const p = this.dashPanel;
+    const q = this.dashScreen;
+    if (!p || !q) return;
+
+    gl.useProgram(this.progScreen);
+    const u = this._screenU ?? (this._screenU = {
+      uViewProj: gl.getUniformLocation(this.progScreen, "uViewProj"),
+      uModel: gl.getUniformLocation(this.progScreen, "uModel"),
+      uPanel: gl.getUniformLocation(this.progScreen, "uPanel"),
+      uNits: gl.getUniformLocation(this.progScreen, "uNits"),
+      uInvRes: gl.getUniformLocation(this.progScreen, "uInvRes"),
+      uExposure: gl.getUniformLocation(this.progScreen, "uExposure"),
+    });
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, p.tex);
+    if (p.dirty) {
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, p.canvas);
+      p.dirty = false;
+    }
+    gl.uniform1i(u.uPanel, 0);
+    gl.uniformMatrix4fv(u.uViewProj, false, this.viewProj);
+    gl.uniformMatrix4fv(u.uModel, false, this.dashModel);
+    gl.uniform1f(u.uNits, DASH_NITS);
+    gl.uniform2f(u.uInvRes, 1 / this.canvas.width, 1 / this.canvas.height);
+    gl.uniform1f(u.uExposure, this.exposure);
+
+    gl.bindVertexArray(q.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, q.count);
+    gl.bindVertexArray(null);
   }
 
   _rimOverride(fade) {

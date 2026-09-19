@@ -113,12 +113,35 @@ export class Track {
     const h = this.heading[index];
     const dx = x - p[0], dy = y - p[1];
     const lateral = -Math.sin(h) * dx + Math.cos(h) * dy;
+    // Distance along the course, PROJECTED onto the local heading rather than
+    // snapped to the nearest node.
+    //
+    // The centreline is resampled to 1 m, so returning `this.s[index]` gave a
+    // staircase: the value held still for seven or eight frames and then
+    // jumped a whole metre. Everything downstream treats it as continuous --
+    // the live delta, the ghost gap, `timeAtDistanceInLap`, and the
+    // `sim.track_s_m` channel in the log -- so the delta ramped and snapped
+    // once per metre. Replaying a lap against its OWN reference, where the
+    // answer is zero everywhere, gave a 0.58 s peak-to-peak sawtooth, worst in
+    // the slowest corners (a metre at 3 m/s is a third of a second) which is
+    // exactly where a driver reads the number.
+    const along = Math.cos(h) * dx + Math.sin(h) * dy;
+    let s = this.s[index] + along;
+    // Keep it on the course. A closed lap wraps; an open one is clamped, so a
+    // car past the finish line does not report a distance the course does not
+    // have.
+    if (this.closed) {
+      const L = this.length;
+      s = ((s % L) + L) % L;
+    } else {
+      s = Math.max(0, Math.min(this.length, s));
+    }
     let he = psi - h;
     while (he > Math.PI) he -= 2 * Math.PI;
     while (he < -Math.PI) he += 2 * Math.PI;
     return {
       index,
-      s: this.s[index],
+      s,
       lateral,
       onTrack: Math.abs(lateral) <= this.width / 2 + 0.6,
       headingErrorRad: he,

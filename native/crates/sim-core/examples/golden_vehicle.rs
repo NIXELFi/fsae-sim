@@ -19,13 +19,49 @@ fn main() {
     // wheelspin (kappa > 1 with the measured 0.15 kg.m^2 wheels), and a
     // chattering clutch is exactly the branch-flipping regime this drive is
     // meant to avoid.
-    car.reset(0.0, 0.0, 0.0, 5.0);
+    // Rolling start at 15 m/s in third.
+    //
+    // It used to start at 5 m/s in first. That is now inside the clutch's
+    // engagement window: a launch keeps the clutch slipping until the
+    // driveline catches the crank at the launch rpm, which in first is about
+    // 11 m/s, and while it is slipping the capacity varies continuously with
+    // engine speed AND feeds back into it. One ulp of difference between JS
+    // Math and Rust libm then walks the two builds apart -- which is exactly
+    // the branch-flipping regime this drive has always been written to avoid,
+    // and is why it also stays out of a standing start and off the limit.
+    // Above the window the clutch is simply locked, as it is for almost all
+    // real driving, and the two ports agree to the last bit again.
+    // Rolling start at 15 m/s in third, and a deliberately gentle drive.
+    //
+    // It used to start at 5 m/s in first with a good deal more throttle. Two
+    // things since have pushed that drive out of the regime it was chosen for.
+    // The measured torque curve made the car slower, so it sat in first for
+    // longer, and the rear axle became two wheels with a differential between
+    // them, so one of them can now slip on its own. Together they took the
+    // drive to 1.8x the tyre's peak slip ratio with 2856 rpm of clutch slip --
+    // which is precisely the branch-flipping regime this drive exists to stay
+    // out of, and the two ports duly walked apart.
+    //
+    // Above 12 m/s the clutch is locked, and at these throttle openings the
+    // worst the tyres see is a quarter of their peak. Real driving, nowhere
+    // near anything discontinuous, which is the whole point.
+    car.reset(0.0, 0.0, 0.0, 15.0);
+    car.powertrain_mut().set_gear(2);
+    car.powertrain_mut().sync_to_wheel(15.0 / 0.2);
+    // The scripted steer values are fractions of the 28 deg lock this drive
+    // was written against. The rack's measured limit is now 46 deg, so they
+    // are rescaled to keep the golden the same physical manoeuvre -- and so
+    // still deliberately inside the tyre -- rather than a more aggressive one.
+    // `sim/tools/validate.js` carries the identical constant.
+    const SCRIPT_LOCK_DEG: f64 = 28.0;
+    let lock_scale = SCRIPT_LOCK_DEG / car.params().steering.max_steer_rad.to_degrees();
     let dt = 1.0 / 60.0;
     let frames = 12 * 60;
     let mut rows = Vec::new();
     for f in 0..frames {
         let t = f as f64 * dt;
         let (steer, throttle, brake) = script(t);
+        let steer = steer * lock_scale;
         if f == 150 || f == 300 {
             car.powertrain_mut().shift_up();
         }
@@ -57,14 +93,14 @@ fn main() {
 /// pace, is what is checked.
 pub fn script(t: f64) -> (f64, f64, f64) {
     if t < 3.0 {
-        (0.0, 0.55, 0.0)
+        (0.0, 0.35, 0.0)
     } else if t < 5.0 {
-        (0.15, 0.4, 0.0)
+        (0.10, 0.30, 0.0)
     } else if t < 5.5 {
-        (0.05, 0.0, 0.25)
+        (0.04, 0.0, 0.15)
     } else if t < 9.0 {
-        (-0.12, 0.5, 0.0)
+        (-0.08, 0.35, 0.0)
     } else {
-        (0.08, 0.8, 0.0)
+        (0.06, 0.45, 0.0)
     }
 }

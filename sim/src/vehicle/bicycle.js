@@ -80,7 +80,11 @@ export class BicycleModel {
   reset(X, Y, psi) {
     this.u = 0; this.v = 0; this.r = 0;
     this.X = X; this.Y = Y; this.psi = psi;
-    this.wF = 0; this.wR = 0;
+    this.wF = 0;
+    // Two rear wheel speeds, because a differential is the only thing between
+    // them and it is what decides the car's balance on the throttle. The
+    // front axle stays one unit: there is nothing between the front wheels.
+    this.wRL = 0; this.wRR = 0;
     this.aF = 0; this.aR = 0;
     this.delta = 0;
     /**
@@ -101,6 +105,16 @@ export class BicycleModel {
     this.pt.engineRpm = this.p.idleRpm;
     this.pt.shiftTimer = 0;
     this.pt.pendingGear = null;
+    // Everything the clutch and the limiter were in the middle of. The launch
+    // timer especially: it is free-running and pins the clutch at full
+    // capacity for 0.8 s after a dump, so a restart inside that window used to
+    // begin with the clutch locked regardless of throttle or engine speed.
+    // The Rust port clears the same set -- see `Powertrain::reset`.
+    this.pt.limiterCut = false;
+    this.pt.slipping = true;
+    this.pt.clutchSlipRpm = 0;
+    this.pt.launchHeld = false;
+    this.pt.launchDumpS = 0;
     this.telemetry = this.blankTelemetry();
   }
 
@@ -214,7 +228,19 @@ export class BicycleModel {
 
     const u = this.u, v = this.v, r = this.r;
     const V = Math.hypot(u, v);
-    const uSafe = Math.max(Math.abs(u), 0.6);
+    // Speed floor in the slip-angle denominator. `alpha = atan(vy/vx)` is
+    // singular as the car stops, and the floor is what keeps it finite -- but
+    // the floor also sets the loop gain, because dFy/dv goes as C_alpha/uSafe.
+    // At 0.6 m/s that gain is high enough for the lateral equation to ring: a
+    // steady 35 deg of steer at 1-2 m/s buzzed v through 70-130 sign changes
+    // in two seconds, roughly 30-85 Hz, and the driver felt the car "shifting
+    // side to side" in the paddock. At 3.0 the ring is gone (72 flips -> 8)
+    // and NOTHING above 3 m/s changes at all, because up there the floor is
+    // not what is being used. The cost is that a tyre under 3 m/s reports less
+    // slip angle than it has, so the car is a little soft at a crawl; the
+    // standstill scrub and jacking terms in the force feedback carry the feel
+    // down there instead.
+    const uSafe = Math.max(Math.abs(u), 3.0);
 
     // ---- aero (2026 CFD map) ----
     const q = 0.5 * p.airDensityKgM3 * V * V;
@@ -262,10 +288,39 @@ export class BicycleModel {
     // ---- slip ratios from the wheel-speed states ----
     const kDen = Math.max(Math.abs(u), 2.0);
     const kF = (this.wF * p.tireRadiusM - u) / kDen;
-    const kR = (this.wR * p.tireRadiusM - u) / kDen;
+
+    // ---- the rear axle, one wheel at a time ----
+    // Each rear wheel carries its own load, its own forward speed and so its
+    // own slip ratio; they share a slip angle. Splitting them is what makes a
+    // differential mean anything: with one rotor there is no torque difference
+    // across the track and so no yaw moment from the driven wheels at all.
+    const halfR = FzR * 0.5;
+    const shiftR = Math.min(Math.abs(dFzR), halfR); // the inner tyre lifts, it does not go negative
+    const outerR = halfR + shiftR;
+    const innerR = halfR - shiftR;
+    // Positive ay is a LEFT turn, which loads the right-hand tyres.
+    const FzRL = ay >= 0 ? innerR : outerR;
+    const FzRR = ay >= 0 ? outerR : innerR;
+    // Forward speed at each rear patch: a wheel at lateral offset y sees
+    // u - r*y, and left is positive y.
+    const halfTrackR = p.trackRearM * 0.5;
+    const uRL = u - r * halfTrackR;
+    const uRR = u + r * halfTrackR;
+    const kRL = (this.wRL * p.tireRadiusM - uRL) / kDen;
+    const kRR = (this.wRR * p.tireRadiusM - uRR) / kDen;
+    const muYRL = muAtLoad(p.muLat, FzRL, this.Fz0, p.tireLoadSensitivity);
+    const muXRL = muAtLoad(p.muLong, FzRL, this.Fz0, p.tireLoadSensitivity);
+    const muYRR = muAtLoad(p.muLat, FzRR, this.Fz0, p.tireLoadSensitivity);
+    const muXRR = muAtLoad(p.muLong, FzRR, this.Fz0, p.tireLoadSensitivity);
+    const fRL = tyreForces(this.aR, kRL, FzRL, muYRL, muXRL);
+    const fRR = tyreForces(this.aR, kRR, FzRR, muYRR, muXRR);
 
     const fF = tyreForces(this.aF, kF, FzF, muYF, muXF);
-    const fR = tyreForces(this.aR, kR, FzR, muYR, muXR);
+    const fR = {
+      fx: fRL.fx + fRR.fx,
+      fy: fRL.fy + fRR.fy,
+      utilisation: Math.max(fRL.utilisation, fRR.utilisation),
+    };
     // The front axle's lateral peak relative to the rear (params.js,
     // frontGripFactor). Applied to the force rather than to muYF because the
     // fitted curve is exactly linear in mu at a given slip, so this IS a mu
@@ -284,19 +339,50 @@ export class BicycleModel {
     const rollRes = p.crr * (FzF + FzR) * Math.sign(u || 1);
 
     // ---- rigid-body equations of motion ----
+    // The yaw moment the driven wheels make across the track -- the whole
+    // point of modelling the differential. A force at lateral offset y
+    // contributes -y*Fx and left is positive y, so the inner wheel pushing
+    // harder than the outer pushes the nose wide. Under power a Salisbury LSD
+    // sends torque to the SLOWER, inner wheel, which is why a locked car
+    // understeers on throttle; on a lift it drags the faster, outer wheel,
+    // which is what steadies the rear instead of letting it come round. With
+    // one rear rotor both of those are exactly zero.
+    const nDiff = halfTrackR * (fRR.fx - fRL.fx);
+
     const du = (FxFb + FxRb - drag - rollRes) / p.massKg + v * r;
     const dv = (FyFb + FyRb) / p.massKg - u * r;
-    const dr = (this.a * FyFb - this.b * FyRb) / p.izzKgM2;
+    const dr = (this.a * FyFb - this.b * FyRb + nDiff) / p.izzKgM2;
 
     // ---- driveline ----
-    const drive = this.pt.step(dt, input.throttle, this.wR, V);
+    // The carrier turns at the mean of the two side gears, so that is the
+    // speed the gearbox sees.
+    const wRmean = 0.5 * (this.wRL + this.wRR);
+    const drive = this.pt.step(dt, input.throttle, wRmean, V);
 
     // ---- wheel dynamics; brake torque cannot drive a wheel backwards ----
     const brakeTotal = clamp(input.brake, 0, 1) * p.brakeTorqueMaxNm;
     const tbF = brakeTotal * p.brakeBiasFront;
     const tbR = brakeTotal * (1 - p.brakeBiasFront);
 
-    const IwR = this.IwR + drive.addedWheelInertia;
+    const IwRside = p.wheelInertiaRearKgM2;
+
+    // ---- the differential ----
+    // Salisbury clutch pack: `tCap` is the largest torque DIFFERENCE the ramps
+    // and the preload can hold across the two outputs, and the transfer is
+    // half of it. See `params.diff` for where C and B come from. A 1.5-way
+    // locks harder under power than on the overrun. Coulomb friction with a
+    // soft sign, as everywhere else here: the clutch opposes the speed
+    // difference and saturates, and inside the stick band it behaves as a
+    // spring rather than switching between two branches. The spring is
+    // integrated with a limit (below, once the axle's inertia is known) so it
+    // cannot overshoot -- without that it is an explicit spring on a very
+    // small inertia and it oscillates forever.
+    const dfp = p.diff;
+    const tIn = drive.wheelTorqueNm;
+    const lockFrac = tIn >= 0 ? dfp.powerLock : dfp.coastLock;
+    const tCap = lockFrac * Math.abs(tIn) + dfp.preloadNm;
+    const dWrear = this.wRR - this.wRL;
+    const tbRside = 0.5 * tbR;
     // Implicit in the tyre's longitudinal stiffness. Explicit Euler on
     // dw = -R Fx(kappa(w)) / I is only stable while dt < 2 I kDen / (R^2 dFx/dkappa),
     // which at 500 Hz is everything under about 4.5 m/s: the front wheels
@@ -306,17 +392,76 @@ export class BicycleModel {
     // taken numerically so the Rust port can do the identical operation.
     const R = p.tireRadiusM;
     const dFxF = Math.max(0, (tyreForces(this.aF, kF + KAPPA_H, FzF, muYF, muXF).fx - fF.fx) / KAPPA_H);
-    const dFxR = Math.max(0, (tyreForces(this.aR, kR + KAPPA_H, FzR, muYR, muXR).fx - fR.fx) / KAPPA_H);
+    const dFxRL = Math.max(0, (tyreForces(this.aR, kRL + KAPPA_H, FzRL, muYRL, muXRL).fx - fRL.fx) / KAPPA_H);
+    const dFxRR = Math.max(0, (tyreForces(this.aR, kRR + KAPPA_H, FzRR, muYRR, muXRR).fx - fRR.fx) / KAPPA_H);
     const stiffF = dt * R * R * dFxF / kDen;
-    const stiffR = dt * R * R * dFxR / kDen;
+    const stiffRL = dt * R * R * dFxRL / kDen;
+    const stiffRR = dt * R * R * dFxRR / kDen;
     let dwF = (-fF.fx * R - Math.sign(this.wF) * tbF) / (this.IwF + stiffF);
-    let dwR = (drive.wheelTorqueNm - fR.fx * R - Math.sign(this.wR) * tbR) / (IwR + stiffR);
+
+    // The two rear wheels, solved together. The driveline's reflected inertia
+    // hangs on the CARRIER, which turns at the mean of the two side gears, so
+    // it resists the wheels speeding up together and does nothing at all to
+    // resist one speeding up while the other slows. Hanging half of it on each
+    // wheel -- the obvious shortcut -- would make the axle behave far more
+    // locked than the clutch pack actually makes it, which is precisely the
+    // effect being modelled here.
+    //
+    //   (iL + qD) dwL +       qD dwR = Tin/2 + tLock - AL
+    //        qD dwL + (iR + qD) dwR = Tin/2 - tLock - AR
+    //
+    // with qD = I_driveline / 4 and A the tyre and brake torques.
+    const qD = 0.25 * drive.addedWheelInertia;
+    const iL = IwRside + stiffRL;
+    const iR = IwRside + stiffRR;
+    const det = Math.max(iL * iR + qD * (iL + iR), 1e-9);
+
+    // ---- the clutch pack's torque, limited so it cannot overshoot ----
+    //
+    // Feeding `tLock` into the pair above, the ANTISYMMETRIC mode obeys
+    //
+    //   d(wRR - wRL)/dt = -tLock * (iL + iR + 4 qD) / det   =   -tLock / J
+    //
+    // so `J` below is the inertia the clutch actually works against. It is
+    // small -- a fraction of a kg m^2 -- and a spring of gain
+    // `0.5 tCap / stickRadS` on it, integrated explicitly, is unstable
+    // whenever `dt * 0.5 tCap / (stickRadS J) > 2`. At the shipped preload
+    // alone that is true by more than an order of magnitude, and it showed:
+    // once any corner had set the two rear wheels apart, they sat in a
+    // permanent period-2 oscillation on dead-straight road, flipping sign
+    // every substep for the rest of the run. It never decayed, it swung
+    // `sim.kappa_rl` / `sim.kappa_rr` by half their value and put 0.065 deg/s
+    // of peak-to-peak garbage into `imu.yaw_rate`, and at 100 Hz it aliased
+    // into the log as noise nobody could account for.
+    //
+    // The limit is what a stick constraint actually does: never apply more
+    // torque than would bring the relative speed to zero in this step. Inside
+    // the band that turns the spring into a proper stick, and it is
+    // unconditionally stable at any dt. Outside it -- once the pack is slipping
+    // and `tanh` has saturated -- the limit is far larger than `0.5 tCap` and
+    // nothing changes, so the modelled slip behaviour is untouched.
+    const antiJ = det / Math.max(iL + iR + 4 * qD, 1e-9);
+    const tSpring = 0.5 * tCap * Math.tanh(dWrear / Math.max(dfp.stickRadS, 1e-4));
+    const tStop = antiJ * Math.abs(dWrear) / dt;
+    const tLock = Math.sign(tSpring) * Math.min(Math.abs(tSpring), tStop);
+    // Torque leaves the faster wheel and arrives at the slower one. These are
+    // what the diff delivers BEFORE the driveline's own inertia is taken out
+    // of them, which the coupled solve does.
+    const tRL = 0.5 * tIn + tLock;
+    const tRR = 0.5 * tIn - tLock;
+    const pL = tRL - fRL.fx * R - Math.sign(this.wRL) * tbRside;
+    const pR = tRR - fRR.fx * R - Math.sign(this.wRR) * tbRside;
+    let dwRL = (pL * (iR + qD) - qD * pR) / det;
+    let dwRR = (pR * (iL + qD) - qD * pL) / det;
 
     // Clamp so braking stops a wheel instead of reversing it inside one step.
     if (this.wF > 0 && this.wF + dwF * dt < 0 && tbF > 0) dwF = -this.wF / dt;
     if (this.wF < 0 && this.wF + dwF * dt > 0 && tbF > 0) dwF = -this.wF / dt;
-    if (this.wR > 0 && this.wR + dwR * dt < 0 && tbR > 0 && drive.wheelTorqueNm <= 0) {
-      dwR = -this.wR / dt;
+    if (this.wRL > 0 && this.wRL + dwRL * dt < 0 && tbRside > 0 && tRL <= 0) {
+      dwRL = -this.wRL / dt;
+    }
+    if (this.wRR > 0 && this.wRR + dwRR * dt < 0 && tbRside > 0 && tRR <= 0) {
+      dwRR = -this.wRR / dt;
     }
 
     // ---- integrate ----
@@ -327,7 +472,8 @@ export class BicycleModel {
     // moment); the rear stays non-negative because the driveline behind it
     // has no reverse and the clutch logic assumes it.
     this.wF = this.wF + dwF * dt;
-    this.wR = Math.max(0, this.wR + dwR * dt);
+    this.wRL = Math.max(0, this.wRL + dwRL * dt);
+    this.wRR = Math.max(0, this.wRR + dwRR * dt);
 
     // The measured accelerations that feed next step's load transfer.
     this.ax = du - v * r;
@@ -335,7 +481,7 @@ export class BicycleModel {
 
     // ---- come to a genuine stop rather than creeping on numerical noise ----
     if (Math.abs(this.u) < 0.25 && input.throttle < 0.05 && this.speed < 0.4) {
-      this.u = 0; this.v = 0; this.r = 0; this.wF = 0; this.wR = 0;
+      this.u = 0; this.v = 0; this.r = 0; this.wF = 0; this.wRL = 0; this.wRR = 0;
       this.ax = 0; this.ay = 0;
       // The lagged slip angles too. The relaxation rate is proportional to
       // speed, so at rest they never relax -- and a car stopped mid-corner
@@ -365,9 +511,16 @@ export class BicycleModel {
     t.dFzLatF = dFzF; t.dFzLatR = dFzR;
     t.slipF = (this.aF * 180) / Math.PI;
     t.slipR = (this.aR * 180) / Math.PI;
-    t.kappaF = kF; t.kappaR = kR;
+    t.kappaF = kF; t.kappaR = kRL; t.kappaRL = kRL; t.kappaRR = kRR;
     t.utilF = fF.utilisation; t.utilR = fR.utilisation;
-    t.balance = fR.utilisation - fF.utilisation; // >0 rear-limited (oversteer)
+    t.utilRL = fRL.utilisation; t.utilRR = fRR.utilisation;
+    // Load-weighted across the rear, NOT the worse of the two wheels. With a
+    // differential the lightly loaded inner wheel is allowed to spin in a tight
+    // corner -- that is the diff doing its job -- and reading that one wheel as
+    // "the rear axle is out of grip" is simply wrong: it is carrying almost no
+    // load and almost none of the axle's lateral force.
+    const utilRaxle = FzR > 1 ? (fRL.utilisation * FzRL + fRR.utilisation * FzRR) / FzR : 0;
+    t.balance = utilRaxle - fF.utilisation; // >0 rear-limited (oversteer)
     t.downforceN = downforce;
     t.dragN = drag;
     t.driveForceN = FxRb;
@@ -417,6 +570,16 @@ export class BicycleModel {
    * at speed the crank has to come with it, or the clutch grabs against a
    * rolling wheel and brakes the rear axle to a stop on the first substep.
    */
+  /**
+   * Mean rear wheel speed (rad/s): what the differential carrier turns at, and
+   * so what the gearbox, the rev counter and the rear wheel animation see.
+   * Kept as a property because everything outside this class asked for `wR`
+   * long before there were two of them.
+   */
+  get wR() {
+    return 0.5 * (this.wRL + this.wRR);
+  }
+
   respawn(X, Y, psi, speed = 0) {
     // `reset` puts the box in first for a standing start. Placed at speed the
     // gear the caller chose has to survive it, or every rolling respawn is in
@@ -426,10 +589,10 @@ export class BicycleModel {
     const gear = this.pt.gear;
     this.reset(X, Y, psi);
     this.u = speed;
-    this.wF = this.wR = speed / this.p.tireRadiusM;
+    this.wF = this.wRL = this.wRR = speed / this.p.tireRadiusM;
     if (speed > 0) {
       this.pt.gear = gear;
-      this.pt.syncToWheel(this.wR);
+      this.pt.syncToWheel(this.wRL);
     }
   }
 }

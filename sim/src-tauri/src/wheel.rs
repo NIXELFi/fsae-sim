@@ -87,6 +87,15 @@ mod win {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
     const INFINITE: u32 = 0xFFFF_FFFF;
+
+    /// dinput.h MAKEDIPROP: a DirectInput property "GUID" is really a small
+    /// integer passed *as* the pointer value, and DirectInput checks for
+    /// `(DWORD_PTR)rguidprop < 256`. The windows crate exposes DIPROP_* as
+    /// genuine GUID values, so `&DIPROP_RANGE` hands DirectInput the address
+    /// of a struct, which it rejects with E_NOTIMPL. Unwrap the id back out.
+    fn diprop(g: &GUID) -> *const GUID {
+        g.data4[7] as usize as *const GUID
+    }
     /// dinput.h DIDFT_OPTIONAL; not exported by the windows crate.
     const DIDFT_OPTIONAL: u32 = 0x8000_0000;
     /// DirectInput's nominal magnitude scale for a constant force.
@@ -114,7 +123,16 @@ mod win {
         extras: Vec<IDirectInputDevice8W>,
         effect: Option<IDirectInputEffect>,
         last_magnitude: i32,
+        /// DirectInput stops every effect when a device is unacquired, and
+        /// reacquiring does NOT restart them. Without this the motor goes
+        /// silent for good after any brief focus loss -- a click on Pit House,
+        /// a notification -- while the rim keeps steering perfectly, which
+        /// reads as "the force feedback randomly dies".
+        effect_stopped: bool,
         lost: u32,
+        /// (min, max) of each axis as the driver reports it, base first.
+        /// The range we ask for is a request; a base may keep its own.
+        ranges: Vec<[(f32, f32); 8]>,
     }
 
     struct Found {
@@ -228,6 +246,10 @@ mod win {
                     }
                 }
 
+                let mut ranges = vec![Self::axis_ranges(&device)];
+                for d in &extras {
+                    ranges.push(Self::axis_ranges(d));
+                }
                 let mut w = Wheel {
                     name: base.name.clone(),
                     names,
@@ -236,7 +258,9 @@ mod win {
                     extras,
                     effect: None,
                     last_magnitude: i32::MIN,
+                    effect_stopped: false,
                     lost: 0,
+                    ranges,
                 };
                 if w.ffb {
                     if let Err(e) = w.create_effect() {
@@ -313,7 +337,10 @@ mod win {
                 lMin: -AXIS_RANGE,
                 lMax: AXIS_RANGE,
             };
-            let _ = device.SetProperty(&DIPROP_RANGE, &mut range.diph);
+            let set_range = device.SetProperty(diprop(&DIPROP_RANGE), &mut range.diph);
+            if std::env::var_os("FSAE_RIG_TRACE").is_some() {
+                eprintln!("wheel: SetProperty(DIPROP_RANGE +-{AXIS_RANGE}) -> {set_range:?}");
+            }
 
             if exclusive {
                 // The base's own centring spring would fight the tyre model,
@@ -328,13 +355,44 @@ mod win {
                     },
                     dwData: DIPROPAUTOCENTER_OFF,
                 };
-                let _ = device.SetProperty(&DIPROP_AUTOCENTER, &mut auto.diph);
+                let _ = device.SetProperty(diprop(&DIPROP_AUTOCENTER), &mut auto.diph);
                 let mut gain = DIPROPDWORD { diph: auto.diph, dwData: FF_MAX as u32 };
-                let _ = device.SetProperty(&DIPROP_FFGAIN, &mut gain.diph);
+                let _ = device.SetProperty(diprop(&DIPROP_FFGAIN), &mut gain.diph);
             }
 
             hr(device.Acquire(), if exclusive { "Acquire (bring the game window to the front)" } else { "Acquire" })?;
             Ok(device)
+        }
+
+        /// The range each axis actually reports, read back per object. Falls
+        /// back to the range we asked for where the driver will not say.
+        unsafe fn axis_ranges(device: &IDirectInputDevice8W) -> [(f32, f32); 8] {
+            let mut out = [(-AXIS_RANGE as f32, AXIS_RANGE as f32); 8];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let mut r = DIPROPRANGE {
+                    diph: DIPROPHEADER {
+                        dwSize: std::mem::size_of::<DIPROPRANGE>() as u32,
+                        dwHeaderSize: std::mem::size_of::<DIPROPHEADER>() as u32,
+                        dwObj: (i * 4) as u32,
+                        dwHow: DIPH_BYOFFSET,
+                    },
+                    lMin: 0,
+                    lMax: 0,
+                };
+                match device.GetProperty(diprop(&DIPROP_RANGE), &mut r.diph) {
+                    Ok(()) if r.lMax > r.lMin => *slot = (r.lMin as f32, r.lMax as f32),
+                    Ok(()) => {}
+                    Err(e) => {
+                        if std::env::var_os("FSAE_RIG_TRACE").is_some() {
+                            eprintln!("wheel: GetProperty(DIPROP_RANGE) axis {i}: {e}");
+                        }
+                    }
+                }
+            }
+            if std::env::var_os("FSAE_RIG_TRACE").is_some() {
+                eprintln!("wheel: axis ranges read back: {out:?}");
+            }
+            out
         }
 
         fn create_effect(&mut self) -> Result<(), String> {
@@ -386,24 +444,30 @@ mod win {
             unsafe {
                 let Some(js) = Self::read_one(&self.device) else {
                     self.lost += 1;
+                    self.effect_stopped = true;
                     return None;
                 };
+                if self.effect_stopped {
+                    self.restart_effect();
+                }
                 self.lost = 0;
                 let mut s = DeviceState::default();
-                Self::unpack(&js, 0, &mut s);
+                Self::unpack(&js, 0, &mut s, &self.ranges[0]);
                 s.pov = if js.pov[0] == 0xFFFF_FFFF || (js.pov[0] & 0xFFFF) == 0xFFFF { -1 } else { js.pov[0] as i32 };
                 for (k, d) in self.extras.iter().enumerate() {
                     if let Some(js) = Self::read_one(d) {
-                        Self::unpack(&js, k + 1, &mut s);
+                        Self::unpack(&js, k + 1, &mut s, &self.ranges[k + 1]);
                     }
                 }
                 Some(s)
             }
         }
 
-        fn unpack(js: &JoyState, slot: usize, s: &mut DeviceState) {
+        fn unpack(js: &JoyState, slot: usize, s: &mut DeviceState, ranges: &[(f32, f32); 8]) {
             for i in 0..super::AXES_PER_DEVICE {
-                s.axes[slot * super::AXES_PER_DEVICE + i] = (js.axes[i] as f32 / AXIS_RANGE as f32).clamp(-1.0, 1.0);
+                let (lo, hi) = ranges[i];
+                let v = (js.axes[i] as f32 - lo) / (hi - lo) * 2.0 - 1.0;
+                s.axes[slot * super::AXES_PER_DEVICE + i] = v.clamp(-1.0, 1.0);
             }
             let mut bits = 0u32;
             for (i, b) in js.buttons.iter().enumerate() {
@@ -414,10 +478,32 @@ mod win {
             s.buttons[slot] = bits;
         }
 
+        /// Start the constant-force effect again after the device was lost and
+        /// reacquired, and force the next magnitude through: `last_magnitude`
+        /// still holds whatever was playing before the interruption, so the
+        /// usual "skip if unchanged" test would suppress the first write.
+        fn restart_effect(&mut self) {
+            if let Some(e) = self.effect.as_ref() {
+                unsafe {
+                    let _ = e.Start(INFINITE, 0);
+                }
+            }
+            self.last_magnitude = i32::MIN;
+            self.effect_stopped = false;
+        }
+
         /// Set the constant force, -1..1, positive clockwise. Skips the USB
         /// report when the quantised magnitude has not changed.
+        ///
+        /// A positive DirectInput constant-force magnitude on the X axis turns
+        /// the rim COUNTER-clockwise -- measured on a MOZA R5, 2026-09-17: with
+        /// the sign passed straight through, the damping term assisted rim
+        /// motion and the end stop pinned the rim against the base's own stop
+        /// instead of pushing it back. So the clockwise-positive command is
+        /// negated here, once, at the boundary. `forceFeedback.invert` in the
+        /// profile remains for a base that has it the other way round.
         pub fn set_torque(&mut self, sample: f32) -> Result<(), String> {
-            let mag = (sample.clamp(-1.0, 1.0) * FF_MAX) as i32;
+            let mag = (-sample.clamp(-1.0, 1.0) * FF_MAX) as i32;
             if mag == self.last_magnitude {
                 return Ok(());
             }
@@ -436,8 +522,11 @@ mod win {
                         Ok(())
                     }
                     Err(e) => {
-                        // Lost the device: reacquire and let the next tick retry.
+                        // Lost the device: reacquire and let the next tick
+                        // retry. The effect is stopped now, so the next
+                        // successful read has to start it again.
                         let _ = self.device.Acquire();
+                        self.effect_stopped = true;
                         Err(e.to_string())
                     }
                 }

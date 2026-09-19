@@ -342,6 +342,37 @@ try {
   })()`, 6);
   console.log("controls:", controls);
 
+  // The bindings panel, end to end in the shipped build: a row per control,
+  // a click puts the cell into listening, a key press takes, and what the
+  // panel wrote is what `Input` reads. Worth checking HERE and not only in a
+  // browser, because the panel is the one place a driver can break their own
+  // controls and the desktop build is the one people actually run.
+  const bindings = await evaluate(ws, `(async () => {
+    const g = window.__sim;
+    const row = (label) => [...document.querySelectorAll('.bind-row')]
+      .find(r => r.querySelector('.bind-what')?.textContent.startsWith(label));
+    const cell = (label) => row(label)?.querySelector('.bind-key');
+    const up = cell('Upshift');
+    if (!up) return JSON.stringify({ rows: document.querySelectorAll('.bind-row').length, found: false });
+    const before = up.textContent;
+    up.click();
+    const listening = up.classList.contains('listening');
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyZ', bubbles: true }));
+    await new Promise(r => setTimeout(r, 60));
+    const after = cell('Upshift')?.textContent;
+    const readsIt = (g.input.profile.keys.upshift || []).includes('KeyZ');
+    // Put it back, so a smoke test does not leave the rig rebound.
+    g.input.settings.resetProfile(g.input.settings.activeId);
+    g.input.refreshProfile();
+    g.controlsPanel?.render();
+    return JSON.stringify({
+      rows: document.querySelectorAll('.bind-row').length,
+      found: true, before, listening, after, readsIt,
+      restored: (g.input.profile.keys.upshift || []).includes('KeyE'),
+    });
+  })()`, 7);
+  console.log("bindings:", bindings);
+
   // CAD bodywork, if a model is embedded in this build. The desktop asset
   // server behaves differently from the dev server for a MISSING file -- it
   // answers with the index page rather than a 404 -- so this path is worth
@@ -374,12 +405,15 @@ try {
   const v = JSON.parse(venue);
   const a = JSON.parse(sound);
   const c = JSON.parse(controls);
+  const b = JSON.parse(bindings);
   code = parsed.booted && parsed.webgl2 && parsed.glError === 0 &&
          parsed.specRows > 0 && parsed.specDof > 0 &&
          v.kind === 'venue' && v.venueTriangles > 1000 && v.ribbonDisabled &&
          v.heldByBarrier && v.glError === 0 &&
          a.usingModel && a.tracksFiringFrequency && a.stoppedPeakDb < -60 &&
-         c.mounted && c.editReachedTheCar ? 0 : 1;
+         c.mounted && c.editReachedTheCar &&
+         // Bound it, the panel shows it, and the game reads it -- then put back.
+         b.found && b.listening && b.after === 'Z' && b.readsIt && b.restored ? 0 : 1;
   ws.close();
 } catch (err) {
   console.error("FAILED:", err.message);

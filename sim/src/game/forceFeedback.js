@@ -25,6 +25,34 @@
 // right. If a particular driver has it backwards, `forceFeedback.invert` in
 // the profile flips it and nothing else has to know.
 
+/** Aligning-torque weight vs speed: 0 below 0.3 m/s, 1 from 1.8 m/s, smooth between. */
+export function lowSpeedFade(speed) {
+  const x = Math.max(0, Math.min(1, (speed - 0.3) / 1.5));
+  return x * x * (3 - 2 * x);
+}
+
+/**
+ * Normalised command through a gamma lift and a tanh soft knee.
+ *
+ * A hard clamp throws away everything above 1.0, which on a small base is
+ * precisely the part worth feeling: the torque peak and the fall-off past it.
+ * The knee maps [knee, inf) onto [knee, 1) so that shape survives, compressed,
+ * instead of flattening into a ceiling. `gamma` below 1 lifts everything under
+ * full scale, the way AC's `ff_post_process` GAMMA does.
+ */
+export function compress(x, gamma = 1, knee = 1) {
+  if (!x || !Number.isFinite(x)) return 0;
+  const sign = x < 0 ? -1 : 1;
+  let m = Math.abs(x);
+  if (gamma > 0 && Math.abs(gamma - 1) > 1e-9) m = Math.pow(m, gamma);
+  const k = Math.max(0, Math.min(1, knee));
+  if (m > k) {
+    const span = 1 - k;
+    m = span > 1e-9 ? k + span * Math.tanh((m - k) / span) : k;
+  }
+  return sign * m;
+}
+
 export class ForceFeedback {
   constructor() {
     /** Last rim angle seen, deg, and its derivative, deg/s -- for damping. */
@@ -48,7 +76,7 @@ export class ForceFeedback {
       /** One-shot impact, Nm peak. Consumed by the native side, then zero. */
       kickNm: 0,
       /** Components, for the live display. All Nm, wheel frame. */
-      align: 0, damping: 0, friction: 0, softLock: 0,
+      align: 0, damping: 0, friction: 0, jacking: 0, softLock: 0,
       clipped: false,
     };
   }
@@ -80,7 +108,14 @@ export class ForceFeedback {
 
     // 1. Self-aligning torque from the tyres, the signal itself. The model is
     //    left-positive; flip into the wheel's frame.
-    out.align = -tel.rimTorqueNm * cfg.alignTorqueGain;
+    //
+    //    Faded out at walking pace. The solver clamps forward speed at 3.0 m/s
+    //    inside the slip-angle calculation, so below a few m/s any sideways
+    //    drift or wheelspin is a full-size slip angle and a full-size torque
+    //    that flips sign as the car wriggles -- measured as +-5..10 N.m at
+    //    0.4-3 m/s on the rig. Nothing a driver reads lives there.
+    const fade = lowSpeedFade(tel.speed);
+    out.align = -tel.rimTorqueNm * cfg.alignTorqueGain * fade;
 
     // 2. Damping. Proportional to rim speed, so a sudden release does not slam
     //    the wheel through centre and a spin does not whip it. `damping` is a
@@ -93,13 +128,32 @@ export class ForceFeedback {
     this._frictionState += (target - this._frictionState) * Math.min(1, dt / 0.03);
     out.friction = -cfg.friction * rated * this._frictionState;
 
+    // 3b. Standstill. A stationary tyre resists being twisted about the
+    //     kingpin by scrubbing its contact patch -- Coulomb, so it opposes
+    //     motion and not angle -- while caster and KPI lift the car as the
+    //     wheel turns, which is the only thing that returns the rim at rest.
+    //     Both fade in exactly as the aligning torque fades out. The jacking
+    //     torque is computed by the rig, which has the steering geometry;
+    //     in a browser there is no wheel to feel it, so it is simply absent.
+    const park = 1 - fade;
+    if (park > 1e-3) {
+      out.friction -= (cfg.parkFriction ?? 0) * rated * this._frictionState * park;
+      out.jacking = -(feel.jackingNm ?? 0) * park;
+    }
+
     // 4. The end stops. Past the car's lock the rack is on its stop, so the
     //    wheel should be too: a stiff spring pushing back to the lock, rising
     //    to full rated torque over a few degrees of over-travel.
+    //    Held OUT of the gain and the compressor below: a stop that scales
+    //    with a taste setting is not a stop. Damped locally so it does not
+    //    bounce at its own ~6 Hz against an undamped rim.
     const over = Math.abs(rim.deg) - rim.halfLockDeg;
+    let stopNorm = 0;
     if (over > 0) {
-      const stop = Math.min(1, over / 6) * cfg.softLockGain * rated;
-      out.softLock = -Math.sign(rim.deg) * stop;
+      stopNorm =
+        -Math.sign(rim.deg) * Math.min(1, over / 3) * cfg.softLockGain -
+        Math.max(-0.6, Math.min(0.6, ((cfg.stopDamping ?? 0) * rateRadS) / 10));
+      out.softLock = stopNorm * rated;
     }
 
     // 5. Texture. Wheelspin and lockup shake the column at roughly wheel
@@ -125,17 +179,21 @@ export class ForceFeedback {
       out.kickNm = Math.min(1, feel.coneHit) * 0.6 * rated * (rim.deg >= 0 ? -1 : 1);
     }
 
-    out.torqueNm = out.align + out.damping + out.friction + out.softLock;
+    out.torqueNm = out.align + out.damping + out.friction + out.jacking + out.softLock;
 
-    let cmd = (out.torqueNm * cfg.gain) / rated;
+    // To the motor. COMPRESS rather than clip: a hard clamp at the rated
+    // torque erases the one cue this whole model exists to deliver, the rim
+    // going light as the front starts to slide. See `compress` above.
+    const base = ((out.align + out.damping + out.friction + out.jacking) * cfg.gain) / rated;
+    out.clipped = Math.abs(base) > 1;
+    let cmd = compress(base, cfg.gamma ?? 1, cfg.knee ?? 1);
     // The floor lifts tiny commands to where the motor's own cogging and
     // friction do not swallow them. On the final command, after the gain,
     // and only while the tyres are actually saying something.
     if (cfg.minForce > 0 && Math.abs(out.align) > 1e-3 && Math.abs(cmd) < cfg.minForce) {
       cmd = Math.sign(cmd) * cfg.minForce;
     }
-    if (cmd > 1 || cmd < -1) out.clipped = true;
-    cmd = Math.max(-1, Math.min(1, cmd));
+    cmd = Math.max(-1, Math.min(1, cmd + stopNorm));
     // Texture rides on top; keep it inside the remaining headroom.
     out.textureNm = Math.min(out.textureNm, Math.max(0, 1 - Math.abs(cmd)) * rated);
     if (cfg.invert) cmd = -cmd;

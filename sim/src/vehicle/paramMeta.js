@@ -211,8 +211,8 @@ export function parameterGroups() {
     ]),
 
     rows("Steering & brakes", [
-      p("Steering lock, road wheel", v.maxSteerDeg, "deg", "estimate",
-        "Not a rack measurement, but three of four 2026-04-01 MoTeC runs cap the rim at 121-124 deg, which is 27.4-28.1 deg through the 4.411 ratio. Measure the rack stops to close it.", { path: "maxSteerDeg", min: 10, max: 45, step: 0.5 }),
+      p("Steering lock, road wheel", v.maxSteerDeg, "deg", "team",
+        "The rack's measured limit: the Drive toe-vs-steering-wheel table reaches 46 deg of road wheel at 179 deg of rim. Replaces a 28 deg estimate that was really where the driver stopped turning in a MoTeC run.", { path: "maxSteerDeg", min: 10, max: 55, step: 0.5 }),
       p("Steering ratio", v.steeringRatio, ":1", "team",
         "OptimumK 'Designed vs Actual Kinematics' export, 2026-06-27. Sets the cockpit wheel angle and the rim torque per kingpin torque.",
         { path: "steeringRatio", min: 2, max: 10, step: 0.1 }),
@@ -226,6 +226,12 @@ export function parameterGroups() {
     ]),
 
     rows("Driver & environment", [
+      p("Diff lock, power", v.diff.powerLock, "", "team",
+        "Drexler V3 drive ramp, from the lock table in the Formula Student LSD manual: 30 deg is 0.88, 40 is 0.60, 45 is 0.51, 50 is 0.42, 60 is 0.29. The car ships on 40/50. The team's study notes the manual is optimistic and on-track values run 60-80% of it.", { path: "diff.powerLock", min: 0, max: 0.95, step: 0.01 }),
+      p("Diff lock, coast", v.diff.coastLock, "", "team",
+        "Coast ramp, same table. Lower than the power ramp on a 1.5-way. This is the number that steadies the rear on a lift.", { path: "diff.coastLock", min: 0, max: 0.95, step: 0.01 }),
+      p("Diff preload", v.diff.preloadNm, "N.m", "team",
+        "Breakaway torque wheel to wheel, as Drexler specifies it: 25-35 on the fixed unit, 0-75 adjustable. Raising it adds understeer on entry and kills lock-up lag on exit; lowering it lets the rear rotate more freely off throttle.", { path: "diff.preloadNm", min: 0, max: 75, step: 1 }),
       p("Eye height", v.eyeHeightM, "m", "estimate", "Cockpit camera.", { path: "eyeHeightM", min: 0.4, max: 1.0, step: 0.005 }),
       p("Eye position vs CG", v.eyeAheadOfCgM, "m", "estimate", "Negative is behind the CG."),
       p("Car vibration", v.vibrationScale * 100, "%", "estimate",

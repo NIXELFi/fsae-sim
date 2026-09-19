@@ -9,6 +9,8 @@ use crate::vehicle::VehicleParams;
 
 /// Width of the soft rev limiter, rpm below the limit.
 const LIMITER_BAND_RPM: f64 = 300.0;
+/// How long the clutch stays dumped after launch control is released, s.
+const LAUNCH_DUMP_S: f64 = 0.8;
 
 /// Crank torque to wheel torque through the ratio and the driveline
 /// efficiency. Losses always oppose motion: drive is reduced by them, engine
@@ -67,6 +69,10 @@ pub trait PowertrainModel: Send + Sync {
 
     /// Advance one substep and report what reaches the wheel.
     fn step(&mut self, dt: f64, throttle: f64, wheel_omega: f64, speed: f64) -> DriveOutput;
+
+    /// Launch control held. Only a geared engine with a clutch has anything to
+    /// do with this, so it defaults to doing nothing.
+    fn set_launch(&mut self, _held: bool) {}
 
     fn reset(&mut self);
 
@@ -224,29 +230,29 @@ pub struct TorquePoint {
 /// preserved -- the hole at 6500, the spike at 8000, the second wind at
 /// 11000-11500 before the restrictor chokes it.
 pub const SDM26_SWEEP: [TorquePoint; 23] = [
-    TorquePoint { rpm: 4000.0, torque_nm: 60.997, fmep_bar: 1.1630 },
-    TorquePoint { rpm: 4500.0, torque_nm: 61.335, fmep_bar: 1.2594 },
-    TorquePoint { rpm: 5000.0, torque_nm: 59.423, fmep_bar: 1.3589 },
-    TorquePoint { rpm: 5500.0, torque_nm: 55.846, fmep_bar: 1.4613 },
-    TorquePoint { rpm: 6000.0, torque_nm: 54.969, fmep_bar: 1.5668 },
-    TorquePoint { rpm: 6500.0, torque_nm: 49.508, fmep_bar: 1.6752 },
-    TorquePoint { rpm: 7000.0, torque_nm: 58.086, fmep_bar: 1.7867 },
-    TorquePoint { rpm: 7500.0, torque_nm: 55.997, fmep_bar: 1.9012 },
-    TorquePoint { rpm: 8000.0, torque_nm: 62.640, fmep_bar: 2.0187 },
-    TorquePoint { rpm: 8500.0, torque_nm: 56.256, fmep_bar: 2.1392 },
-    TorquePoint { rpm: 9000.0, torque_nm: 54.200, fmep_bar: 2.2627 },
-    TorquePoint { rpm: 9500.0, torque_nm: 48.313, fmep_bar: 2.3892 },
-    TorquePoint { rpm: 10000.0, torque_nm: 46.191, fmep_bar: 2.5188 },
-    TorquePoint { rpm: 10500.0, torque_nm: 44.040, fmep_bar: 2.6513 },
-    TorquePoint { rpm: 11000.0, torque_nm: 48.829, fmep_bar: 2.7869 },
-    TorquePoint { rpm: 11500.0, torque_nm: 48.216, fmep_bar: 2.9254 },
-    TorquePoint { rpm: 12000.0, torque_nm: 43.253, fmep_bar: 3.0670 },
-    TorquePoint { rpm: 12500.0, torque_nm: 36.623, fmep_bar: 3.2116 },
-    TorquePoint { rpm: 13000.0, torque_nm: 30.067, fmep_bar: 3.3592 },
-    TorquePoint { rpm: 13500.0, torque_nm: 23.636, fmep_bar: 3.5098 },
-    TorquePoint { rpm: 14000.0, torque_nm: 19.011, fmep_bar: 3.6634 },
-    TorquePoint { rpm: 14500.0, torque_nm: 21.985, fmep_bar: 3.8200 },
-    TorquePoint { rpm: 15000.0, torque_nm: 23.784, fmep_bar: 3.9797 },
+TorquePoint { rpm: 4000.0, torque_nm: 35.461, fmep_bar: 1.1630 },
+    TorquePoint { rpm: 4500.0, torque_nm: 35.657, fmep_bar: 1.2594 },
+    TorquePoint { rpm: 5000.0, torque_nm: 39.074, fmep_bar: 1.3589 },
+    TorquePoint { rpm: 5500.0, torque_nm: 48.603, fmep_bar: 1.4613 },
+    TorquePoint { rpm: 6000.0, torque_nm: 55.062, fmep_bar: 1.5668 },
+    TorquePoint { rpm: 6500.0, torque_nm: 51.036, fmep_bar: 1.6752 },
+    TorquePoint { rpm: 7000.0, torque_nm: 49.542, fmep_bar: 1.7867 },
+    TorquePoint { rpm: 7500.0, torque_nm: 49.439, fmep_bar: 1.9012 },
+    TorquePoint { rpm: 8000.0, torque_nm: 53.055, fmep_bar: 2.0187 },
+    TorquePoint { rpm: 8500.0, torque_nm: 57.820, fmep_bar: 2.1392 },
+    TorquePoint { rpm: 9000.0, torque_nm: 55.678, fmep_bar: 2.2627 },
+    TorquePoint { rpm: 9500.0, torque_nm: 53.540, fmep_bar: 2.3892 },
+    TorquePoint { rpm: 10000.0, torque_nm: 50.361, fmep_bar: 2.5188 },
+    TorquePoint { rpm: 10500.0, torque_nm: 45.582, fmep_bar: 2.6513 },
+    TorquePoint { rpm: 11000.0, torque_nm: 43.355, fmep_bar: 2.7869 },
+    TorquePoint { rpm: 11500.0, torque_nm: 40.337, fmep_bar: 2.9254 },
+    TorquePoint { rpm: 12000.0, torque_nm: 39.496, fmep_bar: 3.0670 },
+    TorquePoint { rpm: 12500.0, torque_nm: 40.634, fmep_bar: 3.2116 },
+    TorquePoint { rpm: 13000.0, torque_nm: 38.801, fmep_bar: 3.3592 },
+    TorquePoint { rpm: 13500.0, torque_nm: 35.285, fmep_bar: 3.5098 },
+    TorquePoint { rpm: 14000.0, torque_nm: 32.610, fmep_bar: 3.6634 },
+    TorquePoint { rpm: 14500.0, torque_nm: 29.936, fmep_bar: 3.8200 },
+    TorquePoint { rpm: 15000.0, torque_nm: 27.261, fmep_bar: 3.9797 },
 ];
 
 /// Level 2: the real thing. Restricted CBR600RR on the CFD sweep, six speeds
@@ -264,6 +270,13 @@ pub struct GearedEngine {
     pub efficiency: f64,
     pub rev_limit_rpm: f64,
     pub idle_rpm: f64,
+    /// Crank speed a driver holds on the clutch off the line, and what launch
+    /// control limits the engine to while it is held.
+    pub launch_rpm: f64,
+    /// Launch control: driver holding it, and the window after they drop it
+    /// during which the clutch is dumped rather than fed in.
+    pub launch_held: bool,
+    pub launch_dump_s: f64,
     /// Throttle plate position the ETC holds at idle, 0..1.
     pub idle_throttle_frac: f64,
     pub shift_time_s: f64,
@@ -294,7 +307,13 @@ impl GearedEngine {
             efficiency: 0.85,
             rev_limit_rpm: 14_500.0,
             idle_rpm: 2000.0,
-            idle_throttle_frac: 0.14,
+            launch_rpm: 7000.0,
+            launch_held: false,
+            launch_dump_s: 0.0,
+            // Re-solved for the measured curve; see params.js. The real
+            // engine makes far less below 4000 rpm than the CFD sweep said,
+            // so the plate sits further open to hold 2000 rpm.
+            idle_throttle_frac: 0.22,
             shift_time_s: 0.1,
             // Split at the primary, because that is where the clutch sits on a
             // CBR600RR: the crank turns primaryxgearxfinal, everything
@@ -321,6 +340,24 @@ impl GearedEngine {
     }
 
     /// Linear-interpolated wide-open-throttle brake torque (N.m).
+    /// Launch control. Held, the engine sits on the LC limiter with the clutch
+    /// out; released, the clutch is DUMPED rather than fed in. See powertrain.js.
+    pub fn set_launch(&mut self, held: bool) {
+        if self.launch_held && !held {
+            self.launch_dump_s = LAUNCH_DUMP_S;
+        }
+        self.launch_held = held;
+    }
+
+    /// The rev limit in force; launch control lowers it while it is held.
+    pub fn limit_rpm(&self) -> f64 {
+        if self.launch_held {
+            self.launch_rpm.min(self.rev_limit_rpm)
+        } else {
+            self.rev_limit_rpm
+        }
+    }
+
     pub fn wot_torque(&self, rpm: f64) -> f64 {
         let p = &self.curve;
         let first = p[0];
@@ -328,13 +365,25 @@ impl GearedEngine {
             // Below the sweep, fall away toward a plausible idle torque rather
             // than holding 61 N.m down to zero rpm.
             // The 0.56 floor is pinned by the measured idle point, not
-            // guessed: the engine idles at 2000 rpm with the throttle plate at
-            // 14%, so at 2000 rpm a 14% opening must exactly balance friction.
-            // Solving `drag / (wot + drag) = 0.14` with drag = 5.54 N.m gives
-            // wot(2000) = 34 N.m, which is 0.56 of the 61 N.m peak -- and lands
-            // squarely in the 55-70% of peak a naturally aspirated four
-            // normally makes at 2000 rpm. The previous 0.35 was invented and
-            // could not sustain an idle at any plate opening.
+            // guessed. The engine idles at 2000 rpm with the throttle plate at
+            // 22% (`idle_throttle_frac`), so at 2000 rpm a 22% opening must
+            // exactly balance friction. Solving `drag / (wot + drag) = 0.22`
+            // with drag = 5.543 N.m gives wot(2000) = 19.65 N.m, and this
+            // floor is a fraction of the SWEEP'S FIRST POINT -- 35.461 N.m at
+            // 4000 rpm, not the peak -- so 19.65 / 35.461 = 0.554, which is
+            // the 0.56 below.
+            //
+            // That is 34% of the 57.82 N.m peak, lower than the 55-70% a
+            // naturally aspirated four is usually quoted at 2000 rpm. This
+            // engine peaks near 11k, so a low fraction at 2000 is expected;
+            // the number to be suspicious of is the drag figure, not the
+            // floor, and it comes from the same dyno sheet as the sweep.
+            //
+            // (An earlier version of this comment derived 0.56 from a 14%
+            // plate and a 61 N.m peak. Both numbers moved with the measured
+            // dyno curve; the plate was re-solved and the code is correct, but
+            // the derivation was left behind and no longer checked out -- it
+            // produced 34% of peak while claiming 55-70%.)
             let f = ((rpm - self.idle_rpm) / (first.rpm - self.idle_rpm)).max(0.0).min(1.0);
             return first.torque_nm * (0.56 + 0.44 * f);
         }
@@ -380,7 +429,8 @@ impl GearedEngine {
     /// Throttle plate position, 0..1, for a driver demand.
     ///
     /// The plate does not fully close at idle: the ETC holds it open a little
-    /// to keep the engine alive, and on SDM26 that idle position is 14%. The
+    /// to keep the engine alive, and on SDM26 that idle position is 22%
+    /// (`idle_throttle_frac`; see the note in `sim/tools/validate.js`). The
     /// floor fades out as revs rise, because a real ETC *does* close on the
     /// overrun -- that is what engine braking is, and holding 14% all the way
     /// up the range would delete most of it.
@@ -442,7 +492,7 @@ impl GearedEngine {
         let mut t = plate * (wot + drag) - drag;
         // Soft limiter (see powertrain.js): blend to pure drag over the last
         // LIMITER_BAND_RPM so a held gear settles instead of bouncing.
-        let soft = ((rpm - (self.rev_limit_rpm - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM).clamp(0.0, 1.0);
+        let soft = ((rpm - (self.limit_rpm() - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM).clamp(0.0, 1.0);
         if soft > 0.0 {
             t -= soft * (t + drag);
         }
@@ -450,6 +500,8 @@ impl GearedEngine {
         t
     }
 
+    /// `_speed` is no longer consulted: the clutch is decided by the two
+    /// shaft speeds, which is what actually settles whether it is slipping.
     fn clutch_capacity(&self, throttle: f64, speed: f64, clutch_side_rpm: f64) -> f64 {
         if self.shift_timer > 0.0 {
             return 0.0;
@@ -459,15 +511,41 @@ impl GearedEngine {
         if throttle < 0.05 && clutch_side_rpm < self.idle_rpm * 0.95 {
             return 0.0;
         }
-        if speed > 4.0 {
+        // The driveline turning the engine rather than the other way round:
+        // the clutch is in, and this is engine braking, not a launch.
+        if clutch_side_rpm >= self.engine_rpm {
             return self.clutch_capacity_nm;
         }
-        // Below walking pace the clutch is being managed, and with the driver
-        // off the pedal it is fully in. A floor of 0.1 meant it always carried
-        // about 26 N.m -- several times what the engine makes at idle -- so a
-        // stationary car dragged its own engine down and could never idle. A
-        // real FSAE car does not creep; you slip the clutch.
-        self.clutch_capacity_nm * (throttle * 1.15).min(1.0)
+        // Caught up: there is nothing left to slip.
+        let target = self.launch_rpm;
+        // Launch control held: the clutch is in and the engine is sitting on
+        // the LC limiter. Nothing goes through until the pedal comes up -- and
+        // then it is DUMPED, not fed in; see powertrain.js.
+        if self.launch_held {
+            return 0.0;
+        }
+        if self.launch_dump_s > 0.0 {
+            return self.clutch_capacity_nm;
+        }
+        if clutch_side_rpm >= target {
+            return self.clutch_capacity_nm;
+        }
+        // Rolling: the clutch is in; see powertrain.js.
+        if speed > 12.0 {
+            return self.clutch_capacity_nm;
+        }
+        // Pulling away: a fraction of what the engine is making RIGHT NOW --
+        // half of it at rest, all of it at the launch rpm, more above. See
+        // powertrain.js for why it must not be anchored to the launch rpm.
+        let avail = self.wot_torque_nm(self.engine_rpm) * (throttle * 1.15).min(1.0);
+        let frac = 0.5 + 0.5 * (self.engine_rpm / target);
+        let slipping = (avail * frac).clamp(0.0, self.clutch_capacity_nm);
+        // Blended into the full capacity as the slip closes, and the blend is
+        // CONTINUOUS on purpose; see powertrain.js.
+        // Blended into the full capacity as the DRIVELINE spins up toward the
+        // launch rpm -- not on the slip; see powertrain.js.
+        let w = (clutch_side_rpm / target).clamp(0.0, 1.0);
+        slipping + (self.clutch_capacity_nm - slipping) * w
     }
 
     /// Lowest rpm above which the next gear already makes more wheel force.
@@ -534,12 +612,32 @@ impl PowertrainModel for GearedEngine {
         self.wot_torque(rpm)
     }
 
+    fn set_launch(&mut self, held: bool) {
+        GearedEngine::set_launch(self, held);
+    }
+
     fn step(&mut self, dt: f64, throttle: f64, wheel_omega: f64, speed: f64) -> DriveOutput {
+        if self.launch_dump_s > 0.0 {
+            self.launch_dump_s = (self.launch_dump_s - dt).max(0.0);
+        }
         if self.shift_timer > 0.0 {
             self.shift_timer -= dt;
             if self.shift_timer <= 0.0 {
                 if let Some(g) = self.pending_gear.take() {
+                    let downshift = g < self.gear;
                     self.gear = g;
+                    // Auto-blip on a downshift: a paddle-shifted car rev-matches
+                    // before the clutch comes back in. Without it the clutch
+                    // "landed" by dragging the rear axle down to crank speed --
+                    // in first at 15 m/s the crank's reflected inertia is four
+                    // times the wheel side and 220 N.m at the primary is
+                    // 3400 N.m at the axle against a tyre that passes ~540 --
+                    // and the rear sat at 20% of road speed with no lateral
+                    // grip (measured on the rig and offline, 2026-09-17).
+                    if downshift {
+                        let matched = wheel_omega * self.ratio() * RADS_TO_RPM;
+                        self.engine_rpm = matched.clamp(self.idle_rpm, self.rev_limit_rpm - LIMITER_BAND_RPM);
+                    }
                 }
                 self.shift_timer = 0.0;
             }
@@ -617,6 +715,14 @@ impl PowertrainModel for GearedEngine {
         self.pending_gear = None;
         self.limiter_cut = false;
         self.slipping = true;
+        // The launch timer is free-running and pins the clutch at its full
+        // capacity for 0.8 s after a dump. Leaving it set across a reset meant
+        // that pressing restart within that window started the new run with a
+        // locked clutch, no matter what the throttle or the engine speed were
+        // doing -- and it corrects itself so quickly that it reads as the car
+        // being twitchy rather than as a bug.
+        self.launch_held = false;
+        self.launch_dump_s = 0.0;
     }
 
     fn sync_to_wheel(&mut self, wheel_omega: f64) {
@@ -672,11 +778,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sweep_peaks_where_the_cfd_says() {
+    fn sweep_peaks_where_the_dyno_says() {
         let e = GearedEngine::sdm26();
         let p = e.peak_torque();
-        assert_eq!(p.rpm, 8000.0);
-        assert!((p.torque_nm - 62.64).abs() < 0.01);
+        assert_eq!(p.rpm, 8500.0);
+        assert!((p.torque_nm - 57.820).abs() < 0.01, "peak {} N.m", p.torque_nm);
     }
 
     #[test]

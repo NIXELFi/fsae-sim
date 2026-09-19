@@ -9,6 +9,14 @@ use sim_core::prelude::*;
 
 const DT: f64 = 1.0 / 500.0;
 
+/// The steer demands in these checks were written against a 28 deg lock. The
+/// rack MEASURES 46 deg, so they are scaled to keep the road angle each check
+/// actually sweeps exactly what it was. Closed-loop checks (skidpad) need no
+/// such thing -- they seek an angle rather than command one.
+fn lock_scale() -> f64 {
+    28.0 / sdm26().steering.max_steer_rad.to_degrees()
+}
+
 fn bicycle() -> Box<dyn Solver> {
     build(
         Fidelity::Bicycle,
@@ -28,19 +36,33 @@ fn skidpad_speed(car: &mut dyn Solver) -> f64 {
     let mut best = 0.0;
     let mut target = 8.0;
     while target <= 16.0 {
+        // Roll stiffness is a per-event SETUP item; run the skidpad on the
+        // team's skidpad blades (46%), not on whatever the default is.
+        car.params_mut().roll.rsd_front = 0.46;
         car.reset(0.0, 0.0, 0.0, target);
         // PI on yaw rate around an Ackermann feed-forward. The output is the
         // steer angle itself, not an increment -- accumulating on top of an
         // integral term makes a double integrator that spins the car and
         // reports a grip limit it never reached.
         let ff = car.params().wheelbase_m / R / car.params().steering.max_steer_rad;
+        // The PI gains convert a yaw-rate error into NORMALISED steer demand,
+        // so they have to follow the lock. At the rack measured 46 deg this
+        // loop would otherwise run at 1.6x its designed gain and shake the car
+        // off the circle. `ff` needs no such thing: it is already an angle
+        // divided by the lock. The integral itself is physical (rad) and keeps
+        // its own clamp.
+        let ls = lock_scale();
         let (mut integral, mut sum_r, mut n) = (0.0, 0.0, 0);
         let mut blew = false;
         for i in 0..6000 {
             let s = car.state();
             let err = s.speed() / R - s.r;
             integral = (integral + err * DT).clamp(-0.5, 0.5);
-            let steer = (ff + 6.0 * err + 4.0 * integral).clamp(-1.0, 1.0);
+            // Held to 28 deg of road wheel (`ls` normalised), as it always
+            // was. The rack now travels to 46, but a skidpad driver does not
+            // use it: give the integrator that much authority and it winds the
+            // front past its peak and washes off the circle it is holding.
+            let steer = (ff + (6.0 * err + 4.0 * integral) * ls).clamp(-ls, ls);
             let v_err = target - s.speed();
             let throttle = (0.3 + v_err * 0.6).clamp(0.0, 1.0);
             car.step(DT, Controls { steer, throttle, brake: 0.0 });
@@ -142,11 +164,12 @@ fn front_roll_stiffness_adds_understeer() {
         let mut car = bicycle();
         car.params_mut().roll.rsd_front = rsd;
         car.reset(0.0, 0.0, 0.0, 9.0);
+        let ls = lock_scale();
         let (mut sum, mut n) = (0.0, 0);
         for i in 0..4000 {
             let v_err = 9.0 - car.state().speed();
             let throttle = (0.3 + v_err * 0.6).clamp(0.0, 1.0);
-            car.step(DT, Controls { steer: 0.42, throttle, brake: 0.0 });
+            car.step(DT, Controls { steer: 0.42 * ls, throttle, brake: 0.0 });
             if i > 3000 {
                 let s = car.state();
                 sum += s.speed() / s.r.abs().max(1e-4);
@@ -186,17 +209,29 @@ fn front_limits_first_and_the_car_pushes() {
         }
         car.powertrain_mut().set_gear(best);
         car.powertrain_mut().sync_to_wheel(speed / 0.2);
+        let ls = lock_scale();
         let (mut t, mut peak_ay, mut bal_at_peak, mut peak_beta) = (0.0, 0.0f64, 0.0, 0.0f64);
         while t < 12.0 {
             let v_err = speed - car.state().speed();
-            let throttle = (0.2 + v_err * 0.8).clamp(0.0, 1.0);
-            car.step(DT, Controls { steer: t / 12.0 * 0.6, throttle, brake: 0.0 });
+            // Throttle held to what a driver would actually carry at the
+            // limit. The old speed-hold controller floored it -- 0.84 at
+            // 28 m/s -- to chase a target speed the car cannot hold at 2 g,
+            // and now that the rear axle is two wheels with a differential
+            // between them, flooring it at 2 g lights up the inside rear and
+            // spins the car. That is the model being right, not wrong: a
+            // single rear rotor simply could not represent one wheel letting
+            // go. What the check is for is the STEADY balance, so the driver
+            // model has to stop doing something no driver does.
+            let throttle = (0.2 + v_err * 0.8).clamp(0.0, 0.55);
+            car.step(DT, Controls { steer: t / 12.0 * 0.6 * ls, throttle, brake: 0.0 });
             t += DT;
             let tel = car.telemetry();
             peak_beta = peak_beta.max(tel.body_slip_deg.abs());
             if tel.ay_g > peak_ay {
                 peak_ay = tel.ay_g;
-                bal_at_peak = tel.utilisation[FL] - tel.utilisation[RL];
+                // Axle-level: `balance` is load-weighted across the rear, so
+                // a spinning inner wheel does not read as a rear at its limit.
+                bal_at_peak = -tel.balance;
             }
         }
         println!("{speed} m/s: {peak_ay:.2} g, utilF-utilR {bal_at_peak:.2}, peak body slip {peak_beta:.1} deg");

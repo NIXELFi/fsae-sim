@@ -2,3 +2,9 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Recorded runs. The real ones live outside the repo (see sim/src-tauri/src/runs.rs);
+# `sim/runs/` is only the browser dev loop's copy, which `runStore.js` fetches
+# statically because a browser has no shell to ask for a file. They are tens of
+# megabytes of telemetry and belong to whoever recorded them, not to the repo.
+sim/runs/

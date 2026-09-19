@@ -13,16 +13,38 @@ import { Renderer } from "./render/renderer.js";
 import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
-import { Timing, fmt } from "./game/timing.js";
+import { Timing, fmt, CONE_PENALTY_S, OFF_COURSE_PENALTY_S } from "./game/timing.js";
+import { keyLabel } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
-import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, toggleFullscreen } from "./game/desktop.js";
+import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen } from "./game/desktop.js";
 import { ForceFeedback } from "./game/forceFeedback.js";
 import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet } from "./game/specSheet.js";
 import { PARAM_DEFAULTS, readParam, writeParam } from "./vehicle/paramMeta.js";
-import { SetupAdjuster } from "./vehicle/setupAdjust.js";
+import { SetupAdjuster, ADJUSTABLE_PATHS } from "./vehicle/setupAdjust.js";
 import { drawCoursePlan } from "./game/coursePlan.js";
+import { Recorder, datumFor } from "./game/recorder.js";
+
+/** Below this many samples the driver never really started, so a dropped
+ *  run is not worth mentioning -- they pressed restart on the line. */
+const SAMPLE_HZ_FLOOR = 100;
+
+/** How often the car's dash panel is repainted. 30 Hz: a real dash updates
+ *  about this fast and nobody can read one that changes quicker. */
+const DASH_REFRESH_MS = 1000 / 30;
+
+/**
+ * Seconds between the autocross finish line and the end-of-run card.
+ *
+ * The car is still doing 60 km/h when the clock stops. Long enough to brake
+ * and read the time off the dash, short enough that nobody is waiting.
+ */
+const FINISH_ROLLOUT_S = 2.0;
+import { DeltaTimer, referenceFromRun } from "./game/delta.js";
+import { newRunId, saveRun, runsDirectory, listRuns, loadRun, parseTelemetry } from "./game/runStore.js";
+import { Replay } from "./game/replay.js";
+import { ReplayPanel, ghostGap } from "./game/replayPanel.js";
 
 // Chassis footprint used for cone strikes, and the wheel hub positions, both
 // derived from the LIVE geometry. Hardcoding them meant stretching the
@@ -32,6 +54,13 @@ import { bodyBoxFor, hubsFor } from "./render/carmesh.js";
 
 /** Geometry that changes the drawn car; a change here forces a mesh rebuild. */
 const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRearM"];
+
+/**
+ * Stamped into every recorded run. A lap time only means something next to the
+ * build it was set on -- the differential, the torque curve and the steering
+ * rack have all moved under the same courses -- so the log says which one.
+ */
+const SIM_VERSION = "1.0.0";
 
 // `rigid` means the camera is bolted to the chassis, so the cockpit stays
 // still relative to the driver's head and the world rolls instead. Chase is
@@ -44,18 +73,32 @@ const GEO_FOR_BODY = {
   frontAxle: 0.788, rearAxle: -0.742, tireRadius: SDM26.tireRadiusM,
 };
 
+// Vertical field of view, degrees.
+//
+// These used to be enormous -- the cockpit sat at 78 deg vertical, which on a
+// 21:9 screen is about 125 deg horizontal. Everything looked far away and the
+// edges of the frame were visibly stretched, which is the single biggest
+// reason the picture read as a game rather than a car.
+//
+// The geometrically honest number is the one that makes the image subtend the
+// same angle as the real scene: vFov = 2 * atan(screen_height / 2 / distance).
+// A 29 in ultrawide (284 mm tall) at 65 cm is 25 deg; a 34 in at 70 cm is
+// 28 deg. Nobody drives a single screen that tight -- with no head tracking
+// you lose the peripheral view you need to place a cone -- so the cockpit is
+// set at 50, roughly where Assetto Corsa's default sits, and the eye-height
+// and FOV are both adjustable. Set it to the formula above for a true 1:1.
 const CAMERAS = [
   // `live` means the eye point is read from the parameters every frame rather
   // than captured here, so the eye-height slider actually moves the camera.
-  { name: "Cockpit", live: true, pitch: 0, fov: 78, rigid: true },
-  { name: "Nose", ahead: 1.35, height: 0.46, pitch: -0.03, fov: 82, rigid: true },
-  { name: "Chase", ahead: -4.6, height: 1.85, pitch: -0.14, fov: 70, rigid: false },
+  { name: "Cockpit", live: true, pitch: 0, fov: 50, rigid: true },
+  { name: "Nose", ahead: 1.35, height: 0.46, pitch: -0.03, fov: 55, rigid: true },
+  { name: "Chase", ahead: -4.6, height: 1.85, pitch: -0.14, fov: 58, rigid: false },
   // Circles the car rather than following it. The only view that shows the car
   // from anywhere but directly behind, which is what you need to judge the
   // bodywork -- or to check that an imported CAD model is the right shape and
   // the right way round.
   { name: "Walkaround", orbit: true, radius: 3.6, height: 1.05, focusHeight: 0.42,
-    fov: 55, rigid: false },
+    fov: 45, rigid: false },
 ];
 const WALKAROUND = CAMERAS[3];
 
@@ -135,15 +178,76 @@ class Game {
     this.clock = 0;
 
     this.paused = false;
+    /**
+     * The end-of-run card is up (autocross only -- see `onRunFinished`).
+     *
+     * Separate from `paused` because the two look different and offer
+     * different things: pause is "I stepped away", finish is "that was the
+     * run, here is what it scored". Both stop the car, so `paused` is set as
+     * well and this only decides which card is on screen.
+     */
+    this.finished = false;
+    /** Game clock at which the finish card appears; null when not rolling out. */
+    this.finishAt = null;
+    /** The scored entry the card is reporting. */
+    this.finishRun = null;
+    /** The save started at the line; resolves to the run id the card can replay. */
+    this.finishSave = null;
+    this.finishRunId = null;
+    /** The sector splits the finished lap was scored on, and the bests it
+     *  was driven against. Both captured by the lap hook. */
+    this.finishSectors = [];
+    this.finishBestBefore = [];
+    this.lapSectors = null;
+    this.prevBestSectors = null;
+    this.bestSectorsBefore = null;
+    /** Why nothing was written, when nothing was. */
+    this.notSavedNote = null;
+    /** Which end-of-run card is on screen; see `showFinishMenu`. */
+    this._finishToken = 0;
     this.cameraIndex = 0;
     this.assists = { traction: false, abs: false, autoShift: false };
     this.ggTrail = [];
     this.camRoll = 0;
     this.camPitch = 0;
+    // The driver's head, relative to the chassis: outboard lean, fore-and-aft
+    // slide, and the eyes leading into the corner. See `headLatMPerG`.
+    this.headLat = 0;
+    this.headLong = 0;
+    this.headYaw = 0;
     this.bumpPhase = 0;
     this.spinFront = 0;   // integrated wheel angle, for the visible rims
     this.spinRear = 0;
     this.lastConeSound = 0;
+
+    // ---- run recording --------------------------------------------------
+    // Every drive is logged unless the launcher asked for it not to be. The
+    // recorder is created by `restart()`, so a run is exactly one drive from
+    // the line to whatever ended it, and `recorderContext` is allocated once
+    // and mutated in place -- it is written 100 times a second and a fresh
+    // object per sample would be the only garbage this loop makes.
+    this.recorder = null;
+    // Live delta to a reference lap. Created with the course, because its
+    // table is indexed by distance round that course.
+    this.deltaTimer = null;
+    /** Set when a launcher opened this window with `--replay`: closing the
+     *  replay closes the window instead of returning to the launch screen. */
+    this.launchedForReplay = false;
+    this.recorder = null;
+    this.replay = null;      // a Replay while watching a recorded run
+    this.ghost = null;       // a second Replay drawn alongside it
+    this.replayPanel = null;
+    this.recording = true;
+    this.driverName = "";
+    /** The launcher's account id for the driver, when there was a launcher. */
+    this.driverId = null;
+    this.sessionLabel = "";
+    /** Set when a launcher supplied this session's run settings, so the UI can
+     *  say so rather than look like the rig's own settings changed. */
+    this.launchedBy = null;
+    this.lastSavedRun = null;
+    this.saveError = null;
+    this._ctx = { assists: this.assists, t: null, car: null };
 
     this.input.onPadChange = (connected, id) => {
       dom.padStatus.textContent = connected ? shortPadName(id) : "not detected";
@@ -209,7 +313,10 @@ class Game {
   }
 
   async load(trackId) {
+    // Loading a course abandons whatever was being driven on the last one.
+    this.endRun("track-changed");
     const spec = TRACKS.find((t) => t.id === trackId) ?? TRACKS[0];
+    this.trackId = spec.id;
     const [curve, track, cadCar, cadWheel, cadBody] = await Promise.all([
       loadTorqueCurve(),
       spec.kind === "venue" ? loadVenue(spec.url) : loadTrack(spec.url),
@@ -247,6 +354,9 @@ class Game {
       this.syncFfb();
     }
     this.timing = new Timing(track);
+    // A new course means a new reference: a time-at-distance table for the
+    // autocross means nothing on the endurance loop.
+    this.deltaTimer = new DeltaTimer(track.length);
     this.renderer.setTrack(track);
 
     // Remembered across track changes so the file is fetched once.
@@ -335,14 +445,133 @@ class Game {
   }
 
   restart() {
+    // Whatever was being driven is over; bank it before the car moves.
+    this.endRun("restarted");
+    this.hideFinishMenu();
+    // The delta's reference rolls on lap completion whether or not anything
+    // is being recorded, so its hook is installed here rather than with the
+    // recorder's -- a driver with logging off still gets a delta.
+    this.installLapHooks();
     const p = this.track.startPose();
     this.car.respawn(p.x, p.y, p.psi, 0);
     this.track.resetCones();
     // A restart is "try again": the reference the driver is chasing stays.
     this.timing.reset({ keepBest: true });
+    // A restart is a new lap, not a new session: the reference the driver is
+    // chasing survives, exactly as their best time does.
+    this.deltaTimer?.reset();
     this.ggTrail.length = 0;
     this.clock = 0;
     this.started = true;
+    this.beginRun();
+  }
+
+  /**
+   * Route lap completions to everything that cares: the run recorder, and the
+   * delta timer's reference lap.
+   *
+   * One listener, because `Timing.onLap` is a single slot and the recorder is
+   * only sometimes there.
+   */
+  installLapHooks() {
+    if (!this.timing) return;
+    this.timing.onLap = (entry, sectors) => {
+      this.recorder?.recordLap(entry, sectors);
+      // Kept for the end-of-run card, and it has to be taken HERE: this hook
+      // is the last moment the splits exist. `completeLap` clears them for
+      // the next lap before it returns, so reading them back in
+      // `onRunFinished` -- which runs after `Timing.update` has returned --
+      // found an empty array every time.
+      this.lapSectors = sectors.slice();
+      // ...and the bests as they stood BEFORE this lap folded into them, so
+      // a sector can be compared against something other than itself.
+      this.prevBestSectors = this.bestSectorsBefore ?? [];
+      this.bestSectorsBefore = this.timing.bestSectors.slice();
+      // RAW, not the scored total: a cone is a penalty, not a slower lap, and
+      // a driver chasing a reference is chasing the driving.
+      const took = this.deltaTimer?.completeLap(entry.raw);
+      if (took) {
+        this.timing.say(`REFERENCE  ${fmt(entry.raw)}`, 2);
+        // The log has to say what the delta beside it was measured against,
+        // and that changes mid-run the moment a quicker lap takes over.
+        this.recorder?.setReference(this.deltaTimer.describeReference());
+      }
+    };
+  }
+
+  /** Open a recorder for the drive that is about to start. */
+  beginRun() {
+    if (!this.recording || !this.track) { this.recorder = null; return; }
+    const trackId = this.trackId ?? "autocross";
+    this.recorder = new Recorder({
+      runId: newRunId(trackId),
+      track: trackId,
+      trackName: this.track.name,
+      trackKind: this.track.kind ?? "course",
+      trackLengthM: this.track.length,
+      trackClosed: !!this.track.closed,
+      trackSectors: Array.from(this.track.sectors ?? []),
+      trackSource: this.track.source ?? this.track.provenance ?? null,
+      datum: datumFor(trackId),
+      driver: this.driverName || "Unknown",
+      // Who Helios says this is. Absent when the simulator was opened
+      // directly, which is exactly the distinction the leaderboard needs:
+      // a name typed into a text box is not an identity.
+      driverId: this.driverId || null,
+      session: this.sessionLabel || null,
+      profile: this.input.settings?.activeId ?? this.input.profile?.id ?? null,
+      profileName: this.input.profile?.label ?? this.input.profile?.name ?? null,
+      device: this.rigState.wheelName || this.input.nativeName || null,
+      physics: this.car?.native ? "native-1khz" : "javascript",
+      assists: { ...this.assists },
+      setup: snapshotSetup(),
+      etc: this.etc?.points ? JSON.parse(JSON.stringify(this.etc.points)) : null,
+      simVersion: SIM_VERSION,
+    });
+  }
+
+  /**
+   * Close the current recording and write it out. Safe to call at any time
+   * and from anywhere -- a second call is a no-op, and a run too short to
+   * mean anything is dropped rather than filed.
+   */
+  endRun(reason = "ended") {
+    const rec = this.recorder;
+    this.recorder = null;
+    // The lap hook stays: the delta timer needs it even with nothing being
+    // recorded, and `installLapHooks` reads `this.recorder` at call time.
+    if (!rec || rec.finished) return null;
+    rec.finish(reason);
+    if (!rec.worthSaving) {
+      // Out loud. A run vanishing without explanation is how a driver ends up
+      // wondering whether the archive is broken; "no lap completed" is a thing
+      // they can do something about.
+      if (rec.samples > SAMPLE_HZ_FLOOR) {
+        this.timing?.say(`NOT SAVED  ${rec.notSavedReason.toUpperCase()}`, 3);
+      }
+      return null;
+    }
+    const runId = rec.meta.runId;
+    const manifest = rec.toManifest();
+    const csv = rec.toCsv();
+    // Fire and forget: the driver is already on to the next thing, and a
+    // failed write must not take the game down with it.
+    const p = saveRun(runId, manifest, csv)
+      .then((res) => {
+        this.lastSavedRun = { ...res, stats: manifest.stats, track: manifest.trackName };
+        this.saveError = null;
+        updateSession();
+        refreshRuns();
+        return res;
+      })
+      .catch((err) => {
+        console.error("could not save the run", err);
+        this.saveError = String(err?.message ?? err);
+        updateSession();
+        return null;
+      });
+    this.pendingSave = p;
+    return p;
   }
 
   /**
@@ -384,6 +613,11 @@ class Game {
 
   update(dt) {
     this.lastDt = dt;
+    // The sampler is ticked at the END of this frame, but the timing, the cone
+    // strikes and the shifts all happen before that and all want stamping with
+    // the time the frame lands on. Tell the recorder how far ahead the rest of
+    // the frame is about to get.
+    if (this.recorder) this.recorder.frameDt = dt;
     if (this.car?.native) {
       this.input.nativeDevice = this.car.device;
       if (this.rigState.wheelName) this.input.nativeName = this.rigState.wheelName;
@@ -395,6 +629,9 @@ class Game {
     // be mapped through the real ratio rather than an assumed one.
     this.input.carLockDeg = SDM26.maxSteerDeg;
     this.input.carSteeringRatio = SDM26.steeringRatio;
+    // The measured rack: its table and where it stops at the rim.
+    this.input.carSteering = SDM26.steering;
+    this.input.carRimHalfDeg = SDM26.steering.rimLockDeg;
     // For the keyboard's speed-sensitive lock: last frame's speed is fine.
     this.input.carSpeed = this.car.speed;
     this.input.carYawRateDegS = this.car.telemetry.yawRateDegS;
@@ -415,6 +652,15 @@ class Game {
 
     if (this.input.edges.mapEditor) { this.openEtcEditor(); return; }
     if (this.input.edges.home) { this.goHome(); return; }
+    if (this.input.edges.hudDensity) {
+      const d = this.hud.cycleDensity();
+      this.timing?.say(`OVERLAY  ${d.toUpperCase()}`, 1.5);
+    }
+    if (this.input.edges.dashMode) {
+      const m = this.hud.cycleDashMode();
+      this.dom.dashMode && (this.dom.dashMode.value = m);
+      this.timing?.say(`DASH  ${m.toUpperCase()}`, 1.5);
+    }
     if (this.input.edges.pause && !this.swallowPauseEdge) this.setPaused(!this.paused);
     this.swallowPauseEdge = false;
     // The pause overlay offers a restart, so it has to work from there.
@@ -431,6 +677,13 @@ class Game {
       const item = this.setup.nudge(e.setupUp ? 1 : -1, this.input.setupHoldScale, this.clock);
       this.announceSetup(item);
       this.pushParams();
+      // A setup change mid-run is part of the run. Without this the manifest
+      // carries the values the run STARTED with and quietly disagrees with the
+      // telemetry from the moment the driver touches the d-pad -- which is
+      // exactly when somebody will be trying to work out what changed.
+      this.recorder?.event("setup", {
+        item: item.short, value: round3(item.get()), unit: item.unit,
+      });
     }
 
     if (this.input.edges.camera) {
@@ -479,7 +732,12 @@ class Game {
       this.car.frame.offTrack = !!this.loc && !this.loc.onTrack && this.car.speed > 2;
       this.car.frame.rimDeg = this.input.rim.deg;
       this.car.frame.halfLockDeg = this.input.rim.halfLockDeg;
-    } else if (this.assists.traction) {
+      this.car.frame.launch = !!inp.launch;
+    } else {
+      // Browser build: the JS powertrain holds the launch state directly.
+      this.powertrain.setLaunch(!!inp.launch);
+    }
+    if (!this.car.native && this.assists.traction) {
       const over = tel.kappaR - 0.13;
       if (over > 0) throttle = Math.max(0.1, throttle * (1 - Math.min(0.9, over * 6)));
     }
@@ -512,8 +770,23 @@ class Game {
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
     const hits = this.track.strikeCones(this.pose(), bodyBoxFor(SDM26));
     const moving = this.car.speed > 0.6;
+    const wasStaged = this.timing.state === "staged";
+    const wasRunning = this.timing.state === "running";
     this.timing.update(dt, loc, moving, hits);
+    // Autocross ends at the finish line. Everything that happens there is in
+    // `onRunFinished`; a closed course never reaches this.
+    if (wasRunning && this.timing.state === "finished") this.onRunFinished();
+    if (this.finishAt != null && this.clock >= this.finishAt) this.showFinishMenu();
+    // The green flag IS the line crossing, and it is the only one the recorder
+    // cannot infer for itself.
+    if (wasStaged && this.timing.state === "running") this.recorder?.markLine();
     this.loc = loc;
+    // The delta wants distance round the course and time into THIS lap, and
+    // only once the lap is actually running -- staged on the line, every
+    // sample would land in the first bin and read as an enormous loss.
+    if (this.timing.state === "running") {
+      this.deltaTimer?.update(loc.s, this.timing.lapTime);
+    }
 
     if (hits > 0) {
       this.audio.coneHit();
@@ -579,11 +852,108 @@ class Game {
     const k = Math.min(1, dt * 9);
     this.camRoll += (((tel.ayG * SDM26.rollGradientDegG) * Math.PI) / 180 - this.camRoll) * k;
     this.camPitch += (((tel.axG * SDM26.pitchGradientDegG) * Math.PI) / 180 - this.camPitch) * k;
+    // ---- the driver's head, which is not bolted to the chassis ----
+    // Slower than the chassis attitude above: a body on a six-point belt is
+    // not a spring-mounted mass, it arrives late and settles late. Positive
+    // ay is a LEFT turn and the body is thrown to the driver's RIGHT, which
+    // is +z in the chassis frame; braking is negative ax and throws the body
+    // forward, which is +x.
+    const hk = Math.min(1, dt * 6);
+    this.headLat += (tel.ayG * SDM26.headLatMPerG - this.headLat) * hk;
+    this.headLong += (-tel.axG * SDM26.headLongMPerG - this.headLong) * hk;
+    this.headYaw += (((tel.ayG * SDM26.headYawDegPerG) * Math.PI) / 180 - this.headYaw) * hk;
     this.bumpPhase += dt * (2 + this.car.speed * 0.55);
 
     // ---- g-g trail ----
     this.ggTrail.push({ ax: tel.axG, ay: tel.ayG });
     if (this.ggTrail.length > 110) this.ggTrail.shift();
+
+    // ---- the log ----
+    // Last, so every channel is the settled value for this step rather than
+    // whatever it held halfway through it.
+    if (this.recorder) {
+      this.recorder.tick(dt, this.recorderContext(dt, inp, throttle, brake, loc, hits));
+      // An autocross run ends at the finish line. Bank it there: the driver
+      // has no reason to press anything, and the run that made the time is
+      // the one worth keeping.
+      if (this.timing.state === "finished") this.endRun("finished");
+    }
+  }
+
+  /**
+   * Everything the recorder's columns read, in one object that is allocated
+   * once and rewritten in place. At 100 Hz a fresh object per sample is the
+   * only garbage the driving loop would produce.
+   */
+  recorderContext(dt, inp, throttle, brake, loc, hits) {
+    const c = this._ctx;
+    const tel = this.car.telemetry;
+    const pt = this.powertrain;
+    const tm = this.timing;
+    c.t = tel;
+    c.car = this.car;
+    c.speed = this.car.speed;
+    c.rpm = pt.engineRpm;
+    // Gear is 0-based internally and 1-based to a driver, which is also what
+    // the car's real logger writes.
+    c.gear = pt.gear + 1;
+    c.gearRatio = typeof pt.ratio === "function" ? pt.ratio() : 0;
+    c.pedal = this.pedal;
+    c.plate = throttle;
+    c.brake = brake;
+    c.brakeBiasFront = SDM26.brakeBiasFront;
+    c.rimDeg = this.input.rim?.deg ?? 0;
+    c.roadWheelDeg = tel.steerDeg ?? (this.car.delta * 180) / Math.PI;
+    c.steerInput = inp.steer;
+    c.ffbCommand = this.ffb.last?.command ?? 0;
+    c.ffbClipped = !!this.ffb.last?.clipped;
+    // The JS model runs two rear wheels through the differential; the native
+    // rig reports the axle mean.
+    c.wRL = this.car.wRL ?? this.car.wR;
+    c.wRR = this.car.wRR ?? this.car.wR;
+    c.spinFront = this.spinFront;
+    c.spinRear = this.spinRear;
+    c.s = loc.s ?? 0;
+    c.lateral = loc.lateral ?? 0;
+    c.headingErrorDeg = ((loc.headingErrorRad ?? 0) * 180) / Math.PI;
+    c.curvature = loc.curvature ?? 0;
+    c.onTrack = !!loc.onTrack;
+    c.lap = tm.lap;
+    c.lapTime = tm.lapTime;
+    c.sector = tm.sectorIndex + 1;
+    c.cones = tm.cones;
+    c.offCourse = tm.offCourse;
+    c.penaltyS = tm.penaltyS;
+    // The delta the HUD is showing this instant, not a reconstruction.
+    const dt2 = this.deltaTimer;
+    c.deltaValid = !!(dt2 && dt2.hasReference && dt2.deltaValid);
+    c.deltaS = c.deltaValid ? dt2.delta : 0;
+    c.assists = this.assists;
+    // An excursion is one event, logged where it started, not one per frame.
+    if (!c.onTrack && c.speed > 2 && !this._wasOff) {
+      this._wasOff = true;
+      this.recorder.event("off-course", {
+        lap: tm.lap, x: round3(this.car.X), y: round3(this.car.Y), s: round3(c.s),
+        lateral: round3(c.lateral),
+      });
+    } else if (c.onTrack && this._wasOff) {
+      this._wasOff = false;
+    }
+    if (c.gear !== this._lastGear) {
+      if (this._lastGear != null) {
+        this.recorder.event("shift", { from: this._lastGear, to: c.gear, rpm: Math.round(c.rpm), s: round3(c.s) });
+      }
+      this._lastGear = c.gear;
+    }
+    c.launch = !!inp.launch;
+    c.clutchSlipRpm = pt.clutchSlipRpm ?? 0;
+    c.shifting = (pt.shiftTimer ?? 0) > 0;
+    if (hits > 0) {
+      this.recorder.event("cone", {
+        lap: tm.lap, n: hits, x: round3(this.car.X), y: round3(this.car.Y), s: round3(c.s),
+      });
+    }
+    return c;
   }
 
   render() {
@@ -627,9 +997,13 @@ class Game {
         pitchRad: this.camPitch,
       },
       view: {
-        ahead: cam.live ? SDM26.eyeAheadOfCgM : cam.ahead,
+        // Head motion rides on the cockpit and nose views, which are bolted to
+        // the chassis. The chase and walkaround cameras are not in the car.
+        ahead: (cam.live ? SDM26.eyeAheadOfCgM : cam.ahead) + (cam.rigid ? this.headLong : 0),
         height: cam.orbit ? (this.orbitHeight ?? cam.height)
               : cam.live ? SDM26.eyeHeightM : cam.height,
+        lateral: cam.rigid ? this.headLat : 0,
+        yawOffset: cam.rigid ? this.headYaw : 0,
         pitchOffset: cam.pitch,
         rigid: cam.rigid,
         orbit: cam.orbit,
@@ -647,15 +1021,30 @@ class Game {
         spinRear: this.spinRear,
         rimFade,
       },
+      ghost: this.ghost ? this.ghostPose() : null,
       heaveM: bump - Math.abs(tel.axG) * (SDM26.heaveMmG / 1000) * 0.5 * vib,
-      fovBoost: cam.orbit ? 0 : Math.min(10, this.car.speed * 0.42),
+      // A little FOV with speed helps the sense of motion; a lot of it is a
+      // game trope that undoes the honest framing above, so this is 4 deg at
+      // 25 m/s rather than the 10 it used to reach.
+      fovBoost: cam.orbit ? 0 : Math.min(4, this.car.speed * 0.16),
     });
 
-    // No HUD over the launch screen: the scene is the backdrop there.
-    if (!this.dom.menu.hidden) { this.hud.clear(); return; }
+    // No HUD over the launch screen: the scene is the backdrop there. Nor
+    // over a replay -- the replay overlay is a better instrument panel than
+    // the driving HUD, and two sets of lap times on one screen is one too many.
+    if (!this.dom.menu.hidden || this.replay) { this.hud.clear(); return; }
 
     const t = this.timing;
     const last = t.laps.length ? t.laps[t.laps.length - 1] : null;
+    // Which dash the driver is actually looking at.
+    //
+    // From the cockpit the real one is on the scuttle in front of them, and a
+    // second copy pasted over the screen is exactly the clutter this module
+    // has been trying to get rid of. From every other camera the real one is a
+    // postage stamp or behind them, so the overlay is the only dash there is.
+    const inCockpit = CAMERAS[this.cameraIndex]?.name === "Cockpit";
+    this.hud.overlayDash = !inCockpit;
+
     this.hud.draw({
       track: this.track,
       trackName: this.track.name,
@@ -689,10 +1078,72 @@ class Game {
       ayG: tel.ayG,
       ggTrail: this.ggTrail,
       balance: tel.balance,
+      delta: this.deltaTimer?.state() ?? null,
       message: t.message,
       paused: this.paused,
       tractionControl: this.assists.traction,
     });
+
+    // And the same layout onto the car's own panel.
+    this.paintDash(this.hud.lastState);
+  }
+
+  /**
+   * Repaint the car's dash panel, at the panel's own rate.
+   *
+   * Throttled rather than drawn every frame: it is a 768x394 canvas plus a
+   * texture upload, nobody can read a dash changing faster than this, and at
+   * 144 fps the difference is most of a millisecond a frame.
+   */
+  paintDash(state) {
+    if (!state) return;
+    const now = performance.now();
+    if (now - (this._dashPainted ?? -1e9) < DASH_REFRESH_MS) return;
+    this._dashPainted = now;
+    // `chrome: false`: on the car the case, its bezel and its buttons are
+    // geometry, so the texture is the DISPLAY only.
+    this.renderer.updateDashPanel(
+      (ctx, x, y, w, h) => this.hud.drawDash(ctx, x, y, w, h, state, { chrome: false }),
+    );
+  }
+
+  /**
+   * The dash as it read at this instant of a recorded run.
+   *
+   * A replay clears the HUD -- the replay panel is the interface -- so without
+   * this the car's own dash sits frozen on whatever the last live session left
+   * on it, which is worse than blank: it is a plausible set of numbers
+   * belonging to a different drive. Everything here is read out of the log,
+   * including the delta the driver was actually looking at.
+   */
+  replayDashState() {
+    const r = this.replay;
+    if (!r) return null;
+    const lap = r.lapAt();
+    const deltaValid = r.value("sim.delta_valid") > 0.5;
+    return {
+      trackName: this.track?.name ?? "",
+      rpm: r.value("engine.rpm"),
+      revLimit: SDM26.revLimitRpm,
+      shiftRpm: this.powertrain?.optimalUpshiftRpm?.() ?? SDM26.revLimitRpm * 0.9,
+      peakTorqueRpm: this.powertrain?.peakTorque?.rpm ?? 0,
+      peakPowerRpm: this.powertrain?.peakPower?.rpm ?? 0,
+      gear: Math.round(r.valueAt("engine.gear")),
+      shifting: r.valueAt("sim.shifting") > 0.5,
+      speedKph: r.value("drivetrain.vehicle_speed"),
+      brake: r.value("brake.driver_load") / 100,
+      ayG: r.value("imu.lat_g"),
+      lap: Math.round(r.valueAt("sim.lap")),
+      lapTimeText: fmt(r.value("sim.lap_time_s")),
+      lastLapText: lap ? fmt(lap.total) : "--.---",
+      bestLapText: r.bestLap ? fmt(r.bestLap.total) : "--.---",
+      cones: Math.round(r.valueAt("sim.cones_lap")),
+      offCourse: Math.round(r.valueAt("sim.off_course_lap")),
+      penaltyS: r.value("sim.penalty_s"),
+      tractionControl: r.valueAt("sim.traction_control") > 0.5,
+      // The live delta, exactly as logged -- see `sim.delta_valid`.
+      delta: { hasReference: deltaValid, delta: deltaValid ? r.value("sim.delta_s") : null },
+    };
   }
 
   announceSetup(item) {
@@ -707,6 +1158,11 @@ class Game {
 
   /** Back to the home screen, with the run left paused behind it. */
   goHome() {
+    // The run is still resumable, but it is also finished as far as the log
+    // is concerned: a driver who walks away must still find their telemetry.
+    // Resuming opens a fresh recording rather than reopening this one.
+    this.endRun("left-the-run");
+    this.hideFinishMenu();
     this.setPaused(true);
     this.dom.pauseMenu.hidden = true;
     this.dom.menu.hidden = false;
@@ -716,14 +1172,436 @@ class Game {
     this.dom.restartBtn.hidden = false;
   }
 
+  /**
+   * Watch a recorded run.
+   *
+   * The course is loaded first, because a replay is only meaningful against
+   * the geometry it was set on -- and because the renderer needs the track it
+   * is about to draw the car around. Any live run is banked before the switch.
+   */
+  async enterReplay(runId, ghostId = null) {
+    this.endRun("replay-opened");
+    this.hideFinishMenu();
+    const { manifest, telemetry } = await loadRun(runId);
+    if (manifest.track && manifest.track !== this.trackId) {
+      this.dom.trackSel.value = manifest.track;
+      await this.load(manifest.track);
+      drawCoursePlan(this.dom.coursePlan, this.track);
+    }
+    const replay = new Replay(manifest, parseTelemetry(telemetry));
+    if (!replay.rows) throw new Error("that run has no telemetry in it");
+
+    this.exitReplay({ keepMenu: true });
+    this.replay = replay;
+    // Nothing is being driven, so nothing should be recorded, the rig must
+    // not be holding the car against a model that is no longer stepping, and
+    // the cones should show the state the run left them in rather than the
+    // last live drive's.
+    this.recorder = null;
+    this.track.resetCones();
+    this.holdNative();
+
+    this.dom.menu.hidden = true;
+    this.dom.pauseMenu.hidden = true;
+    this.dom.replayOverlay.hidden = false;
+    this.cameraIndex = 2; // chase: a replay is watched, not driven
+    this.audio.setEnabled(false);
+    this.syncPointer();
+
+    this.replayPanel = new ReplayPanel(this.dom.replayOverlay, replay, {
+      onExit: () => { this.exitReplay(); },
+      onCamera: () => {
+        this.cameraIndex = (this.cameraIndex + 1) % CAMERAS.length;
+      },
+    });
+    if (ghostId) await this.loadGhost(ghostId);
+    this.applyReplayFrame();
+    return replay;
+  }
+
+  /**
+   * Load the delta's reference lap from a recorded run.
+   *
+   * Takes the run's best lap, because that is the one worth chasing, and
+   * refuses a run set on a different course -- a time-at-distance table means
+   * nothing anywhere but the course it was driven on.
+   */
+  async loadReference(runId) {
+    try {
+      const { manifest, telemetry } = await loadRun(runId);
+      if (manifest.track && this.trackId && manifest.track !== this.trackId) {
+        throw new Error(`that run is on ${manifest.trackName ?? manifest.track}, not this course`);
+      }
+      const laps = manifest.laps ?? [];
+      const best = laps.reduce((b, l) => (b == null || l.raw < b.raw ? l : b), null);
+      if (!best) throw new Error("that run has no completed lap");
+      const tel = parseTelemetry(telemetry);
+      const table = referenceFromRun(tel, best, this.track.length);
+      if (!table) throw new Error("that lap does not cover the course");
+      const label = manifest.driver ? `${manifest.driver}` : "reference";
+      this.deltaTimer?.loadReference(table, best.raw, label);
+      this.recorder?.setReference(this.deltaTimer?.describeReference());
+      this.timing?.say(`REFERENCE  ${label} ${fmt(best.raw)}`, 3);
+      return true;
+    } catch (err) {
+      console.error("could not load the reference lap", err);
+      this.timing?.say("REFERENCE LAP NOT LOADED", 3);
+      return false;
+    }
+  }
+
+  /** Put a second recorded run in the scene beside the one being watched. */
+  async loadGhost(runId) {
+    try {
+      const { manifest, telemetry } = await loadRun(runId);
+      // A ghost from another course is not a ghost, it is a car driving through
+      // the scenery: the pose channels are in that course's own frame. Helios's
+      // picker only offers same-course runs, but `--ghost` on the command line
+      // and the browser dev loop do not go through it.
+      if (manifest.track && this.trackId && manifest.track !== this.trackId) {
+        throw new Error(`that run is on ${manifest.trackName ?? manifest.track}, not this course`);
+      }
+      const g = new Replay(manifest, parseTelemetry(telemetry));
+      if (!g.rows) throw new Error("the ghost run has no telemetry");
+      this.ghost = g;
+      this.replayPanel?.setGhost(g);
+    } catch (err) {
+      console.error("could not load the ghost", err);
+      this.ghost = null;
+      this.replayPanel?.setGhost(null);
+      this.timing?.say("GHOST NOT LOADED", 2.5);
+    }
+  }
+
+  /**
+   * Close the replay.
+   *
+   * Where "close" goes depends on how the window got here. Opened from the
+   * sim's own Runs tab, it goes back to the launch screen. But when HELIOS
+   * launched it with `--replay`, this window exists only to watch that one run
+   * -- the user came from the Runs table in another app, and dropping them on
+   * a launch screen they never asked for means closing a second window to get
+   * back to where they were. So that case closes the window, which puts Helios
+   * back in front.
+   */
+  exitReplay({ keepMenu = false } = {}) {
+    if (!this.replay && !this.replayPanel) return;
+    if (!keepMenu && this.launchedForReplay) {
+      this.closeWindow();
+      return;
+    }
+    this.replay = null;
+    this.ghost = null;
+    this.replayPanel?.destroy();
+    this.replayPanel = null;
+    this.dom.replayOverlay.hidden = true;
+    if (!keepMenu) {
+      this.dom.menu.hidden = false;
+      this.started = false;
+      this.dom.startBtn.textContent = "Start engine";
+      this.dom.restartBtn.hidden = true;
+      this.hud.clear();
+      refreshRuns();
+    }
+  }
+
+  /**
+   * Ask the shell to close. Falls back to leaving the replay on screen in a
+   * browser, where there is no window to close and `window.close()` on a page
+   * the script did not open is a no-op.
+   */
+  closeWindow() {
+    if (!isDesktop) {
+      this.exitReplay({ keepMenu: true });
+      this.dom.menu.hidden = false;
+      this.started = false;
+      return;
+    }
+    closeAppWindow();
+  }
+
+  /** True while a recorded run is on screen. */
+  get replaying() { return !!this.replay; }
+
+  /**
+   * One replay frame: advance the playback clock, then write the sampled
+   * state into exactly the fields the renderer and the HUD already read. That
+   * is the whole trick -- nothing downstream knows it is watching a recording.
+   */
+  replayFrame(dt) {
+    const r = this.replay;
+    if (!r) return;
+    r.advance(dt);
+    this.applyReplayFrame();
+    this.replayPanel?.paint(dt);
+  }
+
+  applyReplayFrame() {
+    const r = this.replay;
+    if (!r) return;
+    const s = r.readSample();
+    const car = this.car;
+    car.X = s.x;
+    car.Y = s.y;
+    car.psi = s.yawRad;
+    car.delta = s.steerRad;
+    car.u = r.value("sim.vel_long");
+    car.v = r.value("sim.vel_lat");
+    car.wF = (r.value("drivetrain.wheel_speed_fl") * Math.PI * 2) / 60;
+    // The JS model's `wR` is a getter over the two rear wheel states (the
+    // differential lives between them), so it has to be written through those;
+    // the native car has a plain `wR`.
+    const wRL = (r.value("drivetrain.wheel_speed_rl") * Math.PI * 2) / 60;
+    const wRR = (r.value("drivetrain.wheel_speed_rr") * Math.PI * 2) / 60;
+    if ("wRL" in car) { car.wRL = wRL; car.wRR = wRR; } else { car.wR = (wRL + wRR) / 2; }
+    this.spinFront = s.spinFront;
+    this.spinRear = s.spinRear;
+    this.camRoll = s.rollRad;
+    this.camPitch = s.pitchRad;
+    // The head is a filter on lateral and longitudinal g, and the log has
+    // both: recompute rather than record it, so a change to how the driver's
+    // head moves shows up in old runs too.
+    const ay = r.value("imu.lat_g");
+    const ax = r.value("imu.long_g");
+    this.headLat = ay * SDM26.headLatMPerG;
+    this.headLong = -ax * SDM26.headLongMPerG;
+    this.headYaw = ((ay * SDM26.headYawDegPerG) * Math.PI) / 180;
+    this.bumpPhase += (this.lastDt ?? 1 / 60) * (2 + Math.abs(car.u) * 0.55);
+    // The car's own dash, from the log rather than from a live session that
+    // ended twenty minutes ago.
+    this.paintDash(this.replayDashState());
+
+    // The telemetry the HUD reads. Only what it draws is filled in; the rest
+    // of the object keeps whatever the last live run left, which nothing on
+    // screen looks at during a replay.
+    const tel = car.telemetry;
+    tel.axG = ax;
+    tel.ayG = ay;
+    tel.balance = r.value("sim.balance");
+    tel.yawRateDegS = r.value("imu.yaw_rate");
+    tel.bodySlipDeg = r.value("sim.body_slip_deg");
+    tel.utilF = r.value("sim.util_front");
+    tel.utilR = r.value("sim.util_rear");
+
+    this.pedal = r.value("engine.aps") / 100;
+    this.plate = r.value("engine.tps") / 100;
+    this.brakeApplied = r.value("brake.driver_load") / 100;
+
+    // The g-g trail is the last couple of seconds of the run being watched,
+    // rebuilt on a seek so scrubbing backwards does not leave a stale smear.
+    this.ggTrail.length = 0;
+    for (let k = 24; k >= 0; k--) {
+      const tt = r.t - k * 0.08;
+      if (tt < 0) continue;
+      this.ggTrail.push({ ax: r.value("imu.long_g", tt), ay: r.value("imu.lat_g", tt) });
+    }
+  }
+
+  /**
+   * The ghost's pose for the renderer.
+   *
+   * Placed by TIME into the lap, not by distance. Distance is the right axis
+   * for the gap NUMBER -- "how long had each car taken to get here" is the
+   * only comparison that survives two different lines -- but it is the wrong
+   * one for the car you can see: it pins the ghost alongside you all lap and
+   * the only thing a driver learns is that both cars went the same way round.
+   * On the clock the ghost pulls away where it was quicker and falls back
+   * where it was not, which is the whole reason to draw it.
+   */
+  ghostPose() {
+    const g = this.ghost;
+    const r = this.replay;
+    if (!g || !r) return null;
+    const mine = r.lapAt();
+    const theirs = g.bestLap ?? g.laps[0];
+    // `lapAt` is null in two places, and the absolute replay clock is wrong in
+    // both. During STAGING -- however long the driver sat waiting for green --
+    // it put the ghost that many seconds into its own lap, so it drove off
+    // while the watched car stood still and then snapped back on the flag. In
+    // the one-frame gap BETWEEN laps it jumped to the whole elapsed time of
+    // the run, which runs past the ghost's duration and made the ghost vanish
+    // for a frame at every lap boundary.
+    //
+    // Before the first lap the honest answer is "the ghost has not started
+    // either"; between laps it is "carry on from where the last lap left off".
+    let into;
+    if (mine) into = r.t - (mine.startedAtS ?? 0);
+    else if (r.laps.length && r.t < (r.laps[0].startedAtS ?? 0)) into = 0;
+    else into = this._lastGhostInto ?? 0;
+    this._lastGhostInto = into;
+    const t = theirs ? (theirs.startedAtS ?? 0) + into : into;
+    if (t > g.duration + 0.5) return null;   // the ghost's run has ended
+    g.seek(Math.min(t, g.duration));
+    const gs = g.readSample();
+    // Two cars in the same place at the same instant is not a comparison, it
+    // is z-fighting. Below a car's length apart the ghost has nothing to say,
+    // so it is not drawn -- which is also exactly the moment the gap readout
+    // beside it is telling the driver they are level.
+    if (Math.hypot(gs.x - this.car.X, gs.y - this.car.Y) < 2.2) return null;
+    return {
+      x: gs.x, y: gs.y, psi: gs.yawRad,
+      rollRad: gs.rollRad, pitchRad: gs.pitchRad,
+      steerRad: gs.steerRad, spinFront: gs.spinFront, spinRear: gs.spinRear,
+      color: [0.24, 0.62, 0.95], tint: 0.8,
+    };
+  }
+
+  /**
+   * The car has crossed the autocross finish line.
+   *
+   * Two things happen, in this order and a couple of seconds apart:
+   *
+   *   1. The run is banked NOW. The timed run ended at the line, so the log
+   *      ends at the line too -- whatever the car does rolling to a stop is
+   *      not part of it, and a driver who then quits out must still find
+   *      their telemetry.
+   *   2. The card comes up after a short roll-out. Freezing the car the
+   *      instant the nose crosses is how you lose the only moment the driver
+   *      wanted -- seeing FINISH and their time while still braking. Two
+   *      seconds is enough to read it and not enough to get bored.
+   */
+  onRunFinished() {
+    this.finishRun = this.timing.laps[this.timing.laps.length - 1] ?? null;
+    // Captured by the lap hook a moment ago; see `installLapHooks`.
+    this.finishSectors = this.lapSectors ?? [];
+    this.finishBestBefore = this.prevBestSectors ?? [];
+    const rec = this.recorder;
+    this.notSavedNote = rec && !rec.worthSaving ? rec.notSavedReason : null;
+    this.finishSave = this.endRun("finished");
+    this.finishAt = this.clock + FINISH_ROLLOUT_S;
+  }
+
+  /** The end-of-run card: the score, and every way out of the run. */
+  showFinishMenu() {
+    this.finishAt = null;
+    if (this.finished) return;
+    this.finished = true;
+    // Which card this is. The save below lands asynchronously, and `finished`
+    // alone is true of ANY card -- so a slow write (the runs directory can be
+    // a network share) could land while the NEXT run's card was up and point
+    // Watch at the previous run.
+    const token = ++this._finishToken;
+    const d = this.dom;
+    const entry = this.finishRun;
+    d.finishHead.textContent =
+      `${this.track?.name ?? ""}${this.driverName ? `  --  ${this.driverName}` : ""}`;
+
+    // The score, laid out the way the scoring sheet is: what you drove, what
+    // it cost, what it counts as.
+    const rows = [];
+    const row = (k, v, cls = "") => rows.push(
+      `<span class="k${cls ? " " + cls : ""}">${k}</span><span class="v">${v}</span>`,
+    );
+    if (entry) {
+      row("Raw time", fmt(entry.raw));
+      if (entry.cones > 0) {
+        rows.push('<span class="k">Cones</span>');
+        rows.push(`<span class="v pen">${entry.cones} x 2.000 = +${(entry.cones * CONE_PENALTY_S).toFixed(3)}</span>`);
+      }
+      if (entry.off > 0) {
+        rows.push('<span class="k">Off course</span>');
+        rows.push(`<span class="v pen">${entry.off} x 10.000 = +${(entry.off * OFF_COURSE_PENALTY_S).toFixed(3)}</span>`);
+      }
+      rows.push('<span class="rule"></span>');
+      rows.push('<span class="k total">Scored</span>');
+      rows.push(`<span class="v total">${fmt(entry.total)}</span>`);
+
+      // The sectors this run was scored on, against the best each has ever
+      // been driven. For a team working out where a lap went, this is the
+      // most useful thing on the screen -- and it was being computed and then
+      // thrown away the moment the card appeared.
+      const splits = this.finishSectors ?? [];
+      if (splits.length > 1) {
+        rows.push('<span class="rule"></span>');
+        for (let i = 0; i < splits.length; i++) {
+          const v = splits[i];
+          if (v == null) {
+            rows.push(`<span class="k">S${i + 1}</span><span class="v">--.---</span>`);
+            continue;
+          }
+          // Against the best as it stood BEFORE this lap: a sector that just
+          // set the best is its own reference and would always read +0.000.
+          const best = this.finishBestBefore[i];
+          const d2 = best == null || best >= v ? null : v - best;
+          const tag = d2 == null
+            ? '<span class="v" style="color:var(--gold)">best</span>'
+            : `<span class="v pen">+${d2.toFixed(3)}</span>`;
+          rows.push(`<span class="k">S${i + 1}  ${fmt(v)}</span>${tag}`);
+        }
+      }
+      const best = this.timing.best;
+      if (best && best !== entry) {
+        row("Best this session", fmt(best.total));
+      }
+    } else {
+      row("Result", "not scored");
+    }
+    d.finishStats.innerHTML = rows.join("");
+
+    // The replay is only offered once the run is actually on disk, and only
+    // when there was something worth saving -- a lap that was never written
+    // cannot be watched, and a button that errors is worse than no button.
+    d.finishWatch.hidden = true;
+    const save = this.finishSave;
+    if (save) {
+      save.then((res) => {
+        if (res?.runId && this._finishToken === token) {
+          this.finishRunId = res.runId;
+          d.finishWatch.hidden = false;
+        }
+      }).catch(() => { /* the save already reported itself */ });
+    } else if (entry) {
+      // There was a lap but nothing was written. Say so on the card rather
+      // than leaving a button quietly missing.
+      rows.push('<span class="k">Replay</span>');
+      rows.push(`<span class="v">${this.notSavedNote ?? "not saved"}</span>`);
+      d.finishStats.innerHTML = rows.join("");
+    }
+
+    d.finishMenu.hidden = false;
+    this.setPaused(true);
+    // So Enter and Space do the obvious thing, and Tab walks the card.
+    d.finishAgain.focus();
+  }
+
+  hideFinishMenu() {
+    this.finishAt = null;
+    if (!this.finished) return;
+    this.finished = false;
+    this.finishRunId = null;
+    this.dom.finishMenu.hidden = true;
+  }
+
   /** Keep the rig informed while nothing is being driven. */
   holdNative() {
     if (this.car?.native) this.car.hold();
   }
 
+  /**
+   * Write the driver's actual bindings into the cards' key chips.
+   *
+   * The chips used to be typed into the HTML, which was fine while the keys
+   * were fixed and became a lie the moment they were rebindable: a card that
+   * says "Esc" to somebody who moved pause to a paddle is worse than a card
+   * with no hint at all. `data-key` on a chip names the action; the rest is
+   * whatever that action is bound to now.
+   */
+  syncMenuKeys() {
+    const K = this.input?.profile?.keys ?? {};
+    for (const el of document.querySelectorAll("[data-key]")) {
+      const codes = K[el.dataset.key] ?? [];
+      // Only the first: the chip is a reminder, not the binding table.
+      el.textContent = codes.length ? keyLabel(codes[0]) : "";
+    }
+  }
+
   setPaused(on) {
     this.paused = on;
-    this.dom.pauseMenu.hidden = !on;
+    if (on) this.syncMenuKeys();
+    // Leaving the pause also leaves the finish card: Esc means "back to the
+    // car" from either of them, and the run is over either way.
+    if (!on) this.hideFinishMenu();
+    this.dom.pauseMenu.hidden = !on || this.finished;
     // A paused engine is silent, not frozen at the last operating point.
     this.audio.setRunning(!on);
     this.input.driving = this.driving;
@@ -747,6 +1625,7 @@ class Game {
 
   /** True while the driver is actually in the run (not menu, pause, editor). */
   get driving() {
+    if (this.replay) return false;
     return this.started && this.dom.menu.hidden && !this.paused && !this.etcEditor.isOpen;
   }
 }
@@ -763,17 +1642,24 @@ const dom = {
   absToggle: document.getElementById("abs"),
   autoToggle: document.getElementById("auto"),
   audioToggle: document.getElementById("sound"),
+  dashMode: document.getElementById("dashMode"),
   padStatus: document.getElementById("padStatus"),
   pauseMenu: document.getElementById("pauseMenu"),
   loadNote: document.getElementById("loadNote"),
   specs: document.getElementById("specs"),
   etcOverlay: document.getElementById("etcOverlay"),
+  replayOverlay: document.getElementById("replayOverlay"),
   etcSummary: document.getElementById("etcSummary"),
   etcBtn: document.getElementById("etcBtn"),
   vehicle: document.getElementById("vehicle"),
   resetParams: document.getElementById("resetParams"),
   paramNote: document.getElementById("paramNote"),
   restartBtn: document.getElementById("restartBtn"),
+  finishMenu: document.getElementById("finishMenu"),
+  finishHead: document.getElementById("finishHead"),
+  finishStats: document.getElementById("finishStats"),
+  finishAgain: document.getElementById("finishAgain"),
+  finishWatch: document.getElementById("finishWatch"),
   coursePlan: document.getElementById("coursePlan"),
   sCourse: document.getElementById("sCourse"),
   sCar: document.getElementById("sCar"),
@@ -782,7 +1668,39 @@ const dom = {
   sControls: document.getElementById("sControls"),
   carBadge: document.getElementById("carBadge"),
   paramBadge: document.getElementById("paramBadge"),
+  driverName: document.getElementById("driverName"),
+  sessionName: document.getElementById("sessionName"),
+  recordToggle: document.getElementById("recordToggle"),
+  runsDir: document.getElementById("runsDir"),
+  runsList: document.getElementById("runsList"),
+  runsBadge: document.getElementById("runsBadge"),
+  sDriver: document.getElementById("sDriver"),
+  sRecording: document.getElementById("sRecording"),
 };
+
+// ---- who is driving, remembered between launches ------------------------
+const DRIVER_KEY = "fsae-sim.driver";
+const SESSION_KEY = "fsae-sim.session";
+const RECORD_KEY = "fsae-sim.record";
+
+export function saveDriver(name) {
+  try { localStorage.setItem(DRIVER_KEY, name); } catch { /* ignore */ }
+}
+function loadDriver() {
+  try { return localStorage.getItem(DRIVER_KEY) ?? ""; } catch { return ""; }
+}
+function saveSessionLabel(label) {
+  try { localStorage.setItem(SESSION_KEY, label); } catch { /* ignore */ }
+}
+function loadSessionLabel() {
+  try { return localStorage.getItem(SESSION_KEY) ?? ""; } catch { return ""; }
+}
+function saveRecordPref(on) {
+  try { localStorage.setItem(RECORD_KEY, on ? "1" : "0"); } catch { /* ignore */ }
+}
+function loadRecordPref() {
+  try { return localStorage.getItem(RECORD_KEY) !== "0"; } catch { return true; }
+}
 
 /** Tabs on the launch screen. Every pane stays in the DOM; only one shows. */
 function wireTabs() {
@@ -843,6 +1761,25 @@ function updateSession() {
 
   const profile = game.input?.settings?.active?.();
   if (profile) dom.sControls.innerHTML = `<b>${esc(profile.label)}</b>`;
+
+  if (dom.sDriver) {
+    const from = game.launchedBy ? `<small class="changed">set by the launcher, this session only</small>` : "";
+    dom.sDriver.innerHTML = game.driverName
+      ? `<b>${esc(game.driverName)}</b>${game.sessionLabel ? `<small>${esc(game.sessionLabel)}</small>` : ""}${from}`
+      : `<span class="off">unnamed</span>`;
+  }
+  if (dom.sRecording) {
+    if (!game.recording) {
+      dom.sRecording.innerHTML = `<span class="off">off</span>`;
+    } else if (game.saveError) {
+      dom.sRecording.innerHTML = `<b class="changed">could not save</b><small>${esc(game.saveError)}</small>`;
+    } else if (game.lastSavedRun) {
+      const best = game.lastSavedRun.stats?.bestLapS;
+      dom.sRecording.innerHTML = `<b>on</b><small>last run saved${best != null ? `, best ${fmt(best)}` : ""}</small>`;
+    } else {
+      dom.sRecording.innerHTML = `<b>on</b><small>100 Hz, full telemetry</small>`;
+    }
+  }
 }
 
 const PARAM_KEY = "fsae-sim.params";
@@ -979,8 +1916,24 @@ async function boot() {
   const holdOnLeave = () => { if (game.driving) game.setPaused(true); game.holdNative(); };
   window.addEventListener("blur", holdOnLeave);
   document.addEventListener("visibilitychange", () => { if (document.hidden) holdOnLeave(); });
-  // A reload restarts the rig; let the old thread release the wheel first.
-  window.addEventListener("beforeunload", () => { if (rigNative.available()) rigNative.stop(); });
+  // Closing the window banks whatever was being driven: a driver who alt-F4s
+  // out of a good lap should still find it in Helios. That means holding the
+  // close until the write has actually landed, which is what
+  // `onWindowClose` is for -- `beforeunload` starts the IPC and returns, and
+  // the webview then tears down underneath it.
+  onWindowClose(async () => {
+    game.endRun("window-closed");
+    if (rigNative.available()) await rigNative.stop().catch(() => {});
+    await Promise.resolve(game.pendingSave).catch(() => {});
+  });
+  // A reload is not a close request, and in a browser there is no close
+  // request at all. Best effort in both: the rig gets told to let go of the
+  // wheel before the new page grabs it, and a run in progress is at least
+  // attempted.
+  window.addEventListener("beforeunload", () => {
+    game.endRun("window-closed");
+    if (rigNative.available()) rigNative.stop();
+  });
   window.addEventListener("resize", () => { if (game?.track) drawCoursePlan(dom.coursePlan, game.track); });
 
   const sync = () => {
@@ -1009,16 +1962,85 @@ async function boot() {
   updateSession();
   dom.etcBtn.addEventListener("click", () => game.etcEditor.open());
 
+  // ---- the Runs tab -----------------------------------------------------
+  game.driverName = loadDriver();
+  game.sessionLabel = loadSessionLabel();
+  game.recording = loadRecordPref();
+  if (dom.driverName) {
+    dom.driverName.value = game.driverName;
+    dom.driverName.addEventListener("input", () => {
+      game.driverName = dom.driverName.value.trim().slice(0, 64);
+      // Typing here IS the rig's own setting, so this one sticks -- and it
+      // takes the run back from the launcher, identity included: a name typed
+      // into a box is not the person Helios signed in.
+      saveDriver(game.driverName);
+      game.driverId = null;
+      game.launchedBy = null;
+      updateSession();
+    });
+  }
+  if (dom.sessionName) {
+    dom.sessionName.value = game.sessionLabel;
+    dom.sessionName.addEventListener("input", () => {
+      game.sessionLabel = dom.sessionName.value.trim().slice(0, 96);
+      saveSessionLabel(game.sessionLabel);
+      updateSession();
+    });
+  }
+  if (dom.recordToggle) {
+    dom.recordToggle.checked = game.recording;
+    dom.recordToggle.addEventListener("change", () => {
+      game.recording = dom.recordToggle.checked;
+      saveRecordPref(game.recording);
+      updateSession();
+    });
+  }
+  runsDirectory().then((d) => { if (dom.runsDir) dom.runsDir.textContent = d; })
+    .catch(() => { if (dom.runsDir) dom.runsDir.textContent = "unavailable"; });
+  refreshRuns();
+
   const enterSim = (fresh) => {
+    game.exitReplay({ keepMenu: true });
+    // Before the recording opens, so the manifest carries the aids the driver
+    // is actually about to drive with.
     sync();
     game.audio.start();
     dom.menu.hidden = true;
     dom.restartBtn.hidden = false;
     dom.startBtn.textContent = "Resume run";
-    if (fresh) game.restart();
+    if (fresh) {
+      game.restart();
+    } else if (!game.recorder || game.recorder.samples === 0) {
+      // `load()` places the car by calling restart(), which opens a recording
+      // -- at boot, before the driver has typed their name, chosen a control
+      // profile or touched the driver aids. The Start button then resumes
+      // rather than restarts (the car is already on the line), so without
+      // this the FIRST run of every session is filed as "Unknown" with the
+      // app's boot-time settings. A recording that has not sampled anything
+      // has nothing to lose, so it is simply re-opened here.
+      game.beginRun();
+    }
     game.setPaused(false);
+    // The keypress that got here is still DOWN.
+    //
+    // Escape on the home screen starts the run synchronously inside the
+    // keydown handler, and `Input` has already put "Escape" into `keys`. The
+    // next frame is the first one to run `update()`, so it sees the key as a
+    // fresh edge and pauses the run the driver just entered. Same swallow the
+    // throttle-map editor uses on the way out (see `openEtcEditor`).
+    game.swallowPauseEdge = true;
     dom.gl.focus();
   };
+
+  // Which dash the driver wants. Remembered per machine by the HUD itself, so
+  // the select just reflects and sets it.
+  if (dom.dashMode) {
+    dom.dashMode.value = game.hud.dashMode;
+    dom.dashMode.addEventListener("change", () => {
+      game.hud.setDashMode(dom.dashMode.value);
+      dom.gl.focus();
+    });
+  }
 
   dom.startBtn.addEventListener("click", () => enterSim(!game.started));
   dom.restartBtn.addEventListener("click", () => enterSim(true));
@@ -1028,19 +2050,89 @@ async function boot() {
   document.getElementById("pauseResume").addEventListener("click", () => { game.setPaused(false); dom.gl.focus(); });
   document.getElementById("pauseRestart").addEventListener("click", () => { game.restart(); game.setPaused(false); dom.gl.focus(); });
   document.getElementById("pauseHome").addEventListener("click", () => game.goHome());
+  const quitToShell = () => {
+    const w = window.__TAURI__?.window;
+    const win = w?.getCurrentWindow?.() ?? w?.getCurrent?.();
+    win?.close?.();
+  };
   const quitBtn = document.getElementById("pauseQuit");
   if (isDesktop) {
     quitBtn.hidden = false;
-    quitBtn.addEventListener("click", () => {
-      const w = window.__TAURI__?.window;
-      const win = w?.getCurrentWindow?.() ?? w?.getCurrent?.();
-      win?.close?.();
-    });
+    quitBtn.addEventListener("click", quitToShell);
   }
+
+  // ---- the end-of-run card ----
+  // Every item is also a key, and both go through the same handlers so the
+  // mouse and the keyboard can never drift apart.
+  const finishQuit = document.getElementById("finishQuit");
+  const finish = {
+    again: () => { game.restart(); game.setPaused(false); dom.gl.focus(); },
+    // `openReplay`, not `enterReplay`: it is the wrapper that reports a run
+    // that will not load. Going straight to `enterReplay` left a frozen car,
+    // no card, and an unhandled rejection in the console.
+    watch: () => { if (game.finishRunId) void openReplay(game.finishRunId); },
+    roll: () => { game.setPaused(false); dom.gl.focus(); },
+    home: () => game.goHome(),
+    quit: quitToShell,
+  };
+  dom.finishAgain.addEventListener("click", finish.again);
+  dom.finishWatch.addEventListener("click", finish.watch);
+  document.getElementById("finishRoll").addEventListener("click", finish.roll);
+  document.getElementById("finishHome").addEventListener("click", finish.home);
+  if (isDesktop) {
+    finishQuit.hidden = false;
+    finishQuit.addEventListener("click", finish.quit);
+  }
+  // Registered before the replay and menu handlers below and it stops the
+  // event, so nothing else acts on a press aimed at this card. Backspace, H
+  // and Esc are deliberately NOT here: they are the game's own keys and
+  // already do exactly these things through `input.js`.
+  addEventListener("keydown", (e) => {
+    if (!game?.finished) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? "")) return;
+    // Enter is here as well as being the focused button's own default: click
+    // the scene behind the card (the canvas takes focus) and the button no
+    // longer has it, while the card still says Enter.
+    const act = e.code === "Enter" || e.code === "NumpadEnter" ? finish.again
+      : e.code === "KeyW" ? (game.finishRunId ? finish.watch : null)
+      : e.code === "KeyQ" ? (isDesktop ? finish.quit : null)
+      : null;
+    if (!act) return;
+    e.preventDefault();
+    e.stopPropagation();
+    act();
+  }, true);
+  // ---- replay transport keys ----
+  // Registered ahead of the menu's Esc handler and it returns early, so the
+  // two never both act on one press.
+  addEventListener("keydown", (e) => {
+    if (!game?.replaying) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? "")) return;
+    const r = game.replay;
+    const shift = e.shiftKey;
+    switch (e.code) {
+      case "Space": e.preventDefault(); r.toggle(); break;
+      case "ArrowLeft": e.preventDefault(); r.nudge(shift ? -0.1 : -1); break;
+      case "ArrowRight": e.preventDefault(); r.nudge(shift ? 0.1 : 1); break;
+      case "ArrowUp": e.preventDefault(); r.setRate(r.rate * 2); break;
+      case "ArrowDown": e.preventDefault(); r.setRate(r.rate / 2); break;
+      case "Home": e.preventDefault(); r.seek(0); break;
+      case "End": e.preventDefault(); r.seek(r.duration); break;
+      case "KeyC": game.cameraIndex = (game.cameraIndex + 1) % CAMERAS.length; break;
+      case "KeyL": if (r.bestLap) r.seekLap(r.bestLap.lap); break;
+      case "KeyT": e.preventDefault(); game.replayPanel?.toggleTraces(); break;
+      case "Tab": e.preventDefault(); game.replayPanel?.toggleBare(); break;
+      case "Escape": e.preventDefault(); game.exitReplay(); break;
+      default: return;
+    }
+    game.applyReplayFrame();
+    game.replayPanel?.paint(0, true);
+  }, true);
+
   // Esc on the home screen with a run behind it goes back to the run, the
   // way Esc from the run comes here.
   addEventListener("keydown", (e) => {
-    if (e.code === "Escape" && !dom.menu.hidden && game.started && !game.etcEditor.isOpen &&
+    if (e.code === "Escape" && !game.replaying && !dom.menu.hidden && game.started && !game.etcEditor.isOpen &&
         !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? "")) {
       enterSim(false);
     }
@@ -1067,12 +2159,48 @@ async function boot() {
       dom.trackSel.value = o.track;
       if (!(await loadCourse())) return;
     }
-    if (o.profile && game.input.settings.ids().includes(o.profile)) game.input.setProfile(o.profile);
+    // ---- what a launcher may decide, and what it may not --------------
+    //
+    // Helios owns the RUN: who is driving, on which course, with which aids,
+    // and whether it is logged. The simulator owns the RIG: the control
+    // profile's mapping and force feedback, the pedal calibration, the
+    // throttle map, the vehicle parameters, the camera. See docs/SETTINGS.md.
+    //
+    // So everything below is applied to this session and NOT written to the
+    // rig's own saved settings. That is not a detail: `setProfile` pins the
+    // profile and switches off device auto-detection, and saving the driver
+    // name left the next person at the rig filing runs under somebody else's
+    // name.
+    if (o.profile && game.input.settings.ids().includes(o.profile)) {
+      game.input.useProfileForSession(o.profile);
+    }
+    if (o.driver) game.driverName = String(o.driver).slice(0, 64);
+    if (o.driverId) game.driverId = String(o.driverId).slice(0, 64);
+    if (o.session) game.sessionLabel = String(o.session).slice(0, 96);
+    if (o.noRecord != null) game.recording = !o.noRecord;
+    if (o.driver || o.session || o.profile || o.track || o.noRecord != null) {
+      game.launchedBy = "launcher";
+    }
     if (o.traction != null) dom.tcToggle.checked = o.traction;
     if (o.abs != null) dom.absToggle.checked = o.abs;
     if (o.autoShift != null) dom.autoToggle.checked = o.autoShift;
     if (o.fullscreen) toggleFullscreen();
     updateSession();
+    // A launcher can open straight into a recorded run instead of a drive.
+    // That is how Helios's "Watch replay" works: it starts (or re-focuses)
+    // the sim with the run it wants on the command line.
+    if (o.replay) {
+      // Remember that this window exists to watch a run. Closing the replay
+      // then closes the window rather than dropping the user on a launch
+      // screen they never asked for -- they came from Helios's Runs table and
+      // that is where "Close" should put them back.
+      game.launchedForReplay = true;
+      await openReplay(o.replay, o.ghost ?? null);
+      return;
+    }
+    // A lap to chase, loaded before the drive starts so the delta is live
+    // from the first corner rather than from lap two.
+    if (o.reference) await game.loadReference(o.reference);
     // An autostart from a launcher is not a user gesture; the audio context
     // may open suspended and resumes on the first key or button.
     if (o.autostart) enterSim(true);
@@ -1083,6 +2211,9 @@ async function boot() {
     return {
       track: q.get("track"), profile: q.get("profile"),
       traction: onOff(q.get("tc")), abs: onOff(q.get("abs")), autoShift: onOff(q.get("auto")),
+      driver: q.get("driver"), driverId: q.get("driverId"), session: q.get("session"),
+      noRecord: onOff(q.get("record")) === false ? true : onOff(q.get("norecord")),
+      replay: q.get("replay"), ghost: q.get("ghost"), reference: q.get("reference"),
       autostart: onOff(q.get("autostart")) === true, fullscreen: onOff(q.get("fullscreen")) === true,
     };
   };
@@ -1099,7 +2230,15 @@ async function boot() {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     try {
-      if (!dom.menu.hidden) {
+      if (game.replaying) {
+        // A replay steps the playback clock, not the physics. The rig is held
+        // so the wheel stays quiet and the native model does not run away
+        // while nothing is feeding it.
+        game.input.driving = false;
+        game.input.poll();
+        game.holdNative();
+        game.replayFrame(dt);
+      } else if (!dom.menu.hidden) {
         // Still poll so the pad-connected badge is live in the menu.
         game.input.driving = false;
         game.input.poll();
@@ -1122,6 +2261,110 @@ async function boot() {
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
+}
+
+/**
+ * Redraw the recorded-runs list on the launch screen.
+ *
+ * Deliberately reads the manifests rather than keeping a cached index: a run
+ * directory shared with Helios can gain runs from another machine, and a list
+ * that quietly went stale would be worse than one that costs a directory read.
+ */
+async function refreshRuns() {
+  const host = dom.runsList;
+  if (!host) return;
+  let runs = [];
+  try {
+    runs = await listRuns(60);
+  } catch (err) {
+    host.innerHTML = `<p class="note error">Could not read recorded runs: ${escHtml(String(err?.message ?? err))}</p>`;
+    return;
+  }
+  if (dom.runsBadge) dom.runsBadge.textContent = runs.length ? String(runs.length) : "";
+  if (!runs.length) {
+    host.innerHTML = `<p class="note">${isDesktop
+      ? "Nothing recorded yet. Drive a run and it appears here."
+      : "In a browser a finished run downloads instead of being filed. Drop it into Helios."}</p>`;
+    return;
+  }
+  host.innerHTML = "";
+  for (const { runId, manifest: m } of runs) {
+    const st = m.stats ?? {};
+    const best = st.bestLapS;
+    const row = document.createElement("div");
+    row.className = "run-row";
+    const when = m.startedAt ? new Date(m.startedAt) : null;
+    const whenText = when && !isNaN(when) ? when.toLocaleString(undefined,
+      { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : runId;
+    row.innerHTML =
+      `<div class="who"><b>${escHtml(m.driver || "Unknown")}</b> &middot; ${escHtml(m.trackName || m.track || "?")}</div>` +
+      `<div class="right"><span class="time">${best != null ? fmt(best) : "--.---"}</span>` +
+      `<button class="secondary" data-replay="${escHtml(runId)}">Replay</button></div>` +
+      `<div class="meta">${escHtml(whenText)} &middot; ${st.laps ?? 0} lap${st.laps === 1 ? "" : "s"}` +
+      ` &middot; ${(st.durationS ?? 0).toFixed(1)} s` +
+      ` &middot; ${st.totalCones ?? 0} cone${st.totalCones === 1 ? "" : "s"}` +
+      `${st.peakLatG ? ` &middot; ${st.peakLatG.toFixed(2)} g peak` : ""}` +
+      `${m.session ? ` &middot; ${escHtml(m.session)}` : ""}</div>`;
+    host.appendChild(row);
+  }
+  host.querySelectorAll("button[data-replay]").forEach((b) => {
+    b.addEventListener("click", () => openReplay(b.dataset.replay));
+  });
+}
+
+/**
+ * Open a replay, reporting anywhere it can fail. Called from the Runs tab, a
+ * `--replay` launch, and the `replay=` query string in the browser build.
+ */
+async function openReplay(runId, ghostId = null) {
+  if (!game || !runId) return;
+  try {
+    dom.loadNote.classList.remove("error");
+    dom.loadNote.textContent = "Loading run...";
+    await game.enterReplay(runId, ghostId);
+    dom.loadNote.textContent = "";
+  } catch (err) {
+    console.error("could not open the replay", err);
+    game.exitReplay();
+    dom.loadNote.textContent = `Could not open that run: ${err?.message ?? err}`;
+    dom.loadNote.classList.add("error");
+  }
+}
+
+function escHtml(v) {
+  return String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function round3(v) {
+  return Number.isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
+}
+
+/**
+ * The live vehicle parameters, as the run was driven with them.
+ *
+ * The spec sheet and the d-pad setup adjuster both write straight into the
+ * shared SDM26 object, so a run's times are only interpretable next to the
+ * numbers that were in force. `PARAM_DEFAULTS` is the same list the setup UI
+ * exposes, which is exactly the set a driver can have moved.
+ */
+function snapshotSetup() {
+  const out = {};
+  for (const path of Object.keys(PARAM_DEFAULTS)) {
+    try {
+      const v = readParam(path);
+      if (typeof v === "number" && Number.isFinite(v)) out[path] = v;
+    } catch { /* a parameter this build no longer has */ }
+  }
+  // The d-pad's two items are NOT in PARAM_DEFAULTS -- that list comes from the
+  // spec sheet's editable rows, and roll distribution and brake bias are
+  // adjusted from a different surface. They are also the only two a driver
+  // changes from inside the car, which makes them the likeliest to differ
+  // between two runs and the worst two to be missing from the record.
+  for (const path of ADJUSTABLE_PATHS) {
+    const v = readParam(path);
+    if (typeof v === "number" && Number.isFinite(v)) out[path] = v;
+  }
+  return out;
 }
 
 function shortPadName(id) {

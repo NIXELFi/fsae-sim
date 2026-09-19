@@ -25,9 +25,14 @@ const KAPPA_H: f64 = 1e-4;
 pub struct BicycleSolver {
     c: Chassis,
     s: ChassisState,
-    /// Front / rear axle speeds (rad/s).
+    /// Front axle speed (rad/s).
     w_f: f64,
-    w_r: f64,
+    /// Rear wheel speeds (rad/s). Two of them, because a differential is the
+    /// only thing between them and it is what decides the car's balance on
+    /// the throttle. The front axle stays a single unit: there is nothing
+    /// between the front wheels but the road.
+    w_rl: f64,
+    w_rr: f64,
     /// Relaxation-lagged slip angles (rad).
     a_f: f64,
     a_r: f64,
@@ -45,7 +50,8 @@ impl BicycleSolver {
             c,
             s: ChassisState::default(),
             w_f: 0.0,
-            w_r: 0.0,
+            w_rl: 0.0,
+            w_rr: 0.0,
             a_f: 0.0,
             a_r: 0.0,
             delta: 0.0,
@@ -152,7 +158,8 @@ impl Solver for BicycleSolver {
         let gear = self.c.powertrain.telemetry().gear;
         self.s = ChassisState { u: speed, v: 0.0, r: 0.0, x, y, psi };
         self.w_f = speed / self.c.params.tyre_radius_m;
-        self.w_r = self.w_f;
+        self.w_rl = self.w_f;
+        self.w_rr = self.w_f;
         self.a_f = 0.0;
         self.a_r = 0.0;
         self.delta = 0.0;
@@ -163,7 +170,7 @@ impl Solver for BicycleSolver {
         self.c.powertrain.reset();
         if speed > 0.0 {
             self.c.powertrain.set_gear(gear);
-            self.c.powertrain.sync_to_wheel(self.w_r);
+            self.c.powertrain.sync_to_wheel(self.w_rl);
         }
     }
 
@@ -198,7 +205,12 @@ impl BicycleSolver {
 
         let (u, v, r) = (self.s.u, self.s.v, self.s.r);
         let speed = u.hypot(v);
-        let u_safe = u.abs().max(0.6);
+        // Speed floor in the slip-angle denominator; see bicycle.js. It also
+        // sets the lateral loop gain (dFy/dv goes as C_alpha/u_safe), and at
+        // 0.6 m/s that was high enough to ring at 30-85 Hz below about 2.5 m/s.
+        // Nothing above 3 m/s is affected, because up there the floor is not
+        // the value being used.
+        let u_safe = u.abs().max(3.0);
 
         let p_a = self.c.params.a();
         let p_b = self.c.params.b();
@@ -233,10 +245,39 @@ impl BicycleSolver {
         let k_den = u.abs().max(2.0);
         let radius = self.c.params.tyre_radius_m;
         let k_f = (self.w_f * radius - u) / k_den;
-        let k_r = (self.w_r * radius - u) / k_den;
+
+        // ---- the rear axle, one wheel at a time -------------------------
+        // Each rear wheel carries its own load, its own forward speed and so
+        // its own slip ratio; they share a slip angle, which is the one thing
+        // a single-track front still gets to assume. Splitting them is what
+        // makes a differential mean anything: with one rotor there is no
+        // torque difference across the track and therefore no yaw moment from
+        // the driven wheels at all.
+        let half_r = fz_r * 0.5;
+        let shift_r = d_fz_r.abs().min(half_r); // the inner tyre lifts, it does not go negative
+        let (outer_r, inner_r) = (half_r + shift_r, half_r - shift_r);
+        // Positive ay is a LEFT turn, which loads the right-hand tyres.
+        let (fz_rl, fz_rr) = if self.ay >= 0.0 { (inner_r, outer_r) } else { (outer_r, inner_r) };
+        // Forward speed at each rear contact patch: the wheel at lateral
+        // offset y sees u - r*y, and left is positive y.
+        let half_track_r = self.c.params.track_rear_m * 0.5;
+        let u_rl = u - r * half_track_r;
+        let u_rr = u + r * half_track_r;
+        let k_rl = (self.w_rl * radius - u_rl) / k_den;
+        let k_rr = (self.w_rr * radius - u_rr) / k_den;
+        let f_rl = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rl }, fz_rl);
+        let f_rr = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rr }, fz_rr);
 
         let mut af = self.axle_forces(Slip { alpha: self.a_f, kappa: k_f }, fz_f, d_fz_f);
-        let ar = self.axle_forces(Slip { alpha: self.a_r, kappa: k_r }, fz_r, d_fz_r);
+        let ar = AxleForces {
+            fx: f_rl.fx + f_rr.fx,
+            fy: f_rl.fy + f_rr.fy,
+            utilisation: f_rl.utilisation.max(f_rr.utilisation),
+            inner_fz: inner_r,
+            outer_fz: outer_r,
+            align_nm: 0.0,
+            trail_m: 0.0,
+        };
         // Front lateral peak relative to the rear (`front_grip_factor`). The
         // fitted curve is linear in mu at a given slip, so scaling the force is
         // exactly a mu scaling; the aligning moment is Fy through the trail and
@@ -245,7 +286,11 @@ impl BicycleSolver {
         af.fy *= self.c.params.front_grip_factor;
         af.align_nm *= self.c.params.front_grip_factor;
         let (fx_f, fy_f, util_f, fzi_f, fzo_f) = (af.fx, af.fy, af.utilisation, af.inner_fz, af.outer_fz);
-        let (fx_r, fy_r, util_r, fzi_r, fzo_r) = (ar.fx, ar.fy, ar.utilisation, ar.inner_fz, ar.outer_fz);
+        // The rear no longer has a single utilisation worth reporting: the
+        // two wheels can be doing quite different things. Per-wheel values go
+        // to the telemetry array and the load-weighted axle figure to
+        // `balance`, which is the one that describes the car.
+        let (fx_r, fy_r, fzi_r, fzo_r) = (ar.fx, ar.fy, ar.inner_fz, ar.outer_fz);
 
         // Resolve the front through the steer angle.
         let (cd, sd) = (d.cos(), d.sin());
@@ -254,43 +299,129 @@ impl BicycleSolver {
 
         let roll_res = self.c.params.crr * (fz_f + fz_r) * if u >= 0.0 { 1.0 } else { -1.0 };
 
+        // The yaw moment the driven wheels make across the track. This is the
+        // whole point of modelling the differential: a force at lateral offset
+        // y contributes -y*Fx, and left is positive y, so the outer wheel
+        // pushing harder than the inner turns the car into the corner and the
+        // inner pushing harder pushes the nose wide. Under power a Salisbury
+        // LSD sends torque to the SLOWER, inner wheel, which is why a locked
+        // car understeers on throttle; on a lift it drags the faster, outer
+        // wheel, which is what steadies the rear instead of letting it come
+        // round. With one rear rotor both of those are exactly zero.
+        let n_diff = half_track_r * (f_rr.fx - f_rl.fx);
+
         let du = (fx_fb + fx_r - drag - roll_res) / m + v * r;
         let dv = (fy_fb + fy_r) / m - u * r;
-        let dr = (p_a * fy_fb - p_b * fy_r) / self.c.params.izz_kg_m2;
+        let dr = (p_a * fy_fb - p_b * fy_r + n_diff) / self.c.params.izz_kg_m2;
 
-        // Driveline.
-        let drive = self.c.powertrain.step(dt, controls.throttle, self.w_r, speed);
+        // Driveline. The carrier turns at the mean of the two side gears, so
+        // that is the speed the gearbox sees.
+        let w_r_mean = 0.5 * (self.w_rl + self.w_rr);
+        let drive = self.c.powertrain.step(dt, controls.throttle, w_r_mean, speed);
 
         // Wheel dynamics; brake torque must not drive a wheel backwards.
         let brake_total = controls.brake.clamp(0.0, 1.0) * self.c.params.brakes.max_torque_nm;
         let tb_f = brake_total * self.c.params.brakes.bias_front;
         let tb_r = brake_total * (1.0 - self.c.params.brakes.bias_front);
         let iw_f = 2.0 * self.c.params.wheel_inertia_front_kg_m2;
-        let iw_r = 2.0 * self.c.params.wheel_inertia_rear_kg_m2 + drive.added_wheel_inertia;
+        let iw_r_side = self.c.params.wheel_inertia_rear_kg_m2;
+
+        // ---- the differential -------------------------------------------
+        // Salisbury clutch pack: `t_cap` is the largest torque DIFFERENCE the
+        // ramps and the preload can hold across the two outputs, and the
+        // transfer is half of it. See `DiffParams` for where C and B come
+        // from. A 1.5-way has a shallower drive ramp than coast ramp, so it
+        // locks harder under power than on the overrun.
+        let dfp = &self.c.params.diff;
+        let t_in = drive.wheel_torque_nm;
+        let lock_frac = if t_in >= 0.0 { dfp.power_lock } else { dfp.coast_lock };
+        let t_cap = lock_frac * t_in.abs() + dfp.preload_nm;
+        // Coulomb friction with a soft sign, as everywhere else in this code
+        // base: the clutch opposes the speed difference, saturating at half
+        // the capacity, and inside the stick band it behaves as a spring
+        // rather than switching between two branches. The spring is integrated
+        // with a limit -- below, once the axle's inertia is known -- so it
+        // cannot overshoot.
+        let d_w_rear = self.w_rr - self.w_rl;
+        let tb_r_side = 0.5 * tb_r;
 
         // Implicit in the tyre's longitudinal stiffness; see bicycle.js for
         // why (explicit Euler is unstable under ~4.5 m/s at 500 Hz). Same
         // finite difference, same order of operations, so the two stay
         // bit-identical.
         let dfx_f = ((self.axle_forces(Slip { alpha: self.a_f, kappa: k_f + KAPPA_H }, fz_f, d_fz_f).fx - fx_f) / KAPPA_H).max(0.0);
-        let dfx_r = ((self.axle_forces(Slip { alpha: self.a_r, kappa: k_r + KAPPA_H }, fz_r, d_fz_r).fx - fx_r) / KAPPA_H).max(0.0);
+        let dfx_rl = ((self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rl + KAPPA_H }, fz_rl).fx - f_rl.fx) / KAPPA_H).max(0.0);
+        let dfx_rr = ((self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rr + KAPPA_H }, fz_rr).fx - f_rr.fx) / KAPPA_H).max(0.0);
         let stiff_f = dt * radius * radius * dfx_f / k_den;
-        let stiff_r = dt * radius * radius * dfx_r / k_den;
+        let stiff_rl = dt * radius * radius * dfx_rl / k_den;
+        let stiff_rr = dt * radius * radius * dfx_rr / k_den;
         let mut dw_f = (-fx_f * radius - self.w_f.signum() * tb_f) / (iw_f + stiff_f);
-        let mut dw_r =
-            (drive.wheel_torque_nm - fx_r * radius - self.w_r.signum() * tb_r) / (iw_r + stiff_r);
+
+        // The two rear wheels, solved together. The driveline's reflected
+        // inertia hangs on the CARRIER, which turns at the mean of the two
+        // side gears, so it resists the wheels speeding up together and does
+        // nothing at all to resist one speeding up while the other slows.
+        // Hanging half of it on each wheel -- the obvious shortcut -- would
+        // make the axle behave far more locked than the clutch pack actually
+        // makes it, which is precisely the effect being modelled here.
+        //
+        //   (i_L + q) dw_L +       q dw_R = T_in/2 + t_lock - A_L
+        //         q dw_L + (i_R + q) dw_R = T_in/2 - t_lock - A_R
+        //
+        // with q = I_driveline / 4 and A the tyre and brake torques.
+        let q = 0.25 * drive.added_wheel_inertia;
+        let i_l = iw_r_side + stiff_rl;
+        let i_r = iw_r_side + stiff_rr;
+        let det = (i_l * i_r + q * (i_l + i_r)).max(1e-9);
+
+        // ---- the clutch pack's torque, limited so it cannot overshoot ----
+        //
+        // Feeding `t_lock` into the pair above, the ANTISYMMETRIC mode obeys
+        //
+        //   d(w_rr - w_rl)/dt = -t_lock * (i_l + i_r + 4q) / det = -t_lock / J
+        //
+        // so `anti_j` is the inertia the clutch actually works against -- a
+        // fraction of a kg m^2. An explicit spring of gain
+        // `0.5 t_cap / stick_rad_s` on that is unstable whenever
+        // `dt * 0.5 t_cap / (stick_rad_s * J) > 2`, which the shipped preload
+        // alone exceeds by an order of magnitude: once a corner had set the
+        // rear wheels apart they sat in a permanent period-2 oscillation on
+        // straight road, flipping sign every substep for the rest of the run
+        // (measured: 2923 flips in six seconds, +-0.267 rad/s, never decaying)
+        // and aliasing into the 100 Hz log as unexplainable noise on
+        // `sim.kappa_r*` and `imu.yaw_rate`.
+        //
+        // The limit is what a stick constraint does: never apply more torque
+        // than would bring the relative speed to zero in this step. Inside the
+        // band that makes the spring a proper stick and is unconditionally
+        // stable at any dt; outside it, where `tanh` has saturated and the
+        // pack is genuinely slipping, the limit is far larger than
+        // `0.5 t_cap` and nothing changes. Same order of operations as
+        // bicycle.js so the two ports stay comparable.
+        let anti_j = det / (i_l + i_r + 4.0 * q).max(1e-9);
+        let t_spring = 0.5 * t_cap * (d_w_rear / dfp.stick_rad_s.max(1e-4)).tanh();
+        let t_stop = anti_j * d_w_rear.abs() / dt;
+        let t_lock = t_spring.signum() * t_spring.abs().min(t_stop);
+        // Torque leaves the faster wheel and arrives at the slower one. These
+        // are the torques the diff delivers BEFORE the driveline's own inertia
+        // is taken out of them, which the coupled solve does.
+        let t_rl = 0.5 * t_in + t_lock;
+        let t_rr = 0.5 * t_in - t_lock;
+        let p_l = t_rl - f_rl.fx * radius - self.w_rl.signum() * tb_r_side;
+        let p_r = t_rr - f_rr.fx * radius - self.w_rr.signum() * tb_r_side;
+        let mut dw_rl = (p_l * (i_r + q) - q * p_r) / det;
+        let mut dw_rr = (p_r * (i_l + q) - q * p_l) / det;
         if self.w_f > 0.0 && self.w_f + dw_f * dt < 0.0 && tb_f > 0.0 {
             dw_f = -self.w_f / dt;
         }
         if self.w_f < 0.0 && self.w_f + dw_f * dt > 0.0 && tb_f > 0.0 {
             dw_f = -self.w_f / dt;
         }
-        if self.w_r > 0.0
-            && self.w_r + dw_r * dt < 0.0
-            && tb_r > 0.0
-            && drive.wheel_torque_nm <= 0.0
-        {
-            dw_r = -self.w_r / dt;
+        if self.w_rl > 0.0 && self.w_rl + dw_rl * dt < 0.0 && tb_r_side > 0.0 && t_rl <= 0.0 {
+            dw_rl = -self.w_rl / dt;
+        }
+        if self.w_rr > 0.0 && self.w_rr + dw_rr * dt < 0.0 && tb_r_side > 0.0 && t_rr <= 0.0 {
+            dw_rr = -self.w_rr / dt;
         }
 
         self.s.u += du * dt;
@@ -299,7 +430,8 @@ impl BicycleSolver {
         // Fronts may roll backwards (see bicycle.js); the rear stays
         // non-negative for the driveline behind it.
         self.w_f += dw_f * dt;
-        self.w_r = (self.w_r + dw_r * dt).max(0.0);
+        self.w_rl = (self.w_rl + dw_rl * dt).max(0.0);
+        self.w_rr = (self.w_rr + dw_rr * dt).max(0.0);
 
         // The measured accelerations that feed the next substep's transfer.
         self.ax = du - v * r;
@@ -311,7 +443,8 @@ impl BicycleSolver {
             self.s.v = 0.0;
             self.s.r = 0.0;
             self.w_f = 0.0;
-            self.w_r = 0.0;
+            self.w_rl = 0.0;
+            self.w_rr = 0.0;
             self.ax = 0.0;
             self.ay = 0.0;
             // The lagged slip angles too: relaxation is speed-proportional,
@@ -328,6 +461,11 @@ impl BicycleSolver {
         self.s.y += (self.s.u * self.s.psi.sin() + self.s.v * self.s.psi.cos()) * dt;
         self.s.psi += self.s.r * dt;
 
+        let util_r_axle = if fz_r > 1.0 {
+            (f_rl.utilisation * fz_rl + f_rr.utilisation * fz_rr) / fz_r
+        } else {
+            0.0
+        };
         let pt = self.c.powertrain.telemetry();
         self.tel = Telemetry {
             speed: self.s.speed(),
@@ -349,16 +487,22 @@ impl BicycleSolver {
                 self.a_r.to_degrees(),
                 self.a_r.to_degrees(),
             ],
-            kappa: [k_f, k_f, k_r, k_r],
-            utilisation: [util_f, util_f, util_r, util_r],
-            balance: util_r - util_f,
+            kappa: [k_f, k_f, k_rl, k_rr],
+            utilisation: [util_f, util_f, f_rl.utilisation, f_rr.utilisation],
+            // Load-weighted across the rear, NOT the worse of the two
+            // wheels. With a differential the lightly loaded inner wheel is
+            // allowed to spin in a tight corner -- that is the diff doing its
+            // job -- and reading that one wheel as "the rear axle is out of
+            // grip" is simply wrong: it is carrying almost no load and almost
+            // none of the axle's lateral force.
+            balance: util_r_axle - util_f,
             downforce_n: downforce,
             drag_n: drag,
             engine_rpm: pt.engine_rpm,
             gear: pt.gear,
             shifting: pt.shifting,
             wheel_omega_front: self.w_f,
-            wheel_omega_rear: self.w_r,
+            wheel_omega_rear: 0.5 * (self.w_rl + self.w_rr),
             drive_force_n: fx_r,
             locked: drive.locked,
             kingpin_torque_nm: af.align_nm,

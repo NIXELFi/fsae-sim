@@ -34,6 +34,52 @@ use std::time::{Duration, Instant};
 
 use crate::wheel::{self, DeviceInfo, DeviceState, Wheel, AXES_PER_DEVICE, MAX_DEVICES};
 
+/// Aligning-torque weight vs speed: 0 below 0.3 m/s, 1 from 1.8 m/s, smooth between.
+///
+/// The fade exists because the solver clamps forward speed at 3.0 m/s inside
+/// the slip-angle calculation, so below walking pace any drift is a full-size
+/// slip angle and a full-size torque that flips sign as the car wriggles. It
+/// used to run to 4 m/s, which threw away every cue in the slow autocross
+/// elements and left the paddock weightless. What the tyre model cannot
+/// supply down there is supplied instead by the standstill scrub and the
+/// caster/KPI jacking terms in the mixer, which are real and do not depend
+/// on speed at all.
+fn low_speed_fade(speed: f64) -> f64 {
+    let x = ((speed - 0.3) / 1.5).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// Normalised command through a gamma lift and a tanh soft knee.
+///
+/// A hard clamp throws away everything above 1.0, which on a small base is
+/// precisely the part worth feeling: the torque peak and the fall-off past it.
+/// The knee maps [knee, inf) onto [knee, 1) so that shape survives, compressed,
+/// instead of flattening into a ceiling. `gamma` below 1 lifts everything under
+/// full scale, which is what AC's `ff_post_process` GAMMA does and why a 5.5
+/// N.m base feels weighty there and thin here.
+fn compress(x: f64, gamma: f64, knee: f64) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return 0.0;
+    }
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let mut m = x.abs();
+    if gamma > 0.0 && (gamma - 1.0).abs() > 1e-9 {
+        m = m.powf(gamma);
+    }
+    let k = knee.clamp(0.0, 1.0);
+    if m > k {
+        let span = 1.0 - k;
+        m = if span > 1e-9 { k + span * ((m - k) / span).tanh() } else { k };
+    }
+    sign * m
+}
+
+/// Set FSAE_RIG_TRACE=1 to print the rig's inputs and force feedback terms to stderr.
+fn trace_on() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("FSAE_RIG_TRACE").is_some())
+}
+
 const RATE_HZ: f64 = 1000.0;
 /// How long the rig drives on the last inputs before it decides the webview
 /// has gone away (reload, exception, devtools pause) and holds the car with
@@ -70,6 +116,9 @@ pub struct RigInput {
     pub cone_hits: u32,
     pub shift_up: bool,
     pub shift_down: bool,
+    /// Launch control held: engine on the LC limiter, clutch out. Released,
+    /// the clutch is dumped rather than fed in.
+    pub launch: bool,
 }
 
 /// The wheel profile, as far as the rig needs it.
@@ -105,7 +154,11 @@ impl Default for WheelConfig {
             mapping: "match-car".into(),
             soft_lock: true,
             centre_trim_deg: 0.0,
-            car_rim_half_deg: 56.0,
+            // 46 deg of road wheel, which the measured rack puts at 179 deg of
+            // rim (the nominal 4.411 ratio would say 203). Only reached if
+            // the webview never sends a wheel config; it used to say 56, which
+            // was a 14 deg x 4.0 car that has not existed for a long time.
+            car_rim_half_deg: 123.5,
             device_name: String::new(),
             throttle: None,
             brake: None,
@@ -168,21 +221,44 @@ pub struct FfbConfig {
     pub min_force: f64,
     pub max_force_nm: f64,
     pub invert: bool,
+    /// Power-law lift on the normalised command: below 1.0 it raises the small
+    /// on-centre torques toward the motor's usable range, the way AC's
+    /// `ff_post_process` GAMMA does. 1.0 = off.
+    pub gamma: f64,
+    /// Where the soft knee starts, as a fraction of rated torque. Above it the
+    /// command is compressed with a tanh so the torque peak and the fall-off
+    /// past it both stay inside the motor instead of flattening into the clip.
+    /// 1.0 = off (hard clip, the old behaviour).
+    pub knee: f64,
+    /// Coulomb resistance of a stationary tyre twisting against the ground,
+    /// as a fraction of rated torque. Faded in as `low_speed_fade` fades out.
+    pub park_friction: f64,
+    /// Damping inside the end stop only, fraction of rated torque at 10 rad/s.
+    /// Without it the stop is a ~6 Hz spring with nothing damping it.
+    pub stop_damping: f64,
 }
 
 impl Default for FfbConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            gain: 0.55,
+            // 5.5 N.m rated against ~15 N.m of rim torque at the peak: this
+            // puts the TORQUE peak at the top of the motor, where the old 0.55
+            // put 0.8 g there and clipped everything above it. See
+            // `defaultGainFor` in wheelPresets.js.
+            gain: 0.37,
             align_torque_gain: 1.0,
             road_texture_gain: 0.35,
-            damping: 0.15,
+            damping: 0.10,
             friction: 0.04,
             soft_lock_gain: 1.0,
             min_force: 0.0,
             max_force_nm: 5.5,
             invert: false,
+            gamma: 0.75,
+            knee: 0.6,
+            park_friction: 0.10,
+            stop_damping: 0.35,
         }
     }
 }
@@ -226,6 +302,9 @@ pub struct ParamSet {
     pub steering_ratio: Option<f64>,
     pub caster_deg: Option<f64>,
     pub kingpin_offset_trail_m: Option<f64>,
+    pub diff_power_lock: Option<f64>,
+    pub diff_coast_lock: Option<f64>,
+    pub diff_preload_nm: Option<f64>,
     pub rack_efficiency: Option<f64>,
     pub torque_ratio: Option<f64>,
     pub mu_lat: Option<f64>,
@@ -240,6 +319,7 @@ pub struct ParamSet {
     pub rev_limit_rpm: Option<f64>,
     pub idle_rpm: Option<f64>,
     pub idle_throttle_frac: Option<f64>,
+    pub launch_rpm: Option<f64>,
     pub shift_time_s: Option<f64>,
     pub engine_inertia_kg_m2: Option<f64>,
     pub gearbox_inertia_kg_m2: Option<f64>,
@@ -248,7 +328,12 @@ pub struct ParamSet {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RigCommand {
-    Respawn { x: f64, y: f64, psi: f64, speed: f64 },
+    /// `seq` is the webview's own counter, echoed back verbatim in every
+    /// snapshot. Not a counter the rig keeps for itself: the webview can
+    /// reload while the rig runs on, and a count of respawns the RIG has seen
+    /// would then never agree with a page that started again from one.
+    #[serde(rename_all = "camelCase")]
+    Respawn { x: f64, y: f64, psi: f64, speed: f64, #[serde(default)] seq: u32 },
     Params(Box<ParamSet>),
     #[serde(rename_all = "camelCase")]
     Boundary { centre: Vec<[f64; 2]>, offset_m: f64 },
@@ -344,6 +429,8 @@ pub struct FfbOut {
     pub align: f64,
     pub damping: f64,
     pub friction: f64,
+    /// Caster/KPI jacking: the only self-centring torque at a standstill.
+    pub jacking: f64,
     pub soft_lock: f64,
     pub texture_nm: f64,
     pub clipped: bool,
@@ -384,6 +471,20 @@ pub struct Snapshot {
     pub stats: StatsOut,
     pub boundary_hit: bool,
     pub money_shift_blocked: bool,
+    /// The respawn token of the last respawn this loop applied.
+    ///
+    /// The webview sets the car's pose locally the instant it asks for a
+    /// respawn, then overwrites its whole state from whichever snapshot comes
+    /// back next -- and for a frame or two that snapshot is still the one
+    /// computed BEFORE the command was drained. Without a way to tell, the
+    /// game reads the pre-respawn speed just after putting the car on the
+    /// line, and the lap clock, which starts when the car moves, starts
+    /// itself.
+    ///
+    /// The token comes FROM the webview and is echoed back unchanged, so the
+    /// comparison is exact whatever either side has been through -- including
+    /// a page reload against a rig that kept running.
+    pub respawn_seq: u32,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -562,6 +663,8 @@ struct Loop {
     tick_us_max: f64,
     overruns: u64,
     boundary_hit: bool,
+    /// The last respawn token the webview sent. See `Snapshot::respawn_seq`.
+    respawn_seq: u32,
 }
 
 fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>) {
@@ -603,6 +706,7 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
         tick_us_max: 0.0,
         overruns: 0,
         boundary_hit: false,
+        respawn_seq: 0,
     };
 
     let period = Duration::from_secs_f64(1.0 / RATE_HZ);
@@ -705,8 +809,10 @@ fn open_wheel(shared: &Arc<Shared>, hwnd_raw: isize, prefer: Option<&str>) -> Op
 impl Loop {
     fn apply_command(&mut self, c: RigCommand) {
         match c {
-            RigCommand::Respawn { x, y, psi, speed } => {
+            RigCommand::Respawn { x, y, psi, speed, seq } => {
                 self.car.reset(x, y, psi, speed);
+                // Stored, not counted: see `RigCommand::Respawn`.
+                self.respawn_seq = seq;
                 // Keep the rim angle and rate: zeroing them makes the next
                 // tick see a 90,000 deg/s step and the damping term clips at
                 // full rated torque. Only the transients belong to the run.
@@ -789,6 +895,8 @@ impl Loop {
                 air_density_kg_m3 => v.aero.air_density, rsd_front => v.roll.rsd_front, h_roll_arm_m => v.roll.roll_arm_m,
                 rc_front_m => v.roll.rc_front_m, rc_rear_m => v.roll.rc_rear_m,
                 brake_torque_max_nm => v.brakes.max_torque_nm, brake_bias_front => v.brakes.bias_front,
+                diff_power_lock => v.diff.power_lock, diff_coast_lock => v.diff.coast_lock,
+                diff_preload_nm => v.diff.preload_nm,
                 steer_lag_s => v.steering.lag_s, steering_ratio => v.steering.ratio,
                 kingpin_offset_trail_m => v.steering.kingpin_offset_trail_m, rack_efficiency => v.steering.rack_efficiency,
             }
@@ -817,6 +925,7 @@ impl Loop {
             if let Some(x) = p.rev_limit_rpm { e.rev_limit_rpm = x; }
             if let Some(x) = p.idle_rpm { e.idle_rpm = x; }
             if let Some(x) = p.idle_throttle_frac { e.idle_throttle_frac = x; }
+            if let Some(x) = p.launch_rpm { e.launch_rpm = x; }
             if let Some(x) = p.shift_time_s { e.shift_time_s = x; }
             if let Some(x) = p.engine_inertia_kg_m2 { e.crank_inertia_kg_m2 = x; }
             if let Some(x) = p.gearbox_inertia_kg_m2 { e.gearbox_inertia_kg_m2 = x; }
@@ -847,8 +956,30 @@ impl Loop {
             let wc = &self.wheel_cfg;
             let raw = self.device.axes.get(wc.steer_axis).copied().unwrap_or(0.0) as f64;
             let rim = raw * (wc.rotation_deg.max(1.0) / 2.0) - wc.centre_trim_deg;
-            let half = if wc.mapping == "match-car" { wc.car_rim_half_deg.max(1e-6) } else { wc.rotation_deg.max(1.0) / 2.0 };
-            let mut norm = rim / half;
+            let max_road = self.car.params().steering.max_steer_rad.to_degrees().max(1e-6);
+            // "match-car" means the rim turns the road wheels the way the real
+            // rack does -- and the real rack is the MEASURED, progressive
+            // table, not the nominal constant ratio. "scale-to-lock" instead
+            // maps whatever rotation the base happens to be set to onto lock.
+            let (road, half) = if wc.mapping == "match-car" {
+                (
+                    sim_core::vehicle::road_from_rim_deg(rim),
+                    // Where the SOFT LOCK actually bites, not the rack's
+                    // measured stop. The soft lock clamps the road wheel at
+                    // the car's live `max_steer_rad`, and that is editable
+                    // while driving; pinning the end stop to the constant
+                    // 179 deg meant the two agreed only at the default 46 deg
+                    // of lock. Anywhere else the wheel had a band of travel
+                    // that steered nothing and resisted nothing.
+                    sim_core::vehicle::rim_from_road_deg(max_road)
+                        .abs()
+                        .min(sim_core::vehicle::STEER_RIM_LOCK_DEG),
+                )
+            } else {
+                let h = wc.rotation_deg.max(1.0) / 2.0;
+                (rim / h * max_road, h)
+            };
+            let mut norm = road / max_road;
             if wc.soft_lock {
                 norm = norm.clamp(-1.0, 1.0);
             }
@@ -870,10 +1001,28 @@ impl Loop {
         };
 
         let prev = self.car.telemetry();
+        // Launch control. Held at a standstill it sits the engine on the LC
+        // limiter with the clutch out; dropped, the clutch is dumped. Ignored
+        // while paused so a menu cannot leave it armed.
+        self.car.powertrain_mut().set_launch(input.launch && !input.paused);
         self.assists.traction = input.traction;
         self.assists.abs = input.abs;
-        let throttle = self.assists.throttle(throttle_demand.clamp(0.0, 1.0), prev.kappa[2]);
-        let brake = self.assists.brake(brake_demand.clamp(0.0, 1.0), prev.kappa[0], prev.kappa[2]);
+        // Traction control watches BOTH rear wheels: with a differential the
+        // inside one is the one that lights up, and which side that is depends
+        // on which way the car is turning.
+        let throttle = self
+            .assists
+            .throttle(throttle_demand.clamp(0.0, 1.0), prev.kappa[RL].max(prev.kappa[RR]));
+        // ABS watches both rears too, for the same reason traction control does.
+        // The front is single-track so FL is FR, but RR is genuinely
+        // independent -- its own load, its own half of the rear brake torque --
+        // so a lightly loaded inner rear can lock while RL is fine, and
+        // reading only RL meant ABS never saw it.
+        let brake = self.assists.brake(
+            brake_demand.clamp(0.0, 1.0),
+            prev.kappa[FL],
+            prev.kappa[RL].min(prev.kappa[RR]),
+        );
 
         // ---- gearbox ----
         let mut money_shift_blocked = false;
@@ -912,14 +1061,49 @@ impl Loop {
             };
         }
         let s = self.car.state();
-        let tel = self.car.telemetry();
+        let mut tel = self.car.telemetry();
+
+        // Rim torque through the LOCAL steering ratio. The solver reports it
+        // through the nominal constant 4.411, but the real rack is
+        // progressive: on centre the rim sees about 16% less torque per unit
+        // kingpin moment, and in a hairpin about 30% more. Corrected here
+        // rather than in the solver, so the vehicle model itself stays
+        // identical between the desktop and browser builds.
+        let rim_ratio = if native && self.wheel_cfg.mapping == "match-car" {
+            sim_core::vehicle::road_per_rim(rim_deg) * self.car.params().steering.rack_efficiency
+        } else {
+            self.car.params().rim_torque_ratio()
+        };
+        tel.rim_torque_nm = tel.kingpin_torque_nm * rim_ratio;
 
         // ---- force feedback ----
+        // Caster/KPI jacking: turning the wheel lifts that corner of the car,
+        // so gravity pulls the rim back toward centre. About 1.2 N.m at the rim
+        // at the car's 46 deg full lock, and 0.65 N.m at half lock -- small,
+        // but at a standstill it is 100% of the return torque, because the
+        // tyre's aligning torque has faded to nothing.
+        //
+        // (This comment said 0.6 N.m at full lock for a while. That was the
+        // half-lock figure: the number was right for 23 deg and full lock is
+        // 46. Recomputed from the code's own inputs -- fz_f 1270.3 N, arm
+        // 5.435 mm, rim ratio road_per_rim(179) x 0.85 = 0.2404.)
+        let jacking_nm = {
+            let p = self.car.params();
+            let fz_f = tel.fz[FL] + tel.fz[FR];
+            let arm = p.steering.scrub_m * p.steering.kpi_rad.sin()
+                + p.mechanical_trail() * p.steering.caster_rad.sin();
+            -fz_f * arm * tel.steer_rad.sin() * rim_ratio
+        };
         let feel = Feel {
-            spin: ((tel.kappa[2] - 0.2).max(0.0) * 2.5).min(1.0),
-            lock: ((-tel.kappa[0].min(tel.kappa[2]) - 0.2).max(0.0) * 2.5).min(1.0),
+            spin: ((tel.kappa[RL].max(tel.kappa[RR]) - 0.2).max(0.0) * 2.5).min(1.0),
+            // Whichever wheel is most locked, front or either rear: the texture
+            // is meant to tell the driver a wheel has stopped turning, and it
+            // does not matter which one.
+            lock: ((-tel.kappa[FL].min(tel.kappa[RL]).min(tel.kappa[RR]) - 0.2).max(0.0) * 2.5)
+                .min(1.0),
             off_track: input.off_track && tel.speed > 2.0,
             cone_hits,
+            jacking_nm,
         };
         let ffb_on = self.ffb_cfg.enabled && input.ffb_enabled && !input.paused;
         let ffb = self.ffb.mix(dt, &self.ffb_cfg, ffb_on, &tel, rim_deg, half_lock, native, &feel);
@@ -927,6 +1111,16 @@ impl Loop {
             if w.ffb {
                 let _ = w.set_torque(if ffb_on { ffb.command as f32 } else { 0.0 });
             }
+        }
+
+        // DEBUG TRACE (FSAE_RIG_TRACE=1): what the rig sees at each boundary, twice a second.
+        if trace_on() && self.ticks % 500 == 0 {
+            eprintln!(
+                "trace t={} native={} axes={:?} rim={:.1} half={:.1} steer={:+.3} thr={:.3} brk={:.3} | align={:+.2} damp={:+.2} fric={:+.2} stop={:+.2} tex={:.2} cmd={:+.3} clip={} | rimTq={:+.2} spd={:.1} kappa={:.2}/{:.2} gear={} rpm={:.0} bal={:+.2} bslip={:+.1}",
+                self.ticks, native, &self.device.axes[..8], rim_deg, half_lock, steer, throttle_demand, brake_demand,
+                ffb.align, ffb.damping, ffb.friction, ffb.soft_lock, ffb.texture_nm, ffb.command, ffb.clipped,
+                tel.rim_torque_nm, tel.speed, tel.kappa[0], tel.kappa[2], tel.gear, tel.engine_rpm, tel.balance, tel.body_slip_deg
+            );
         }
 
         // ---- powertrain readouts the HUD and audio want ----
@@ -997,6 +1191,7 @@ impl Loop {
                 rate_hz: RATE_HZ,
             },
             boundary_hit: self.boundary_hit,
+            respawn_seq: self.respawn_seq,
             money_shift_blocked,
         }
     }
@@ -1009,6 +1204,9 @@ struct Feel {
     lock: f64,
     off_track: bool,
     cone_hits: u32,
+    /// Caster/KPI jacking torque at the rim, model frame (left positive).
+    /// Computed in `tick`, where the vehicle parameters are in scope.
+    jacking_nm: f64,
 }
 
 /// The force feedback mix, once per tick. Port of `forceFeedback.js` with the
@@ -1043,30 +1241,59 @@ impl FfbMixer {
         let rate = self.rim_rate_deg_s.to_radians();
 
         // Tyres. The model is left-positive; the wheel is clockwise-positive.
-        out.align = -tel.rim_torque_nm * cfg.align_torque_gain;
+        // Faded out at walking pace: the solver clamps forward speed at
+        // 3.0 m/s inside the slip-angle calculation, so below a few m/s any
+        // drift or wheelspin is a full-size slip angle and a full-size torque
+        // that flips sign as the car wriggles (+-5..10 N.m at 0.4-3 m/s on
+        // the rig). Same curve as `forceFeedback.js` `lowSpeedFade`.
+        let fade = low_speed_fade(tel.speed);
+        out.align = -tel.rim_torque_nm * cfg.align_torque_gain * fade;
         // Damping: `damping` is the fraction of rated torque at 10 rad/s.
         out.damping = -cfg.damping * rated * (rate / 10.0);
         // Coulomb friction with a soft sign.
         let target = (rate / 0.3).tanh();
         self.friction_state += (target - self.friction_state) * (dt / 0.03).min(1.0);
         out.friction = -cfg.friction * rated * self.friction_state;
-        // End stops past the car's lock.
-        let over = rim_deg.abs() - half_lock;
-        if over > 0.0 {
-            out.soft_lock = -rim_deg.signum() * (over / 6.0).min(1.0) * cfg.soft_lock_gain * rated;
+        // Standstill. A stationary tyre resists being twisted about the
+        // kingpin by scrubbing its contact patch -- Coulomb, so it opposes
+        // motion and not angle -- while caster and KPI lift the car as the
+        // wheel turns, which is the only thing that returns the rim at rest.
+        // Both fade in exactly as the tyre's aligning torque fades out, so
+        // the paddock stops feeling weightless.
+        let park = 1.0 - fade;
+        if park > 1e-3 {
+            out.friction -= cfg.park_friction * rated * self.friction_state * park;
+            out.jacking = -feel.jacking_nm * park;
         }
-        out.torque_nm = out.align + out.damping + out.friction + out.soft_lock;
+        // End stops past the car's lock. Held OUT of the compressor and out of
+        // the gain below: a stop that scales with a taste setting is not a
+        // stop. Damped locally so it does not bounce at its own ~6 Hz.
+        let over = rim_deg.abs() - half_lock;
+        let mut stop = 0.0;
+        if over > 0.0 {
+            stop = -rim_deg.signum() * (over / 3.0).min(1.0) * cfg.soft_lock_gain
+                - (cfg.stop_damping * rate / 10.0).clamp(-0.6, 0.6);
+            out.soft_lock = stop * rated;
+        }
+        out.torque_nm = out.align + out.damping + out.friction + out.jacking + out.soft_lock;
 
-        let mut cmd = out.torque_nm * cfg.gain / rated;
+        // To the motor. COMPRESS rather than clip. A hard clamp at the rated
+        // torque erases the one cue this whole model exists to deliver -- the
+        // rim going light as the front starts to slide. On a 5.5 N.m base the
+        // old gain pinned the command at 1.0 from 0.8 g through the 1.5 g
+        // torque peak and the fall-off beyond it, so the driver felt a wall
+        // and then a slightly lighter wall. `gamma` lifts the small on-centre
+        // torques; the tanh knee bends everything above `knee` into the
+        // headroom that is left, so the peak and the drop stay readable.
+        let base = (out.align + out.damping + out.friction + out.jacking) * cfg.gain / rated;
+        out.clipped = base.abs() > 1.0;
+        let mut cmd = compress(base, cfg.gamma, cfg.knee);
         // `f64::signum(0.0)` is +1, unlike Math.sign; a zero command must
         // stay zero or a gain of 0 pushes the rim to the right.
         if cfg.min_force > 0.0 && out.align.abs() > 1e-3 && cmd != 0.0 && cmd.abs() < cfg.min_force {
             cmd = cmd.signum() * cfg.min_force;
         }
-        if cmd.abs() > 1.0 {
-            out.clipped = true;
-        }
-        cmd = cmd.clamp(-1.0, 1.0);
+        cmd = (cmd + stop).clamp(-1.0, 1.0);
 
         // Texture: wheelspin and lockup at wheel frequency, grass as a slow
         // rumble. Rendered here as a sine, with headroom so it rides on top of
@@ -1114,7 +1341,7 @@ mod tests {
     fn left_turn_commands_clockwise() {
         let mut m = FfbMixer::default();
         let cfg = FfbConfig::default();
-        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0 };
+        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0, jacking_nm: 0.0 };
         // A left turn: the model's rim torque is negative (tries to steer
         // back right); the wheel must be driven clockwise.
         let o = m.mix(0.001, &cfg, true, &tel_with_rim(-3.0), -20.0, 56.0, true, &feel);
@@ -1125,11 +1352,14 @@ mod tests {
     fn texture_keeps_headroom() {
         let mut m = FfbMixer::default();
         let cfg = FfbConfig { gain: 1.0, ..Default::default() };
-        let feel = Feel { spin: 1.0, lock: 0.0, off_track: false, cone_hits: 0 };
+        let feel = Feel { spin: 1.0, lock: 0.0, off_track: false, cone_hits: 0, jacking_nm: 0.0 };
         for _ in 0..50 {
             let o = m.mix(0.001, &cfg, true, &tel_with_rim(-5.4), 0.0, 56.0, true, &feel);
             assert!(o.command.abs() <= 1.0);
-            assert!(o.texture_nm <= 0.11, "texture must fit above a near-full base: {}", o.texture_nm);
+            // The compressor leaves real headroom above a near-full base where
+            // the old hard clip left almost none, so the texture is allowed to
+            // be bigger. What must still hold is that it fits in what is left.
+            assert!(o.texture_nm <= 0.6, "texture must fit in the headroom: {}", o.texture_nm);
         }
     }
 
@@ -1137,7 +1367,7 @@ mod tests {
     fn off_means_zero_and_no_stale_kick() {
         let mut m = FfbMixer::default();
         let cfg = FfbConfig::default();
-        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 1 };
+        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 1, jacking_nm: 0.0 };
         let _ = m.mix(0.001, &cfg, true, &tel_with_rim(0.0), 0.0, 56.0, true, &feel);
         let o = m.mix(0.001, &cfg, false, &tel_with_rim(0.0), 0.0, 56.0, true, &feel);
         assert_eq!(o.command, 0.0);
@@ -1161,8 +1391,13 @@ mod tests {
         let feeder = {
             let shared = shared.clone();
             std::thread::spawn(move || {
-                for _ in 0..40 {
-                    *shared.input.lock().unwrap() = RigInput { throttle: 1.0, auto_shift: true, ..Default::default() };
+                for _ in 0..90 {
+                    // Traction control on: this checks that the LOOP runs and
+                    // drives the car, not that a driver can dump full throttle
+                    // from rest. On the measured torque curve, with two rear
+                    // wheels and a differential between them, flooring it from
+                    // a standstill simply spins them -- as it does in the car.
+                    *shared.input.lock().unwrap() = RigInput { throttle: 1.0, auto_shift: true, traction: true, ..Default::default() };
                     shared.touch();
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -1206,12 +1441,56 @@ mod tests {
         assert_eq!(snap.ffb.command, 0.0);
     }
 
+    /// Every snapshot carries back the token of the respawn that produced it.
+    ///
+    /// The webview drops snapshots whose token is not its own, because
+    /// otherwise a frame computed before the respawn command was drained puts
+    /// the car's old speed back and the lap clock starts itself on the line.
+    /// Echoed rather than counted, so a page that reloaded and started its
+    /// tokens again still gets an exact answer. If this stops matching, that
+    /// gate stops working and the bug comes back silently -- the car drives
+    /// fine, the clock just lies.
+    #[test]
+    fn every_respawn_is_counted_into_the_snapshot() {
+        let rig = Rig::new();
+        let shared = rig.shared.clone();
+        shared.running.store(true, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let th = {
+            let shared = shared.clone();
+            std::thread::spawn(move || run(shared, 0, tx))
+        };
+        rx.recv().unwrap();
+        shared.touch();
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(shared.snapshot.lock().unwrap().respawn_seq, 0, "nothing has respawned yet");
+
+        // Arbitrary tokens, including one that goes BACKWARDS -- a reloaded
+        // page starts counting again and the rig must simply agree with it.
+        for seq in [7u32, 8, 1] {
+            shared
+                .commands
+                .lock()
+                .unwrap()
+                .push(RigCommand::Respawn { x: 0.0, y: 0.0, psi: 0.0, speed: 0.0, seq });
+            shared.touch();
+            std::thread::sleep(Duration::from_millis(60));
+            assert_eq!(
+                shared.snapshot.lock().unwrap().respawn_seq,
+                seq,
+                "respawn token {seq} was not echoed",
+            );
+        }
+        shared.running.store(false, Ordering::SeqCst);
+        th.join().unwrap();
+    }
+
     /// Respawn with the rim off-centre must not thump the driver.
     #[test]
     fn respawn_keeps_the_rim_state() {
         let mut m = FfbMixer::default();
         let cfg = FfbConfig { gain: 1.0, damping: 1.0, ..Default::default() };
-        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0 };
+        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0, jacking_nm: 0.0 };
         for _ in 0..20 {
             let _ = m.mix(0.001, &cfg, true, &tel_with_rim(0.0), 90.0, 56.0, true, &feel);
         }
@@ -1230,7 +1509,7 @@ mod tests {
     fn zero_command_stays_zero_with_a_min_force() {
         let mut m = FfbMixer::default();
         let cfg = FfbConfig { gain: 0.0, min_force: 0.05, ..Default::default() };
-        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0 };
+        let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0, jacking_nm: 0.0 };
         let o = m.mix(0.001, &cfg, true, &tel_with_rim(-3.0), 0.0, 56.0, true, &feel);
         assert_eq!(o.command, 0.0, "{o:?}");
     }

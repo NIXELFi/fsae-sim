@@ -13,7 +13,15 @@
 // pure-slip limits are exact and the friction ellipse falls out of the model
 // rather than being pasted on afterwards.
 
-const PEAK_SLIP_ANGLE_RAD = (8.5 * Math.PI) / 180; // where Fy peaks
+// TEAM (MF6.1): where Fy peaks. 7.3 deg, from the suspension lead's
+// MF612 Hoosier 16x7.5-10 R20 fit evaluated at the 10 psi the car actually
+// runs (5.7 deg at 200 N, 6.6 at 600, 7.0 at 700, 7.6 at 800), which is the
+// same number the AC mod runs. It replaces an 8.5 deg estimate justified
+// against a "13-16 deg" TTC fit -- the distorted MF62 fit the team's own
+// TireModelingReport flags. The peak force is pinned by mu and does not
+// move; what changes is that the tyre reaches it about 1.2 deg earlier, so
+// the front loads up and the rim firms up sooner.
+const PEAK_SLIP_ANGLE_RAD = (7.3 * Math.PI) / 180;
 const PEAK_SLIP_RATIO = 0.11;                      // where Fx peaks
 
 // Shape and curvature factors. E is negative on purpose: a positive E pushes

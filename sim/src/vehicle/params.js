@@ -43,7 +43,12 @@ export const SDM26 = {
   // place: 11.40 m/s sustained on the 9.125 m circle = 5.03 s, the harness's
   // 0.05 m/s resolution. The TTC belt peak for this tyre is 1.51 at 700 N,
   // unscaled, which the front now happens to match.
-  muLat: 1.72,
+  // 2026-09-17, wheel testing: was 1.72 with frontGripFactor 0.88. Off throttle
+  // the model was neutral to within the load shift of engine braking, so a
+  // held 14 deg at 13 m/s spun it where the real car pushes. The product
+  // muLat * frontGripFactor (the skidpad-pinned front peak) is unchanged;
+  // the rear gets 10% more margin. Skidpad check moves 5.03 -> 5.14 s.
+  muLat: 1.89,
   muLatHeliosQss: 1.368,  // kept for traceability to the lap sim
   // EST: front axle peak lateral grip relative to the rear.
   //
@@ -73,7 +78,7 @@ export const SDM26 = {
   // one that moves when measured data replaces an estimate elsewhere. Replace
   // with a measured understeer gradient when the team has one (the 2026-04-08
   // test plan lists one; no result is on Drive).
-  frontGripFactor: 0.88,
+  frontGripFactor: 0.80,
   muLong: 1.5,            // launch-traction estimate (75 m accel ~4.2 s)
   // TEAM (TTC): the team's PAC2002 fit of the R20 (workbook TIRES block,
   // FNOMIN 700 N) has PDY1 1.2169, PDY2 -0.14729, so peak lateral mu falls
@@ -108,7 +113,10 @@ export const SDM26 = {
   aeroFrontFrac: 0.524,
   aeroFrontFrac2025Sheet: 0.553, // superseded half-car map, for traceability
   airDensityKgM3: 1.162,
-  crr: 0.02,
+  // EST: rolling resistance. 0.015 is the middle of the 0.012-0.018 band for
+  // a 10 in slick at the 10 psi this car runs; 0.02 was a road-tyre number
+  // and put about 20 N of phantom drag on the car at every speed.
+  crr: 0.015,
 
   // ---- driveline (Helios; stock CBR600RR PC40 + SDM 3.0 final) ----
   drivetrainEff: 0.85,
@@ -122,13 +130,28 @@ export const SDM26 = {
   // put the zero-net-torque plate position at 14% somewhere around 2350 rpm --
   // agreement to a few hundred rpm, using nothing from the measurement itself.
   idleRpm: 2000,
+  // TEAM: where the car's launch control is set. Also the crank speed the
+  // clutch model holds against off the line. Note it sits in a dip in the
+  // measured curve -- 49.5 N.m at 7000 against 55.1 at 6000 and 57.8 at
+  // 8500 -- so it is a driveability choice rather than a torque one.
+  // Nothing above walking pace reads it.
+  launchRpm: 7000,
   /** Throttle plate position the ETC holds at idle, 0..1. */
-  idleThrottleFrac: 0.14,
+  // Re-solved for the measured torque curve: the real engine makes far less
+  // below 4000 rpm than the CFD sweep predicted, so the idle plate has to sit
+  // further open to hold 2000 rpm. 0.14 was the CFD figure and idled at 1627.
+  idleThrottleFrac: 0.22,
   shiftTimeS: 0.1,
 
   // ---- roll balance (Helios SDM26_ROLL, from the team's ARB calculator) ----
   roll: {
-    rsdFront: 0.512,   // roll-stiffness distribution, front share (no ARB baseline)
+    // TEAM: 0.51, the measured front 4-7 / rear 1-1 blade setting -- the one
+    // the team runs on the acceleration car. The 1-1/1-1 baseline is 0.46 and
+    // is what the event setups target, but the driver reports the car rotating
+    // too easily, and more front roll stiffness is the first and most direct
+    // answer: it moves lateral load transfer forward, which costs the front
+    // grip and makes the car push. Adjustable live from the wheel, 30-70%.
+    rsdFront: 0.51,
     hRollArmM: 0.2626, // sprung-CG to roll-axis arm
     rcFrontM: 0.0186,  // front roll-centre height
     rcRearM: 0.0251,   // rear roll-centre height
@@ -179,16 +202,16 @@ export const SDM26 = {
   engineInertiaKgM2: 0.011,     // EST: crank + primary drive gear (crank-referenced)
   gearboxInertiaKgM2: 0.006,    // EST: clutch basket + shafts + sprocket (post-primary)
 
-  // Steering lock: 28 deg at the road wheel. Originally an estimate (clears
-  // the tightest 4.5 m radius on the endurance course with slip angle to
-  // spare); the rack stops have not been measured, but three of the four
-  // 2026-04-01 MoTeC runs that exercise the wheel to the stop cap the
-  // STEERING channel at 121-124 deg at the rim, which through the measured
-  // 4.411 ratio is 27.4-28.1 deg. The fourth run reads 196 deg and is either
-  // uncalibrated or wrapped. Kept at 28; still not a rack measurement. The
-  // lag and rate limit remain EST for the driver's hands plus rack
+  // TEAM: steering lock, 46 deg at the road wheel -- the rack's MEASURED
+  // limit, from the toe-vs-rim table below (46.0 deg of road wheel at 179.2
+  // deg of rim). This replaces a long-standing 28 deg estimate that was
+  // bounded by a MoTeC STEERING channel three of four 2026-04-01 runs capped
+  // at 121-124 deg of rim; that is where the driver stopped turning, not
+  // where the rack stops. Devices with no force feedback are still held to a
+  // usable lock by the speed-sensitive cap in `controlProfiles.js`.
+  // The lag and rate limit remain EST for the driver's hands plus rack
   // compliance.
-  maxSteerDeg: 28,
+  maxSteerDeg: 46,
   steerLagS: 0.06,
   steerRateDegS: 360,
   // TEAM: rim angle per road-wheel angle, 4.411 from the OptimumK 'SDM26
@@ -221,6 +244,33 @@ export const SDM26 = {
      * from that unless the real rack says otherwise.
      */
     torqueRatio: null,
+    /** Scrub radius, m, and kingpin inclination, deg (same OptimumK export). */
+    scrubM: 0.0255,
+    kpiDeg: 8.745,
+    /** Rim angle at the rack's measured stop, one side, deg. */
+    rimLockDeg: 179,
+    /**
+     * TEAM: measured rim angle -> road-wheel angle, 0..180 deg of rim in 5 deg
+     * steps (Drive `Steer_Force_Calculator/wheel_toe_angles.csv`, 2026-07-26;
+     * both wheels' toe averaged into the axle angle, so static toe cancels).
+     *
+     * A real rack is PROGRESSIVE: this one takes 5.27 deg of rim per road
+     * degree on centre and about 3.4 by 90 deg. The nominal 4.411 constant is
+     * therefore 19% too quick where most of the driving happens, and stops
+     * 18 deg of road wheel short of the real lock. The desktop rig steers
+     * through this table and takes the rim/kingpin torque ratio from its local
+     * slope; see `native/crates/sim-core/src/vehicle.rs`, which carries the
+     * identical array.
+     */
+    rimToRoadDeg: [
+    0.0000, 0.9486, 1.9018, 2.8643, 3.8407, 4.8355,
+    5.8534, 6.8987, 7.9756, 9.0882, 10.2396, 11.4326,
+    12.6689, 13.9491, 15.2722, 16.6359, 18.0360, 19.4671,
+    20.9221, 22.3935, 23.8733, 25.3539, 26.8282, 28.2906,
+    29.7370, 31.1647, 32.5728, 33.9618, 35.3334, 36.6907,
+    38.0376, 39.3790, 40.7206, 42.0688, 43.4308, 44.8146,
+    46.2288,
+    ],
   },
 
   // Brakes, from the workbook BRAKES block and the Drive 'SDM26 Brakes
@@ -242,6 +292,39 @@ export const SDM26 = {
   // different radii). The bias bar figure alone is a pressure split, not a
   // torque split; the front callipers are twice the rear.
   brakeBiasFront: 0.72,
+
+  // TEAM: the differential. SDM26 runs a Drexler Formula Student V3, a 1.5-way
+  // Salisbury (clutch-pack) LSD, in its default 40 deg drive / 50 deg coast
+  // configuration.
+  //
+  // The team's April 2026 study ("The Differential Drexler Study") reduces the
+  // wedge mechanics to `T_c = C |T_in| + B`, where T_c is the largest torque
+  // DIFFERENCE the ramps and preload can hold across the two outputs. Its
+  // central piece of advice is not to derive the internal geometry -- Drexler
+  // does not publish the pin radius or the mean clutch radius -- but to
+  // back-calculate C from the lock percentages in the manual and treat it as
+  // one identified constant. Those are 30 deg -> 0.88, 40 -> 0.60, 45 -> 0.51,
+  // 50 -> 0.42, 60 -> 0.29, read as eta = T_c / T_in, so C IS the lock
+  // fraction of the fitted ramp. B is the breakaway preload, which Drexler
+  // specifies in N.m wheel to wheel: 25-35 on the fixed unit, 0-75 adjustable.
+  //
+  // The same study warns that the manual's numbers are marketing-optimistic
+  // and that measured on-track values run 60-80% of them; they are used as
+  // quoted here because the AC mod is pinned to the same table, and all three
+  // are exposed so they can be derated against real wheel-force data. Other
+  // configurations the hardware allows: 30/45 -> 0.88/0.51, 45/60 -> 0.51/0.29,
+  // and any of them reversed (50/40 -> 0.42/0.60 is the mild-power, strong-
+  // coast setup the team's own tuning notes suggest for a rear-heavy car).
+  diff: {
+    /** Lock fraction on the drive ramp. */
+    powerLock: 0.60,
+    /** Lock fraction on the coast ramp. Lower than power on a 1.5-way. */
+    coastLock: 0.42,
+    /** Breakaway preload, N.m wheel to wheel, as Drexler specifies it. */
+    preloadNm: 25,
+    /** Stick-band width, rad/s of wheel-speed difference. */
+    stickRadS: 0.1,
+  },
 
   // EST: tyre relaxation length -- the distance the tyre must roll to build
   // slip force. ~0.35 m is right for a 10" slick, and it is what makes the
@@ -268,8 +351,96 @@ export const SDM26 = {
 
   // EST: driver eye point, relative to the CG (x forward, z up).
   eyeAheadOfCgM: -0.15,
-  eyeHeightM: 0.66,
+  // EST: eye height above the ground, settled by looking at the cockpit view
+  // rather than by arithmetic alone. A reclined FSAE driver sits very low and
+  // the geometry argues for 0.8 or so, but at that height the eye is over the
+  // bodywork: the rim disappears behind the dash readout and the car is
+  // cropped out of its own cockpit. At 0.70 the steering wheel, the roll hoop
+  // and both front tyres frame the view the way a real onboard does, which is
+  // what this number is actually for. The old 0.66 sat a little too deep.
+  eyeHeightM: 0.70,
+
+  // EST: the driver's head is not bolted to the chassis. Under lateral g the
+  // body is thrown outboard, so the head leans OUT of the corner relative to
+  // the car; under braking it slides forward; and the eyes lead the car into
+  // a corner rather than staring straight down the bodywork. All three are
+  // small -- centimetres and a couple of degrees -- and together they are a
+  // large part of why a rig reads as a car rather than a screen. Purely
+  // camera: none of this touches the physics.
+  headLatMPerG: 0.022,
+  headLongMPerG: 0.018,
+  headYawDegPerG: 2.2,
 };
+
+/**
+ * Road-wheel angle (deg, signed) for a rim angle, through the measured rack.
+ *
+ * Port of `road_from_rim_deg` in `native/crates/sim-core/src/vehicle.rs`; the
+ * two must stay identical or the desktop and browser builds steer differently.
+ */
+export function roadFromRimDeg(steering, rimDeg) {
+  const t = steering?.rimToRoadDeg;
+  if (!t || t.length < 2) return rimDeg / (steering?.ratio ?? 4.411);
+  const step = 5;
+  const n = t.length;
+  const sign = rimDeg < 0 ? -1 : 1;
+  const mag = Math.abs(rimDeg);
+  const x = mag / step;
+  if (x >= n - 1) {
+    // Past the table: hold the last slope, so over-travel is a ramp and not a
+    // cliff. The end stop is what should be resisting by then.
+    const slope = (t[n - 1] - t[n - 2]) / step;
+    return sign * (t[n - 1] + slope * (mag - (n - 1) * step));
+  }
+  const i = Math.floor(x);
+  return sign * (t[i] + (x - i) * (t[i + 1] - t[i]));
+}
+
+/**
+ * Rim angle (deg, signed) for a road-wheel angle -- the inverse of
+ * `roadFromRimDeg`, and the port of `rim_from_road_deg` in
+ * `native/crates/sim-core/src/vehicle.rs`.
+ *
+ * It exists so the soft lock and the force-feedback end stop can be the same
+ * place. The soft lock clamps the ROAD wheel at the car's live `maxSteerDeg`,
+ * which is editable while driving; the end stop was pinned to the rack's
+ * measured 179 deg stop. Those coincide only at the default 46 deg of lock --
+ * set lock to 20 and the wheel had tens of degrees of travel that steered
+ * nothing and resisted nothing.
+ */
+export function rimFromRoadDeg(steering, roadDeg) {
+  const t = steering?.rimToRoadDeg;
+  if (!t || t.length < 2) return roadDeg * (steering?.ratio ?? 4.411);
+  const step = 5;
+  const n = t.length;
+  const sign = roadDeg < 0 ? -1 : 1;
+  const mag = Math.abs(roadDeg);
+  const last = t[n - 1];
+  if (mag >= last) {
+    const slope = (last - t[n - 2]) / step;
+    if (slope <= 0) return sign * (n - 1) * step;
+    return sign * ((n - 1) * step + (mag - last) / slope);
+  }
+  // Monotonic table; a scan over 37 entries is clearer than a binary search.
+  for (let i = 0; i < n - 1; i++) {
+    const a = t[i];
+    const b = t[i + 1];
+    if (mag <= b) {
+      const f = Math.abs(b - a) < 1e-12 ? 0 : (mag - a) / (b - a);
+      return sign * (i + f) * step;
+    }
+  }
+  return sign * (n - 1) * step;
+}
+
+/** Local d(road)/d(rim) at a rim angle -- the reciprocal of the local ratio. */
+export function roadPerRimDeg(steering, rimDeg) {
+  const t = steering?.rimToRoadDeg;
+  if (!t || t.length < 2) return 1 / (steering?.ratio ?? 4.411);
+  const step = 5;
+  const i = Math.min(t.length - 2, Math.floor(Math.abs(rimDeg) / step));
+  return (t[i + 1] - t[i]) / step;
+}
 
 /** Distance CG -> front axle (m). */
 export function lengthToFrontAxle(v) {

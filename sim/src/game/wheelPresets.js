@@ -40,16 +40,29 @@
 const inv = (axis) => ({ axis, rawMin: 1, rawMax: -1 });
 const fwd = (axis) => ({ axis, rawMin: -1, rawMax: 1 });
 
+/**
+ * Bump when a preset's values change. `Input.applyWheelPreset` records
+ * `name@version`, so a corrected preset is applied once more to a profile
+ * that had the old one, and never again after that.
+ */
+export const PRESET_VERSION = 5;
+
 /** @type {WheelPreset[]} Most specific first: "r5" must beat "moza". */
 export const WHEEL_PRESETS = [
   // ---- MOZA. Pedals through the base or over their own USB (SR-P): both seen.
-  { match: /moza.*\br3\b/, label: "MOZA R3", ratedNm: 3.9, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(2), clutch: inv(5), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
-  { match: /moza.*\br5\b/, label: "MOZA R5", ratedNm: 5.5, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(2), clutch: inv(5), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
-  { match: /moza.*\br9\b/, label: "MOZA R9", ratedNm: 9, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(2), clutch: inv(5), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
-  { match: /moza.*\br12\b/, label: "MOZA R12", ratedNm: 12, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(2), clutch: inv(5), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
-  { match: /moza.*\br16\b/, label: "MOZA R16", ratedNm: 16, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(2), clutch: inv(5), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
-  { match: /moza.*\br21\b/, label: "MOZA R21", ratedNm: 21, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(2), clutch: inv(5), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
-  { match: /moza/, label: "MOZA (unknown model)", ratedNm: 5.5, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(2), clutch: inv(5), verify: true, note: "Model not recognised; rated torque set to 5.5 N.m. Correct it in the slider." },
+  // A MOZA base reports its pedal axes at the BOTTOM of the range at rest
+  // (raw 0 over DirectInput, -1 here) and rising with travel -- measured on
+  // an R5 with the rig trace, 2026-09-17 -- so these are `fwd`, not `inv`.
+  // Same session, confirmed by the driver: throttle is Z (axis 2) and brake
+  // is Rz (axis 5) on an SR-P set through the base; Y (axis 1) is the
+  // clutch on a three-pedal set.
+  { match: /moza.*\br3\b/, label: "MOZA R3", ratedNm: 3.9, rotationDeg: 900, steerAxis: 0, throttle: fwd(2), brake: fwd(5), clutch: fwd(1), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
+  { match: /moza.*\br5\b/, label: "MOZA R5", ratedNm: 5.5, rotationDeg: 900, steerAxis: 0, throttle: fwd(2), brake: fwd(5), clutch: fwd(1), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
+  { match: /moza.*\br9\b/, label: "MOZA R9", ratedNm: 9, rotationDeg: 900, steerAxis: 0, throttle: fwd(2), brake: fwd(5), clutch: fwd(1), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
+  { match: /moza.*\br12\b/, label: "MOZA R12", ratedNm: 12, rotationDeg: 900, steerAxis: 0, throttle: fwd(2), brake: fwd(5), clutch: fwd(1), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
+  { match: /moza.*\br16\b/, label: "MOZA R16", ratedNm: 16, rotationDeg: 900, steerAxis: 0, throttle: fwd(2), brake: fwd(5), clutch: fwd(1), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
+  { match: /moza.*\br21\b/, label: "MOZA R21", ratedNm: 21, rotationDeg: 900, steerAxis: 0, throttle: fwd(2), brake: fwd(5), clutch: fwd(1), verify: true, note: "Set Pit House to PC mode. Zero the base's spring and damper." },
+  { match: /moza/, label: "MOZA (unknown model)", ratedNm: 5.5, rotationDeg: 900, steerAxis: 0, throttle: fwd(2), brake: fwd(5), clutch: fwd(1), verify: true, note: "Model not recognised; rated torque set to 5.5 N.m. Correct it in the slider." },
 
   // ---- Logitech. Gear driven, ~2 N.m; pedals through the base on Y / Rz / Slider.
   { match: /g923/, label: "Logitech G923", ratedNm: 2.2, rotationDeg: 900, steerAxis: 0, throttle: inv(1), brake: inv(5), clutch: inv(6), verify: false, note: "Set G HUB to 900 deg and centring spring off." },
@@ -104,14 +117,20 @@ export function presetFor(productName) {
 /**
  * A default gain for a base of this rating.
  *
- * SDM26 makes about 9 N.m per g at the rim, so the honest signal is around
- * 11 N.m near the limit. A base that can make that gets unity; a smaller one
- * is scaled so the going-light cue lands inside its range rather than in the
- * clip. Floored so a 2 N.m gear wheel still gets a usable shape.
+ * SDM26 makes about 12 N.m per g at the rim, and the aligning torque PEAKS
+ * near 15 N.m at roughly 4 degrees of front slip -- well before the tyre's
+ * own force peak, which is exactly why the rim goes light before the front
+ * lets go. A base that can make 15 N.m gets unity; a smaller one is scaled so
+ * the peak lands at full output and the fall-off past it is still inside the
+ * motor's range rather than buried in the clip. Floored so a 2 N.m gear wheel
+ * still gets a usable shape.
+ *
+ * The old divisor was 11, from a 9 N.m/g estimate that predates the fitted
+ * pneumatic trail; it put a MOZA R5 in the clip from 0.8 g upward.
  */
 export function defaultGainFor(ratedNm) {
   const r = Math.max(0.1, ratedNm || 5);
-  return Math.round(Math.min(1, Math.max(0.3, r / 11)) * 100) / 100;
+  return Math.round(Math.min(1, Math.max(0.3, r / 15)) * 100) / 100;
 }
 
 /**

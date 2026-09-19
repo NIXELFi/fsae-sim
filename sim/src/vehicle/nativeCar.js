@@ -45,6 +45,32 @@ export class NativeCar {
     this.stats = { ticks: 0, tickUsAvg: 0, tickUsMax: 0, overruns: 0, rateHz: 0 };
     this.boundaryHit = false;
     this.moneyShiftBlocked = false;
+    /**
+     * The respawn token we last sent, against the one coming back.
+     *
+     * `respawn` sets the pose here immediately so the course sees it this
+     * frame, but `apply` then overwrites the whole state from the next
+     * snapshot to arrive -- which, for the frame or two an IPC round trip
+     * takes, was computed BEFORE the rig drained the respawn command. The
+     * effect was a car put on the start line that reported the speed it was
+     * doing when the driver hit restart, which started the lap clock on the
+     * spot. A snapshot carrying a different token is from before the respawn
+     * and is dropped.
+     *
+     * The rig echoes this back unchanged rather than keeping a count of its
+     * own, so the two agree exactly whatever either side has been through --
+     * a reloaded page against a rig that never stopped, included.
+     */
+    this._respawnSeq = 0;
+    /**
+     * ...but never for longer than this. A respawn command is fire and
+     * forget, and one that never arrives would otherwise leave the car frozen
+     * on the line forever while the rig carried on somewhere else. Zero to
+     * begin with, so the first snapshot after a page load simply adopts
+     * whatever the rig is echoing instead of waiting for a token it never
+     * sent.
+     */
+    this._respawnWaitUntil = 0;
 
     /**
      * Per-frame context the game sets before `step`: driver aids, what the
@@ -52,7 +78,7 @@ export class NativeCar {
      */
     this.frame = {
       traction: false, abs: false, autoShift: false, ffbEnabled: true,
-      offTrack: false, coneHits: 0, rimDeg: 0, halfLockDeg: 56,
+      offTrack: false, coneHits: 0, rimDeg: 0, halfLockDeg: 179, launch: false,
     };
     this._shiftUp = false;
     this._shiftDown = false;
@@ -112,11 +138,13 @@ export class NativeCar {
       steeringRatio: p.steeringRatio,
       casterDeg: p.steering.casterDeg, kingpinOffsetTrailM: p.steering.kingpinOffsetTrailM,
       rackEfficiency: p.steering.rackEfficiency, torqueRatio: p.steering.torqueRatio ?? undefined,
+      diffPowerLock: p.diff?.powerLock, diffCoastLock: p.diff?.coastLock,
+      diffPreloadNm: p.diff?.preloadNm,
       muLat: p.muLat, muLong: p.muLong, tireLoadSensitivity: p.tireLoadSensitivity, relaxLengthM: p.relaxLengthM,
       frontGripFactor: p.frontGripFactor,
       gearRatios: p.gearRatios, primaryReduction: p.primaryReduction, finalDrive: p.finalDrive,
       drivetrainEff: p.drivetrainEff, revLimitRpm: p.revLimitRpm, idleRpm: p.idleRpm,
-      idleThrottleFrac: p.idleThrottleFrac, shiftTimeS: p.shiftTimeS,
+      idleThrottleFrac: p.idleThrottleFrac, launchRpm: p.launchRpm, shiftTimeS: p.shiftTimeS,
       engineInertiaKgM2: p.engineInertiaKgM2, gearboxInertiaKgM2: p.gearboxInertiaKgM2,
     });
     this.refresh();
@@ -137,10 +165,14 @@ export class NativeCar {
     rigNative.command({
       kind: "ffb",
       enabled: ffb.enabled !== false,
-      gain: ffb.gain ?? 0.55, alignTorqueGain: ffb.alignTorqueGain ?? 1,
-      roadTextureGain: ffb.roadTextureGain ?? 0.35, damping: ffb.damping ?? 0.15,
+      gain: ffb.gain ?? 0.37, alignTorqueGain: ffb.alignTorqueGain ?? 1,
+      roadTextureGain: ffb.roadTextureGain ?? 0.35, damping: ffb.damping ?? 0.10,
       friction: ffb.friction ?? 0.04, softLockGain: ffb.softLockGain ?? 1,
       minForce: ffb.minForce ?? 0, maxForceNm: ffb.maxForceNm ?? 5.5, invert: !!ffb.invert,
+      // Defaulted here as well as in the profile: a settings file written
+      // before these existed must still get the compressor, not a hard clip.
+      gamma: ffb.gamma ?? 0.75, knee: ffb.knee ?? 0.6,
+      parkFriction: ffb.parkFriction ?? 0.10, stopDamping: ffb.stopDamping ?? 0.35,
     });
     const isWheel = profile.kind === "wheel";
     const w = profile.wheel || {};
@@ -161,7 +193,10 @@ export class NativeCar {
       softLock: w.softLock !== false,
       centreTrimDeg: w.centreTrimDeg ?? 0,
       deviceName: w.deviceName ?? "",
-      carRimHalfDeg: (this.p.maxSteerDeg * this.p.steeringRatio) / 2,
+      // The rack's MEASURED stop at the rim, 179 deg for SDM26. Not
+      // maxSteerDeg x steeringRatio: the real rack is progressive, so the
+      // nominal ratio does not put the stop anywhere near the right place.
+      carRimHalfDeg: this.p.steering.rimLockDeg ?? 179,
       throttle: isWheel ? pedal(profile.pedals?.throttle) : null,
       brake: isWheel ? pedal(profile.pedals?.brake) : null,
       etcPoints: etcPoints ?? [[0, 0], [100, 100]],
@@ -198,6 +233,7 @@ export class NativeCar {
       coneHits: f.coneHits | 0,
       shiftUp: this._shiftUp,
       shiftDown: this._shiftDown,
+      launch: !!f.launch,
     };
     // One exchange in flight at a time. If the previous one has not come
     // back yet, this frame's continuous inputs are simply superseded by the
@@ -217,6 +253,21 @@ export class NativeCar {
   }
 
   apply(s) {
+    // The device is the driver's HANDS, and it arrives in the same snapshot as
+    // the car. Adopted before anything below can decide to drop the rest:
+    // gating it behind the respawn check froze the wheel, the pedals and the
+    // paddles for as long as the gate lasted -- two frames normally, and the
+    // whole timeout when a respawn command went missing.
+    this.device = s.device;
+    this.stats = s.stats;
+
+    // From before the respawn we asked for; see `_respawnSeq`.
+    if (typeof s.respawnSeq === "number" && s.respawnSeq !== this._respawnSeq) {
+      if (performance.now() < this._respawnWaitUntil) return;
+      // Gave up waiting: adopt it and re-sync, so one lost command cannot
+      // wedge the car permanently.
+      this._respawnSeq = s.respawnSeq;
+    }
     const st = s.state, t = s.tel;
     this.X = st.x; this.Y = st.y; this.psi = st.psi;
     this.u = st.u; this.v = st.v; this.r = st.r;
@@ -229,8 +280,6 @@ export class NativeCar {
     tel.pitchDeg = t.axG * this.p.pitchGradientDegG;
     this.applied = s.applied;
     this.ffb = { ...s.ffb, kickNm: 0 };
-    this.device = s.device;
-    this.stats = s.stats;
     this.boundaryHit = s.boundaryHit;
     this.moneyShiftBlocked = s.moneyShiftBlocked;
     this.pt.adopt(s.pt);
@@ -244,7 +293,11 @@ export class NativeCar {
     this.wF = this.wR = speed / this.p.tireRadiusM;
     this.delta = 0;
     this.telemetry = blankTelemetry();
-    rigNative.command({ kind: "respawn", x, y, psi, speed });
+    // Everything the rig sends back until it has applied this is from the
+    // drive we just ended. 400 ms is many round trips at any frame rate.
+    this._respawnSeq = (this._respawnSeq + 1) >>> 0;
+    this._respawnWaitUntil = performance.now() + 400;
+    rigNative.command({ kind: "respawn", x, y, psi, speed, seq: this._respawnSeq });
   }
 }
 

@@ -14,6 +14,13 @@ export const OFF_COURSE_PENALTY_S = 10.0;
 export class Timing {
   constructor(track) {
     this.track = track;
+    /**
+     * Called as each lap closes, with the scored entry and the sector splits
+     * it was scored against. The splits are cleared for the next lap
+     * immediately afterwards, so a recorder has to be handed them here rather
+     * than reading them back later. Set by the run recorder; null otherwise.
+     */
+    this.onLap = null;
     this.reset();
   }
 
@@ -34,6 +41,9 @@ export class Timing {
     this.prevS = 0;
     this.sectorIndex = 0;
     this.sectorSplits = [];
+    // Time into the lap when the current sector began. Sector times are
+    // DURATIONS, not cumulative splits -- see `update`.
+    this.sectorStart = 0;
     this.bestSectors = bestSectors;
     this.lastSplitDelta = null;
     this.message = "";
@@ -98,11 +108,49 @@ export class Timing {
       this.wasOffCourse = false;
     }
 
-    // ---- sector splits ----
+    // ---- sector times ----
+    //
+    // A DURATION, not a cumulative split. The distinction matters well beyond
+    // what the HUD prints: a theoretical best is the sum of the quickest each
+    // sector has been driven, and summing cumulative splits gives a number
+    // that is not a lap time at all. On the three-sector endurance course it
+    // came out 54% over; on autocross it came out SLOWER than the best lap
+    // actually driven, which is impossible and went unnoticed for exactly that
+    // reason -- nobody reads a number they already believe.
+    // A `while`, not an `if`, and the difference is not hypothetical.
+    //
+    // Driving, a frame covers at most a metre or two, so only one boundary can
+    // be crossed at a time. But `loc.s` is not always continuous: a respawn,
+    // or an off-course re-entry that projects onto a later part of the course,
+    // can move it hundreds of metres in one step. With a single `if`, the
+    // index advanced by ONE while the car was already past the next boundary
+    // too -- and since the next test asks `prevS < bounds[i]` with `prevS`
+    // already beyond it, that sector could never fire again for the rest of
+    // the lap.
+    //
+    // The damage lands at the flag: `completeLap` files the final sector at
+    // `sectorSplits.length - 1`, which is now a LOWER index than the sector it
+    // actually is, so a whole-lap-long final time gets recorded as the best
+    // ever time for some earlier, shorter sector. The theoretical best then
+    // comes out too SMALL -- the direction nobody checks, because a quick
+    // theoretical is what everyone is hoping for.
+    //
+    // So: keep the index aligned with the geometry no matter what `s` does,
+    // and record a skipped sector as `null` rather than inventing a time for
+    // it. A sector crossed in the same frame as another was not driven.
     const bounds = this.track.sectors;
-    if (this.sectorIndex < bounds.length &&
-        this.prevS < bounds[this.sectorIndex] && loc.s >= bounds[this.sectorIndex]) {
-      const split = this.lapTime;
+    let crossedThisFrame = 0;
+    while (this.sectorIndex < bounds.length &&
+           this.prevS < bounds[this.sectorIndex] && loc.s >= bounds[this.sectorIndex]) {
+      if (crossedThisFrame > 0) {
+        // Jumped over. No time for it, and it must not become a best.
+        this.sectorSplits.push(null);
+        this.sectorIndex++;
+        crossedThisFrame++;
+        continue;
+      }
+      const split = this.lapTime - this.sectorStart;
+      this.sectorStart = this.lapTime;
       this.sectorSplits.push(split);
       const prevBest = this.bestSectors[this.sectorIndex];
       if (prevBest == null || split < prevBest) {
@@ -114,6 +162,7 @@ export class Timing {
         this.say(`S${this.sectorIndex + 1} ${fmt(split)}  +${(split - prevBest).toFixed(2)}`, 2);
       }
       this.sectorIndex++;
+      crossedThisFrame++;
     }
 
     // ---- lap / finish line ----
@@ -136,6 +185,28 @@ export class Timing {
 
   completeLap() {
     const raw = this.lapTime;
+    // The stretch from the last boundary to the line is a sector too, and it
+    // was never recorded: `bounds.length` splits were pushed for
+    // `bounds.length + 1` sectors, so every lap silently lost its final
+    // sector -- 10.4 s of a 41.1 s autocross lap.
+    if (this.track.sectors.length > 0) {
+      // Filed at the index the GEOMETRY says, not at whatever the array
+      // happens to have reached. They are the same thing on a clean lap; on a
+      // lap where `s` jumped they are not, and using the array length put a
+      // whole-lap time into an earlier sector's best.
+      const i = this.track.sectors.length;
+      while (this.sectorSplits.length < i) this.sectorSplits.push(null);
+      const split = raw - this.sectorStart;
+      this.sectorSplits[i] = split;
+      // A final sector that follows a skipped one is not a sector time either:
+      // `sectorStart` is still back at the last boundary that was actually
+      // crossed, so the "split" spans more than one sector.
+      const trustworthy = this.sectorSplits.slice(0, i).every((v) => v != null);
+      const prevBest = this.bestSectors[i];
+      if (trustworthy && (prevBest == null || split < prevBest)) {
+        this.bestSectors[i] = split;
+      }
+    }
     const entry = {
       lap: this.lap,
       raw,
@@ -146,6 +217,11 @@ export class Timing {
     this.laps.push(entry);
     if (this.best == null || entry.total < this.best.total) this.best = entry;
     if (this.bestRaw == null || raw < this.bestRaw) this.bestRaw = raw;
+    // Before the reset below wipes the splits this lap was scored on.
+    if (this.onLap) {
+      try { this.onLap(entry, this.sectorSplits.slice()); }
+      catch (err) { console.error("lap listener", err); }
+    }
 
     if (this.state !== "finished") {
       this.say(`LAP ${this.lap}  ${fmt(entry.total)}`, 3);
@@ -158,6 +234,7 @@ export class Timing {
     this.offCourse = 0;
     this.sectorIndex = 0;
     this.sectorSplits = [];
+    this.sectorStart = 0;
     this.track.resetCones();
   }
 }
