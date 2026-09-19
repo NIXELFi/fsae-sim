@@ -288,6 +288,7 @@ export class ReplayPanel {
             <div class="rp-marks" data-marks></div>
             <div class="rp-played" data-played></div>
             <div class="rp-head-mark" data-headmark></div>
+            <div class="rp-hover" data-hover hidden></div>
           </div>
         </footer>
       </div>`;
@@ -300,6 +301,7 @@ export class ReplayPanel {
       played: q("[data-played]"),
       headMark: q("[data-headmark]"),
       scrub: q("[data-scrub]"),
+      hover: q("[data-hover]"),
       marks: q("[data-marks]"),
       laps: q("[data-laps]"),
       delta: q("[data-delta]"),
@@ -768,9 +770,27 @@ export class ReplayPanel {
       this.el.scrub.setPointerCapture(ev.pointerId);
       seekFromEvent(ev);
     });
+    // Where a click would land, before it lands: the time and the lap
+    // under the pointer. Follows the pointer whether scrubbing or not.
+    const hoverAt = (ev) => {
+      const box = this.el.scrub.getBoundingClientRect();
+      const a = Math.max(0, Math.min(1, (ev.clientX - box.left) / Math.max(1, box.width)));
+      const t = a * r.duration;
+      const lap = r.lapAt(t);
+      const h = this.el.hover;
+      h.hidden = false;
+      h.textContent = lap ? `${fmt(t)} · L${lap.lap}` : fmt(t);
+      // Kept inside the bar's ends.
+      const px = a * box.width;
+      h.style.left = `${px}px`;
+      h.style.transform = `translateX(${px < 40 ? "0" : px > box.width - 40 ? "-100%" : "-50%"})`;
+    };
     this.el.scrub.addEventListener("pointermove", (ev) => {
+      hoverAt(ev);
       if (this.scrubbing) seekFromEvent(ev);
     });
+    this.el.scrub.addEventListener("pointerenter", hoverAt);
+    this.el.scrub.addEventListener("pointerleave", () => { if (!this.scrubbing) this.el.hover.hidden = true; });
     const endScrub = (ev) => {
       if (!this.scrubbing) return;
       this.scrubbing = false;

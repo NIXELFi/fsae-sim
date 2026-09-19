@@ -1220,6 +1220,7 @@ class Game {
       message: t.message,
       paused: this.paused,
       tractionControl: this.assists.traction,
+      sectors: this.liveSectors(),
     });
 
     // And the same layout onto the car's own panel.
@@ -1243,6 +1244,41 @@ class Game {
     this.renderer.updateDashPanel(
       (ctx, x, y, w, h) => this.hud.drawDash(ctx, x, y, w, h, state, { chrome: false }),
     );
+  }
+
+  /** What the dash's sector strip shows for the lap under way. */
+  liveSectors() {
+    const t = this.timing;
+    const bounds = this.track?.sectors?.length ?? 0;
+    if (!t || bounds === 0) return null;
+    return {
+      count: bounds + 1,
+      splits: t.sectorSplits,
+      best: t.bestSectors,
+      index: t.sectorIndex,
+      running: t.state === "running",
+      elapsed: t.state === "running" ? t.lapTime - t.sectorStart : 0,
+    };
+  }
+
+  /** The same, read out of a recorded run: the lap's splits so far. */
+  replaySectors() {
+    const r = this.replay;
+    const bounds = this.track?.sectors?.length ?? 0;
+    if (!r || bounds === 0) return null;
+    const lap = r.lapAt();
+    const sectorNow = Math.max(0, Math.round(r.valueAt("sim.sector")) - 1);
+    const done = lap?.sectors ?? [];
+    const splits = [];
+    for (let i = 0; i < bounds + 1; i++) splits.push(i < sectorNow && done[i] != null ? done[i] : null);
+    // Against the run's own best sectors, which is what the driver was seeing.
+    const best = r.manifest?.stats?.bestSectors ?? [];
+    const tIntoLap = lap ? r.t - (lap.startedAtS ?? 0) : 0;
+    const startOfSector = splits.slice(0, sectorNow).reduce((a, b) => a + (b ?? 0), 0);
+    return {
+      count: bounds + 1, splits, best, index: sectorNow, running: !!lap,
+      elapsed: Math.max(0, tIntoLap - startOfSector),
+    };
   }
 
   /**
@@ -1281,6 +1317,7 @@ class Game {
       tractionControl: r.valueAt("sim.traction_control") > 0.5,
       // The live delta, exactly as logged -- see `sim.delta_valid`.
       delta: { hasReference: deltaValid, delta: deltaValid ? r.value("sim.delta_s") : null },
+      sectors: this.replaySectors(),
     };
   }
 
@@ -2194,6 +2231,7 @@ function renderCheatsheet() {
   html += "<h4>Replay</h4>";
   html += row([kbd("Space")], "play / pause");
   html += row([kbd("← →")], "back / forward 1 s; with Shift, 0.1 s");
+  html += row([kbd(", .")], "one sample back / forward (10 ms)");
   html += row([kbd("↑ ↓")], "faster / slower");
   html += row([kbd("Home"), kbd("End")], "start / end of the run");
   html += row([kbd("L")], "jump to the best lap");
@@ -2687,6 +2725,10 @@ async function boot() {
       case "Space": e.preventDefault(); r.toggle(); break;
       case "ArrowLeft": e.preventDefault(); r.nudge(shift ? -0.1 : -1); break;
       case "ArrowRight": e.preventDefault(); r.nudge(shift ? 0.1 : 1); break;
+      // One log sample either way: a snap oversteer moment is three or four
+      // of them, and a tenth of a second skipped straight over it.
+      case "Comma": e.preventDefault(); r.pause(); r.nudge(-0.01); break;
+      case "Period": e.preventDefault(); r.pause(); r.nudge(0.01); break;
       case "ArrowUp": e.preventDefault(); r.setRate(r.rate * 2); break;
       case "ArrowDown": e.preventDefault(); r.setRate(r.rate / 2); break;
       case "Home": e.preventDefault(); r.seek(0); break;

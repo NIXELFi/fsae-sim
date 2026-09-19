@@ -290,7 +290,12 @@ export class Hud {
 
     cy += this.dashLeds(ctx, ix, cy, iw, sh * 0.085, s) + sh * 0.035;
     cy += this.dashRpmBar(ctx, ix, cy, iw, sh * 0.125, s) + sh * 0.012;
-    cy += this.dashRpmScale(ctx, ix, cy, iw, sh * 0.075, s) + sh * 0.020;
+    cy += this.dashRpmScale(ctx, ix, cy, iw, sh * 0.075, s) + sh * 0.012;
+    // The sector strip, when the course has sectors: the splits of this lap
+    // against the best, live, instead of a two-second toast.
+    if (s.sectors && s.sectors.count > 1) {
+      cy += this.dashSectors(ctx, ix, cy, iw, sh * 0.085, s) + sh * 0.012;
+    }
 
     const footH = sh * 0.10;
     this.dashMiddle(ctx, ix, cy, iw, sy + sh - footH - cy - sh * 0.02, s);
@@ -466,6 +471,55 @@ export class Hud {
       ctx.font = `600 ${(h * 0.075).toFixed(1)}px ui-monospace, monospace`;
       ctx.fillText("TC", cx + w * 0.30, y + h * 0.975);
     }
+  }
+
+  /**
+   * The sector strip: one chip per sector.
+   *
+   * A completed sector shows its time and reads green when it beat the best
+   * that stood before this lap, red when it did not, gold when there was no
+   * best yet. The sector under way shows its running time in white; the
+   * ones still to come sit dim. The comparison is against the bests as
+   * they stood when the lap began -- `Timing` folds bests in at the flag,
+   * so mid-lap they are exactly that.
+   */
+  dashSectors(ctx, x, y, w, h, s) {
+    const sec = s.sectors;
+    const n = sec.count;
+    const gap = w * 0.012;
+    const cw = (w - gap * (n - 1)) / n;
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < n; i++) {
+      const cx = x + i * (cw + gap);
+      const split = sec.splits?.[i];
+      const best = sec.best?.[i];
+      let text, colour, bg;
+      if (split != null) {
+        const d = best != null ? split - best : null;
+        colour = d == null ? "#ffd60a" : d < 0 ? "#31d158" : "#ff453a";
+        bg = d == null ? "rgba(255,214,10,0.14)" : d < 0 ? "rgba(49,209,88,0.14)" : "rgba(255,69,58,0.14)";
+        text = d == null ? fmtSplit(split) : `${fmtSplit(split)} ${d < 0 ? "" : "+"}${d.toFixed(2)}`;
+      } else if (i === sec.index && sec.running) {
+        colour = "#e8ecf3";
+        bg = "rgba(255,255,255,0.08)";
+        text = fmtSplit(sec.elapsed ?? 0);
+      } else {
+        colour = "rgba(255,255,255,0.30)";
+        bg = "rgba(255,255,255,0.04)";
+        text = best != null ? fmtSplit(best) : "--.--";
+      }
+      ctx.fillStyle = bg;
+      roundRect(ctx, cx, y, cw, h, h * 0.25);
+      ctx.fill();
+      ctx.fillStyle = colour;
+      ctx.textAlign = "left";
+      ctx.font = `600 ${(h * 0.42).toFixed(1)}px ui-monospace, monospace`;
+      ctx.fillText(`S${i + 1}`, cx + h * 0.28, y + h * 0.52);
+      ctx.textAlign = "right";
+      ctx.font = `600 ${(h * 0.50).toFixed(1)}px ui-monospace, monospace`;
+      ctx.fillText(text, cx + cw - h * 0.28, y + h * 0.54);
+    }
+    return h;
   }
 
   /** One numeric field: a big value with its name and unit beneath. */
@@ -1011,6 +1065,14 @@ function panel(ctx, x, y, w, h, r) {
   ctx.strokeStyle = "rgba(255,255,255,0.09)";
   ctx.lineWidth = 1;
   ctx.stroke();
+}
+
+/** A sector duration: seconds to two places, minutes only if it needs them. */
+function fmtSplit(v) {
+  if (!Number.isFinite(v)) return "--.--";
+  if (v < 60) return v.toFixed(2);
+  const m = Math.floor(v / 60);
+  return `${m}:${(v - m * 60).toFixed(2).padStart(5, "0")}`;
 }
 
 /** Index of the sample whose distance is closest to `sAt`, by bisection. */

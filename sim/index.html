@@ -584,6 +584,12 @@
   /* Inset by the same gutter as the traces above it, so the scrub head and
      the trace playhead are the same instant at the same x. */
   .rp-scrub { position: relative; height: 20px; cursor: pointer; touch-action: none; margin-left: 108px; }
+  .rp-hover {
+    position: absolute; bottom: 100%; margin-bottom: 6px; padding: 2px 7px; pointer-events: none;
+    font: 600 11px var(--mono); color: var(--text); background: rgba(12,15,20,0.94);
+    border: 1px solid var(--line-2); border-radius: 4px; white-space: nowrap;
+  }
+  .rp-hover[hidden] { display: none; }
   .rp-track { position: absolute; left: 0; right: 0; top: 7px; height: 6px; background: var(--field); border-radius: 3px; }
   .rp-played { position: absolute; left: 0; top: 7px; height: 6px; width: 0; background: var(--gold); border-radius: 3px; }
   .rp-marks { position: absolute; inset: 0; }
