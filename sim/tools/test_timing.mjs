@@ -21,7 +21,7 @@
 // checks a quick theoretical.
 
 import {
-  Timing, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S, OFF_COURSE_MIN_TRAVEL_M,
+  Timing, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S, OFF_COURSE_MIN_TRAVEL_M, sectorVerdict,
 } from "../src/game/timing.js";
 
 let failures = 0;
@@ -272,6 +272,25 @@ section("a blip over the line is not an off course");
   drive(w, 200, 204, 0.8, { onTrack: false });          // four metres in five seconds
   drive(w, 204, 600, 20);
   ok(w.laps[0].off === 1, "creeping four metres off course counts");
+}
+
+section("a sector of a lap that did not count is not a best");
+{
+  // THE BUG THIS EXISTS FOR: the finish card said "Scored: NO TIME - OFF
+  // COURSE" and, directly under it, "S1 13.500 best". The split was quicker
+  // than the previous best, but it was never folded into the bests -- see
+  // `foldSectorBests` -- so it is the best of nothing.
+  const cut = sectorVerdict(13.5, 13.8, false);
+  ok(cut.best === false, "quicker than the best on an invalid lap is not a best");
+  near(cut.delta, -0.3, 1e-9, "but the gap to the best is still reported");
+  ok(sectorVerdict(13.5, 13.8, true).best === true, "the same split on a valid lap is the best");
+  ok(sectorVerdict(13.5, null, true).best === true, "a first ever split on a valid lap is the best");
+  const first = sectorVerdict(13.5, null, false);
+  ok(first.best === false && first.delta === null, "a first ever split on an invalid lap is neither");
+  const slow = sectorVerdict(14.0, 13.8, true);
+  ok(slow.best === false, "slower than the best is not a best");
+  near(slow.delta, 0.2, 1e-9, "and reads as the gap");
+  ok(sectorVerdict(13.8, 13.8, true).best === true, "equalling the best is a best");
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

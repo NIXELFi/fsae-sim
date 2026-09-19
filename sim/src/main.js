@@ -13,7 +13,7 @@ import { Renderer } from "./render/renderer.js";
 import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
-import { Timing, fmt, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
+import { Timing, fmt, sectorVerdict, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
 import { keyLabel } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
@@ -1564,11 +1564,13 @@ class Game {
           }
           // Against the best as it stood BEFORE this lap: a sector that just
           // set the best is its own reference and would always read +0.000.
-          const best = this.finishBestBefore[i];
-          const d2 = best == null || best >= v ? null : v - best;
-          const tag = d2 == null
-            ? '<span class="v" style="color:var(--gold)">best</span>'
-            : `<span class="v pen">+${d2.toFixed(3)}</span>`;
+          // And "best" only on a lap that counted -- see `sectorVerdict`.
+          const verdict = sectorVerdict(v, this.finishBestBefore[i], entry.valid !== false);
+          let tag;
+          if (verdict.best) tag = '<span class="v" style="color:var(--gold)">best</span>';
+          else if (verdict.delta == null) tag = '<span class="v"></span>';
+          else if (verdict.delta > 0) tag = `<span class="v pen">+${verdict.delta.toFixed(3)}</span>`;
+          else tag = `<span class="v">${verdict.delta.toFixed(3)}</span>`;
           rows.push(`<span class="k">S${i + 1}  ${fmt(v)}</span>${tag}`);
         }
       }
