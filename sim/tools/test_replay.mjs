@@ -115,6 +115,9 @@ function driveACircle({ dt = DT, laps = LAPS } = {}) {
     ctx.spinRear = ctx.spinFront;
     tel.ayG = (SPEED * SPEED) / RADIUS / 9.80665;
     tel.yawRateDegS = ((SPEED / RADIUS) * 180) / Math.PI;
+    // Steering to hold the circle. Left-positive, like every other channel
+    // the car produces -- see the sign note on `chassis.steering_angle`.
+    ctx.roadWheelDeg = 8.0;
     rec.tick(dt, ctx);
 
     t += dt;
@@ -300,6 +303,33 @@ const replay = new Replay(manifest, tel);
   ok("lap events are stamped in run time",
      replay.events.filter((e) => e.kind === "lap")
        .every((e) => e.t > 0 && e.t <= replay.duration + 0.01));
+}
+
+section("Steering agrees with the car it is steering");
+{
+  // The fixture drives a LEFT-HAND circle: positive yaw rate, positive
+  // lateral g, positive road-wheel angle. The canonical steering channel has
+  // to agree with all three. It did not -- it came off the WHEEL's own
+  // sensor, which reports right-positive, so in Logs the steering trace
+  // pointed the opposite way to the corner it was steering. Measured against
+  // the car's own front wheels on a real run it correlated -0.998: the same
+  // signal, negated. And on a keyboard or a pad it was flat zero, because
+  // nothing sets that sensor unless a wheel is plugged in.
+  const steer = tel.byId.get("chassis.steering_angle");
+  const road = tel.byId.get("sim.road_wheel_deg");
+  const yaw = tel.byId.get("imu.yaw_rate");
+  const latg = tel.byId.get("imu.lat_g");
+  const i = Math.floor(tel.rows / 2);
+  ok("the fixture really is turning left",
+     yaw[i] > 0 && latg[i] > 0 && road[i] > 0,
+     `yaw ${yaw[i]}, latg ${latg[i]}, road ${road[i]}`);
+  ok("steering angle is left-positive too", steer[i] > 0, `got ${steer[i]}`);
+  // And it is the RIM, not the road wheel: the rack is about 5:1 on centre,
+  // so the two must not be the same number.
+  ok("the channel is at the rim, not the road wheel",
+     Math.abs(steer[i]) > Math.abs(road[i]) * 2, `${steer[i]} vs ${road[i]}`);
+  ok("and it is populated on every row",
+     Array.from(steer).every((v) => v > 0));
 }
 
 section("Lap beacon");

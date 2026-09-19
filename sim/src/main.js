@@ -899,7 +899,6 @@ class Game {
     c.plate = throttle;
     c.brake = brake;
     c.brakeBiasFront = SDM26.brakeBiasFront;
-    c.rimDeg = this.input.rim?.deg ?? 0;
     c.roadWheelDeg = tel.steerDeg ?? (this.car.delta * 180) / Math.PI;
     c.steerInput = inp.steer;
     c.ffbCommand = this.ffb.last?.command ?? 0;

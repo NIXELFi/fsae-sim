@@ -28,6 +28,7 @@
 // rendering at 60 fps logs at 60 Hz. `stats` carries the rate achieved.
 
 import { CONE_PENALTY_S } from "./timing.js";
+import { SDM26, rimFromRoadDeg } from "../vehicle/params.js";
 
 export const SAMPLE_HZ = 100;
 const SAMPLE_DT = 1 / SAMPLE_HZ;
@@ -80,7 +81,26 @@ const COLUMNS = [
   { id: "brake.driver_load", dp: 2, get: (c) => c.brake * 100 },
   { id: "brake.front_pressure", dp: 0, get: (c) => c.brake * c.brakeBiasFront * BRAKE_FULL_KPA },
   { id: "brake.rear_pressure", dp: 0, get: (c) => c.brake * (1 - c.brakeBiasFront) * BRAKE_FULL_KPA },
-  { id: "chassis.steering_angle", dp: 2, get: (c) => c.rimDeg },
+  // Derived from what the FRONT WHEELS are doing, through the car's measured
+  // rack -- not read off the wheel's own sensor. Two reasons, both of which
+  // were live bugs in a run you can still go and look at:
+  //
+  // SIGN. A wheel reports right-positive, and every other channel in this
+  // file is left-positive -- the road-wheel angle, the steer input, the yaw
+  // rate and the lateral g all agreed with each other and this one did not.
+  // Overlaid in Logs it pointed the wrong way; measured against the car's own
+  // front wheels it correlated -0.998, the same signal negated.
+  //
+  // COVERAGE. `input.rim.deg` is only ever set on a WHEEL profile, so on a
+  // keyboard or a pad this channel was flat zero through a run where the car
+  // was plainly being steered.
+  //
+  // Derived HERE rather than assembled by the caller so the two cannot drift:
+  // the road-wheel angle is already in the context and this is a function of
+  // it, which is exactly the kind of thing that goes wrong when it is
+  // computed somewhere else and passed in.
+  { id: "chassis.steering_angle", dp: 2,
+    get: (c) => rimFromRoadDeg(SDM26.steering, c.roadWheelDeg ?? 0) },
   { id: "imu.lat_g", dp: 4, get: (c) => c.t.ayG },
   { id: "imu.long_g", dp: 4, get: (c) => c.t.axG },
   { id: "imu.yaw_rate", dp: 3, get: (c) => c.t.yawRateDegS },
