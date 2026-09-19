@@ -381,17 +381,25 @@ export class Input {
    * has axes -- and that has to come out as a wheel, because it was one.
    *
    * Two pieces of evidence, in order:
-   *  - the rig opened this device natively. It only does that for a force
-   *    feedback base, so a base whose vendor string nobody has seen before
-   *    still lands here.
+   *  - the device the rig opened natively has a force feedback actuator. A
+   *    base whose vendor string nobody has seen before still lands here.
+   *    NOT merely "the rig opened it": the rig opens whatever the driver
+   *    picks in the controls panel, and that picker lists every game
+   *    controller -- so an Xbox pad chosen there was "present", and this
+   *    called it a wheel and put a pad run on the wheel board, which is the
+   *    one thing this exists to prevent. A real base whose effect failed to
+   *    start still enumerates with its actuator, so it is still a wheel.
    *  - the vendor string says wheel. `detectProfile` already carries the
    *    brand list, and it is the same list that picks the starting profile.
+   *    This is what catches a base the rig read without force feedback --
+   *    a wheel in a console mode -- and a wheel on the Gamepad API.
    *
    * Both are things the hardware reports about itself. Neither is something
    * the driver picks from a menu, which is the whole point.
    */
   steerDeviceIsWheel() {
-    if (this.nativeDevice?.present) return true;
+    const nd = this.nativeDevice;
+    if (nd?.present && nd.forceFeedback) return true;
     return detectProfile(this.padName || "") === "wheel";
   }
 

@@ -121,14 +121,33 @@ section("the profile is a dropdown and does not get a vote");
   ok(input.steerSource === "pad", "a pad driven on the wheel profile is still a pad");
 }
 {
-  // A base the rig opened natively for force feedback is a wheel whatever its
-  // vendor string says -- that path exists only for a wheel.
+  // A device the rig opened natively is a wheel if it has a force feedback
+  // actuator, whatever its vendor string says. NOT because the rig opened
+  // it: the rig opens whatever the driver picks in the controls panel, and
+  // that picker lists every game controller. "Present means wheel" put an
+  // Xbox pad on the wheel board without a file being edited.
   const input = rig("gamepad-xbox");
   noPad();
   input.nativeName = "Unbranded Direct Drive";
-  input.nativeDevice = { present: true, axes: [0.7, 0, 0, 0], buttons: [0], pov: -1 };
+  input.nativeDevice = { present: true, forceFeedback: true, axes: [0.7, 0, 0, 0], buttons: [0], pov: -1 };
   input.poll();
-  ok(input.steerSource === "wheel", "a natively-opened base is a wheel by construction");
+  ok(input.steerSource === "wheel", "an unbranded native device with force feedback is a wheel");
+
+  input.nativeName = "Controller (Xbox One For Windows)";
+  input.nativeDevice = { present: true, forceFeedback: false, axes: [0.7, 0, 0, 0], buttons: [0], pov: -1 };
+  input.poll();
+  ok(input.steerSource === "pad", "a pad the rig opened because the driver picked it is still a pad");
+
+  // A real base whose effect failed to start still enumerated with its
+  // actuator, so the rig still reports it; and a base the rig can read but
+  // not drive -- a console mode -- is caught by its name instead.
+  input.nativeName = "MOZA R5 Base (no force feedback: Effect Start failed)";
+  input.nativeDevice = { present: true, forceFeedback: true, axes: [0.7, 0, 0, 0], buttons: [0], pov: -1 };
+  input.poll();
+  ok(input.steerSource === "wheel", "a wheel whose force feedback failed to start is still a wheel");
+  input.nativeDevice = { present: true, forceFeedback: false, axes: [0.7, 0, 0, 0], buttons: [0], pov: -1 };
+  input.poll();
+  ok(input.steerSource === "wheel", "a branded base with no actuator at all is a wheel by its name");
   input.nativeDevice = null;
 }
 

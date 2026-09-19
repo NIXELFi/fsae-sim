@@ -440,6 +440,12 @@ pub struct FfbOut {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceOut {
     pub present: bool,
+    /// The base enumerated with a force feedback actuator -- whether or not
+    /// the effect started. This is what tells the webview the device it is
+    /// steering by is a wheel and not a pad the driver picked from the
+    /// controls panel; `present` alone does not, because the rig opens
+    /// whatever was picked. See `Wheel::force_feedback`.
+    pub force_feedback: bool,
     /// Axis `8*d + i`: axis i of device d; device 0 is the base.
     pub axes: [f32; MAX_DEVICES * AXES_PER_DEVICE],
     /// Per device, bit i is button i.
@@ -1177,6 +1183,7 @@ impl Loop {
             ffb,
             device: DeviceOut {
                 present: self.device_present,
+                force_feedback: self.wheel.as_ref().map_or(false, |w| w.force_feedback),
                 axes: self.device.axes,
                 buttons: self.device.buttons,
                 pov: self.device.pov,

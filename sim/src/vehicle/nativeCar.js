@@ -41,7 +41,7 @@ export class NativeCar {
     /** The rig's force feedback mix, for the settings panel. */
     this.ffb = { command: 0, torqueNm: 0, align: 0, damping: 0, friction: 0, softLock: 0, textureNm: 0, clipped: false, kickNm: 0 };
     /** The natively read wheel, if any, for the input layer. */
-    this.device = { present: false, axes: [], buttons: 0, pov: -1, rimDeg: 0, halfLockDeg: 0 };
+    this.device = { present: false, forceFeedback: false, axes: [], buttons: 0, pov: -1, rimDeg: 0, halfLockDeg: 0 };
     this.stats = { ticks: 0, tickUsAvg: 0, tickUsMax: 0, overruns: 0, rateHz: 0 };
     this.boundaryHit = false;
     this.moneyShiftBlocked = false;

@@ -117,8 +117,21 @@ mod win {
         pub name: String,
         /// Everything read, base first.
         pub names: Vec<String>,
-        /// The base has a force feedback actuator DirectInput can drive.
+        /// The base has a force feedback actuator AND the effect is running.
         pub ffb: bool,
+        /// The base enumerated with a force feedback actuator, full stop.
+        ///
+        /// Kept apart from `ffb`, which is cleared when the effect fails to
+        /// start, because the two answer different questions. `ffb` says
+        /// whether the motor is being driven; this says what the device IS.
+        /// The webview classifies a run's steering device for the
+        /// leaderboards, and it used to take "the rig opened it" as proof of
+        /// a wheel -- but the rig opens whatever the driver picks in the
+        /// controls panel, and that list has every game controller on it.
+        /// An Xbox pad picked there landed on the wheel board. Having an
+        /// actuator is the evidence; a real base whose effect failed to
+        /// start still has one.
+        pub force_feedback: bool,
         device: IDirectInputDevice8W,
         extras: Vec<IDirectInputDevice8W>,
         effect: Option<IDirectInputEffect>,
@@ -254,6 +267,7 @@ mod win {
                     name: base.name.clone(),
                     names,
                     ffb: base.ffb,
+                    force_feedback: base.ffb,
                     device,
                     extras,
                     effect: None,
@@ -579,6 +593,7 @@ mod stub {
         pub name: String,
         pub names: Vec<String>,
         pub ffb: bool,
+        pub force_feedback: bool,
     }
 
     impl Wheel {
