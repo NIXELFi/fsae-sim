@@ -177,7 +177,9 @@
     font-size: 12px; color: var(--dim);
   }
   .keys h4 { grid-column: 1 / -1; margin: 0 0 2px; font-size: 12.5px; color: var(--text); font-weight: 600; }
-  .keys div { display: grid; grid-template-columns: 78px 1fr; gap: 8px; align-items: baseline; }
+  .keys div { display: grid; grid-template-columns: minmax(78px, auto) 1fr; gap: 8px; align-items: baseline; }
+  .keys .off { color: var(--dim-2); }
+  .keys .k { display: flex; flex-wrap: wrap; gap: 4px; }
   .keys kbd {
     font: 600 11px var(--mono); color: var(--text); background: rgba(255,255,255,0.07);
     border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px;
@@ -829,7 +831,7 @@
               <p class="lead">Off by default: the real car has none of these. Turn them on to learn the course, off to set a time.</p>
               <div class="checks">
                 <label class="check"><input type="checkbox" id="tc">
-                  <span><b>Traction control</b><small>Caps rear slip ratio at 13%. Also toggled in-car with X / T.</small></span></label>
+                  <span><b>Traction control</b><small>Caps rear slip ratio at 13%. Also toggled in-car; see Controls for the key.</small></span></label>
                 <label class="check"><input type="checkbox" id="abs">
                   <span><b>ABS</b><small>Releases brake pressure on lockup.</small></span></label>
                 <label class="check"><input type="checkbox" id="auto">
@@ -874,27 +876,10 @@
         <div class="pane" data-pane="controls" role="tabpanel">
           <div id="controls"></div>
 
-          <div class="keys" id="cheatsheet">
-            <h4>In the car</h4>
-            <div><kbd>RT / RB</kbd><span>throttle, upshift</span></div>
-            <div><kbd>LT / LB</kbd><span>brake, downshift</span></div>
-            <div><kbd>Left stick</kbd><span>steering</span></div>
-            <div><kbd>B</kbd><span>recover to the course</span></div>
-            <div><kbd>X / Y</kbd><span>traction control, camera</span></div>
-            <div><kbd>View / Menu</kbd><span>restart, pause</span></div>
-            <div><kbd>D-pad</kbd><span>left/right pick a setup item, up/down adjust 0.1%</span></div>
-            <div><kbd>L3</kbd><span>back to this screen</span></div>
-            <h4>Keyboard</h4>
-            <div><kbd>W A S D</kbd><span>drive</span></div>
-            <div><kbd>Q / E</kbd><span>shift down, up</span></div>
-            <div><kbd>R</kbd><span>recover to the course</span></div>
-            <div><kbd>C / T / P</kbd><span>camera, traction control, pause</span></div>
-            <div><kbd>M / F11</kbd><span>throttle map, fullscreen</span></div>
-            <div><kbd>H</kbd><span>back to this screen</span></div>
-            <h4>Walkaround camera</h4>
-            <div><kbd>Drag</kbd><span>orbit; mouse wheel zooms; double-click toggles auto-orbit</span></div>
-            <div><kbd>, . R F [ ]</kbd><span>orbit, raise, zoom</span></div>
-          </div>
+          <!-- Filled by `renderCheatsheet` in main.js from the live bindings
+               table: every control is rebindable, so a typed-in list was a
+               lie the moment somebody moved a key. -->
+          <div class="keys" id="cheatsheet"></div>
         </div>
 
         <!-- ============ Audio ============ -->

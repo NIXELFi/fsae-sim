@@ -14,7 +14,7 @@ import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
 import { Timing, fmt, sectorVerdict, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
-import { keyLabel } from "./game/controlBindings.js";
+import { keyLabel, buttonLabel, buttonSlot, ACTIONS, ACTION_GROUPS } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
 import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen, appVersion } from "./game/desktop.js";
@@ -158,9 +158,12 @@ class Game {
         this.car.steeringServo = this.input.steeringServo();
         this.syncFfb();
         updateSession();
+        renderCheatsheet();
       }, this);
       // Re-render when plugging a device in changes the detected profile.
-      this.input.onProfileChange = () => { this.controlsPanel.render(); this.syncFfb(); updateSession(); };
+      this.input.onProfileChange = () => {
+        this.controlsPanel.render(); this.syncFfb(); updateSession(); renderCheatsheet();
+      };
     }
 
     const audioRoot = document.getElementById("audioLevels");
@@ -1865,6 +1868,84 @@ function updateSession() {
   }
 }
 
+/**
+ * What the standard gamepad mapping calls its buttons, for the ones a
+ * profile's own `labels` table does not name. Only used when the active
+ * profile is a pad: on a wheel base index 12 is whatever the manufacturer
+ * put there.
+ */
+const PAD_BUTTON_NAMES = {
+  6: "LT", 7: "RT", 8: "View", 9: "Menu", 10: "L3", 11: "R3",
+  12: "D-pad up", 13: "D-pad down", 14: "D-pad left", 15: "D-pad right",
+};
+
+/**
+ * The key reference on the Controls tab, built from the bindings table and
+ * whatever the active profile has each control on right now.
+ *
+ * It used to be typed into the HTML, which was fine while the keys were
+ * fixed and became a lie the moment they were rebindable -- and it had
+ * drifted anyway: it named `P` for pause and never mentioned the overlay,
+ * dash, launch or setup keys at all. The one table `Input` reads is the one
+ * table this prints.
+ */
+function renderCheatsheet() {
+  const host = document.getElementById("cheatsheet");
+  if (!host || !game) return;
+  const prof = game.input?.profile ?? {};
+  const K = prof.keys ?? {};
+  const B = prof.buttons ?? {};
+  const onDevice = prof.kind === "gamepad" || prof.kind === "wheel";
+  const kbd = (s) => `<kbd>${escHtml(s)}</kbd>`;
+  // One span for the chips: each row is a two-column grid, and loose <kbd>s
+  // would each take a cell of their own.
+  const row = (chips, what) =>
+    `<div><span class="k">${chips.length ? chips.join("") : '<span class="off">unbound</span>'}</span><span>${escHtml(what)}</span></div>`;
+
+  let html = "";
+  for (const group of ACTION_GROUPS) {
+    html += `<h4>${escHtml(group)}</h4>`;
+    for (const a of ACTIONS) {
+      if (a.group !== group) continue;
+      const chips = (K[a.id] ?? []).slice(0, 2).map(keyLabel).filter(Boolean).map(kbd);
+      if (onDevice && !a.keysOnly) {
+        const slot = buttonSlot(a);
+        const idx = B[slot];
+        if (typeof idx === "number" && idx >= 0) {
+          const name = prof.labels?.[slot]
+            ?? (prof.kind === "gamepad" ? PAD_BUTTON_NAMES[idx] : null)
+            ?? buttonLabel(idx, prof.labels, slot);
+          chips.push(kbd(name));
+        }
+      }
+      // The axes a device steers and pedals with are in the calibration
+      // section above; here they only need naming.
+      if (onDevice && (a.id === "steerLeft" || a.id === "steerRight")) chips.push(kbd(prof.kind === "wheel" ? "Rim" : "Left stick"));
+      if (onDevice && a.id === "throttle") chips.push(kbd(prof.kind === "wheel" ? "Pedal" : "RT"));
+      if (onDevice && a.id === "brake") chips.push(kbd(prof.kind === "wheel" ? "Pedal" : "LT"));
+      html += row(chips, a.hold ? `${a.label} (hold)` : a.label);
+    }
+  }
+
+  // Not rebindable, and not in the table: the walkaround camera's nudges are
+  // the keyboard's copy of what the mouse does, and the replay transport is
+  // its own little instrument.
+  html += "<h4>Walkaround camera</h4>";
+  html += row([kbd("Drag")], "orbit; the mouse wheel zooms; double-click toggles auto-orbit");
+  html += row([kbd(", ."), kbd("G F"), kbd("' ;")], "orbit, raise, zoom");
+  html += "<h4>Replay</h4>";
+  html += row([kbd("Space")], "play / pause");
+  html += row([kbd("← →")], "back / forward 1 s; with Shift, 0.1 s");
+  html += row([kbd("↑ ↓")], "faster / slower");
+  html += row([kbd("Home"), kbd("End")], "start / end of the run");
+  html += row([kbd("L")], "jump to the best lap");
+  html += row([kbd("C"), kbd("T")], "camera, traces");
+  html += row([kbd("Tab"), kbd("Esc")], "hide the overlay, close the replay");
+  html += "<h4>Window</h4>";
+  html += row([kbd("F11")], "fullscreen");
+  host.innerHTML = html;
+}
+
 const PARAM_KEY = "fsae-sim.params";
 
 /** Persist only what differs from as-shipped, so defaults can move later. */
@@ -2046,6 +2127,7 @@ async function boot() {
   game.renderer.rebuildCar(SDM26);
   dom.etcSummary.innerHTML = etcSummary(game.etc);
   updateSession();
+  renderCheatsheet();
   dom.etcBtn.addEventListener("click", () => game.etcEditor.open());
 
   // ---- the Runs tab -----------------------------------------------------
