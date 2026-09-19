@@ -398,10 +398,12 @@ export class Recorder {
    * Advance the run clock by one simulation step and, whenever the fixed
    * sample interval elapses, write a row.
    *
-   * @param dt   simulated seconds this step (paused frames never get here)
-   * @param ctx  everything the columns read; built by `Game.recorderContext`
+   * @param dt    simulated seconds this step (paused frames never get here)
+   * @param ctx   everything the columns read; built by `Game.recorderContext`
+   * @param last  this is the run's final step: a row is written for it
+   *              whatever the sampler's accumulator says
    */
-  tick(dt, ctx) {
+  tick(dt, ctx, { last = false } = {}) {
     if (this.finished || !(dt > 0)) return;
     // From here on `simTime` IS the frame's time, so the offset goes away.
     this.frameDt = 0;
@@ -412,8 +414,16 @@ export class Recorder {
     this.simTime += dt;
     this.accumulate(dt, ctx);
     this.acc += dt;
-    if (this.acc < SAMPLE_DT) return;
-    this.acc -= SAMPLE_DT;
+    // The last step of a run is the one the finish happened on, and what it
+    // carries has nowhere else to go: `recordLap` has just raised the beacon
+    // for the finish line, and the only rows that could show it are the ones
+    // after this. Leaving that to the accumulator made the finish pulse a
+    // coin toss -- 9 of 13 autocross logs had it -- and then, once the run
+    // was banked before this tick ran, none did. A beacon with one edge is a
+    // lap Helios cannot find the end of.
+    if (!last && this.acc < SAMPLE_DT) return;
+    if (last) this.acc = 0;
+    else this.acc -= SAMPLE_DT;
     // A long frame does NOT get the rows it owes back-filled. There is only
     // one car state for that whole span, and writing it several times over
     // would put samples in the log at instants the simulator never evaluated.

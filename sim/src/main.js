@@ -785,9 +785,12 @@ class Game {
     const wasStaged = this.timing.state === "staged";
     const wasRunning = this.timing.state === "running";
     this.timing.update(dt, loc, moving, hits);
-    // Autocross ends at the finish line. Everything that happens there is in
-    // `onRunFinished`; a closed course never reaches this.
-    if (wasRunning && this.timing.state === "finished") this.onRunFinished();
+    // Autocross ends at the finish line. The card is arranged in
+    // `onRunFinished`; the run itself is banked at the bottom of this frame,
+    // after the log has taken the finishing step. A closed course never
+    // reaches this.
+    const justFinished = wasRunning && this.timing.state === "finished";
+    if (justFinished) this.onRunFinished();
     if (this.finishAt != null && this.clock >= this.finishAt) this.showFinishMenu();
     // The green flag IS the line crossing, and it is the only one the recorder
     // cannot infer for itself.
@@ -884,11 +887,20 @@ class Game {
     // Last, so every channel is the settled value for this step rather than
     // whatever it held halfway through it.
     if (this.recorder) {
-      this.recorder.tick(dt, this.recorderContext(dt, inp, throttle, brake, loc, hits));
-      // An autocross run ends at the finish line. Bank it there: the driver
-      // has no reason to press anything, and the run that made the time is
-      // the one worth keeping.
-      if (this.timing.state === "finished") this.endRun("finished");
+      this.recorder.tick(dt, this.recorderContext(dt, inp, throttle, brake, loc, hits), { last: justFinished });
+      // An autocross run ends at the finish line. Bank it HERE, after the
+      // tick, and not in `onRunFinished` where it used to be: `endRun` nulls
+      // the recorder, so ending the run up there meant the finishing step was
+      // never logged -- the beacon `recordLap` had just raised for the line
+      // never reached a row, and every autocross file had a lap with a start
+      // and no end. The driver has no reason to press anything at the flag,
+      // and the run that made the time is the one worth keeping, so it still
+      // goes to disk on the frame it finished.
+      if (this.timing.state === "finished") {
+        const rec = this.recorder;
+        this.notSavedNote = rec.worthSaving ? null : rec.notSavedReason;
+        this.finishSave = this.endRun("finished");
+      }
     }
   }
 
@@ -1464,10 +1476,11 @@ class Game {
    *
    * Two things happen, in this order and a couple of seconds apart:
    *
-   *   1. The run is banked NOW. The timed run ended at the line, so the log
-   *      ends at the line too -- whatever the car does rolling to a stop is
-   *      not part of it, and a driver who then quits out must still find
-   *      their telemetry.
+   *   1. The run is banked on THIS frame, at the bottom of `update` once the
+   *      log has taken the finishing step. The timed run ended at the line,
+   *      so the log ends at the line too -- whatever the car does rolling to
+   *      a stop is not part of it, and a driver who then quits out must
+   *      still find their telemetry.
    *   2. The card comes up after a short roll-out. Freezing the car the
    *      instant the nose crosses is how you lose the only moment the driver
    *      wanted -- seeing FINISH and their time while still braking. Two
@@ -1478,9 +1491,11 @@ class Game {
     // Captured by the lap hook a moment ago; see `installLapHooks`.
     this.finishSectors = this.lapSectors ?? [];
     this.finishBestBefore = this.prevBestSectors ?? [];
-    const rec = this.recorder;
-    this.notSavedNote = rec && !rec.worthSaving ? rec.notSavedReason : null;
-    this.finishSave = this.endRun("finished");
+    // The save itself -- `finishSave`, `notSavedNote` -- is set at the end of
+    // `update`, once the log has its finishing row. Nothing reads either
+    // before the card comes up, two seconds from now.
+    this.finishSave = null;
+    this.notSavedNote = null;
     this.finishAt = this.clock + FINISH_ROLLOUT_S;
   }
 
