@@ -27,7 +27,7 @@
 // guarantee -- at most one row is written per simulation step, so a machine
 // rendering at 60 fps logs at 60 Hz. `stats` carries the rate achieved.
 
-import { CONE_PENALTY_S, OFF_COURSE_PENALTY_S } from "./timing.js";
+import { CONE_PENALTY_S } from "./timing.js";
 
 export const SAMPLE_HZ = 100;
 const SAMPLE_DT = 1 / SAMPLE_HZ;
@@ -487,8 +487,13 @@ export class Recorder {
       raw: round(entry.raw, 3),
       cones: entry.cones,
       off: entry.off,
-      penaltyS: round(entry.cones * CONE_PENALTY_S + entry.off * OFF_COURSE_PENALTY_S, 3),
+      penaltyS: round(entry.cones * CONE_PENALTY_S, 3),
       total: round(entry.total, 3),
+      // Left the course, so it is not a time -- see `timing.js`, which is
+      // stricter than the rulebook here and says why. The lap is recorded in
+      // full; everything that ranks reads `valid` and nothing else has to
+      // know the reason.
+      valid: entry.valid !== false,
       // `null` for a sector that was never timed -- the car's course distance
       // jumped over the boundary. `round` turns a null into 0, and a 0.000 s
       // sector is a far worse answer than an admitted gap.
@@ -572,8 +577,13 @@ export class Recorder {
     // the best scored time with the quickest raw time from somewhere else in
     // the run reads as one lap and is not one, and the difference between them
     // reads as a penalty that was never applied.
-    const bestLap = this.laps.reduce((b, l) => (b == null || l.total < b.total ? l : b), null);
-    const fastestRaw = this.laps.reduce((b, l) => (b == null || l.raw < b.raw ? l : b), null);
+    // Only valid laps may be a best. A run of nothing but off-course laps has
+    // no best lap at all, which is exactly right: it did not set a time, and
+    // downstream that makes it unrankable without anything else having to
+    // know about off courses.
+    const scoring = this.laps.filter((l) => l.valid !== false);
+    const bestLap = scoring.reduce((b, l) => (b == null || l.total < b.total ? l : b), null);
+    const fastestRaw = scoring.reduce((b, l) => (b == null || l.raw < b.raw ? l : b), null);
     // Theoretical best: the quickest each sector was ever driven, added up.
     // It is the number that tells a driver what the car already did, in
     // pieces, on a lap nobody has yet put together.
@@ -581,7 +591,7 @@ export class Recorder {
     const bestSectors = [];
     for (let i = 0; i < nSectors; i++) {
       let best = null;
-      for (const l of this.laps) {
+      for (const l of scoring) {
         const v = l.sectors[i];
         // `null` is a sector that was never timed, which is why this reads
         // `!= null` and not a truthiness test: a genuine 0 would be absurd,
@@ -608,6 +618,9 @@ export class Recorder {
       theoreticalBestS: complete ? round(bestSectors.reduce((a, b) => a + b, 0), 3) : null,
       totalCones: this.laps.reduce((a, l) => a + l.cones, 0),
       totalOffCourse: this.laps.reduce((a, l) => a + l.off, 0),
+      /** Laps thrown out for leaving the course. `laps` counts them; nothing
+       *  that ranks does. */
+      invalidLaps: this.laps.length - scoring.length,
       peakSpeedMps: round(this._peak.speed, 3),
       peakSpeedKph: round(this._peak.speed * 3.6, 2),
       peakRpm: Math.round(this._peak.rpm),
@@ -630,6 +643,16 @@ export class Recorder {
 
   toManifest() {
     return {
+      // 3: a lap that left the course has NO TIME. `laps[].valid` says so,
+      // and `bestLapS`, `bestLapRawS`, `bestSectors` and `theoreticalBestS`
+      // are computed from the valid laps only.
+      //
+      // Version 2 scored an off course as +10 s and let the lap stand, so its
+      // best lap and its sector bests can both be times that left the course.
+      // Nothing about them looks wrong -- they are ordinary times with a
+      // plausible number added -- which is why the version has to move: a
+      // reader cannot tell by inspection and must not have to guess.
+      //
       // 2: `laps[].sectors` are DURATIONS and the final sector is present, and
       // `stats.bestLapRawS` is the raw time of the best SCORED lap.
       //
@@ -641,7 +664,7 @@ export class Recorder {
       // reasonable and are wrong, so a reader has to be able to tell the two
       // formats apart rather than trusting the fields. Helios hides the
       // affected columns on a version 1 run instead of drawing a lie.
-      formatVersion: 2,
+      formatVersion: 3,
       producer: "fsae-sim",
       ...this.meta,
       startedAt: new Date(this.startedAtMs).toISOString(),

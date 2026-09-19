@@ -13,7 +13,7 @@ import { Renderer } from "./render/renderer.js";
 import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
-import { Timing, fmt, CONE_PENALTY_S, OFF_COURSE_PENALTY_S } from "./game/timing.js";
+import { Timing, fmt, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
 import { keyLabel } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
@@ -1497,11 +1497,22 @@ class Game {
       }
       if (entry.off > 0) {
         rows.push('<span class="k">Off course</span>');
-        rows.push(`<span class="v pen">${entry.off} x 10.000 = +${(entry.off * OFF_COURSE_PENALTY_S).toFixed(3)}</span>`);
+        rows.push(`<span class="v pen">${entry.off}</span>`);
       }
       rows.push('<span class="rule"></span>');
-      rows.push('<span class="k total">Scored</span>');
-      rows.push(`<span class="v total">${fmt(entry.total)}</span>`);
+      if (entry.valid === false) {
+        // No time, and say why rather than showing a number that does not
+        // count. The figure the rulebook would have given is worth knowing.
+        rows.push('<span class="k total">Scored</span>');
+        rows.push('<span class="v total pen">NO TIME - OFF COURSE</span>');
+        const fsae = entry.raw + entry.cones * CONE_PENALTY_S
+          + entry.off * FSAE_OFF_COURSE_PENALTY_S;
+        rows.push('<span class="k">Under FSAE +20s</span>');
+        rows.push(`<span class="v">${fmt(fsae)}</span>`);
+      } else {
+        rows.push('<span class="k total">Scored</span>');
+        rows.push(`<span class="v total">${fmt(entry.total)}</span>`);
+      }
 
       // The sectors this run was scored on, against the best each has ever
       // been driven. For a team working out where a lap went, this is the

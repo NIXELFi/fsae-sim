@@ -482,7 +482,9 @@ export class Hud {
     ctx.textAlign = "left";
     ctx.fillStyle = pen > 0 ? "#ff453a" : "#31d158";
     ctx.fillText(
-      pen > 0 ? `${s.cones}C ${s.offCourse}OFF +${(s.penaltyS ?? 0).toFixed(0)}s` : "CLEAN",
+      s.offCourse > 0
+        ? `OFF COURSE - NO TIME  (${s.cones}C ${s.offCourse}OFF)`
+        : pen > 0 ? `${s.cones}C +${(s.penaltyS ?? 0).toFixed(0)}s` : "CLEAN",
       x, cy,
     );
     ctx.textAlign = "center";

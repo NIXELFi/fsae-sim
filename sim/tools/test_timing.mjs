@@ -20,7 +20,7 @@
 // earlier, shorter one, which makes the theoretical best too SMALL. Nobody
 // checks a quick theoretical.
 
-import { Timing, CONE_PENALTY_S, OFF_COURSE_PENALTY_S } from "../src/game/timing.js";
+import { Timing, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "../src/game/timing.js";
 
 let failures = 0;
 let checks = 0;
@@ -133,24 +133,58 @@ section("a jump in course distance does not invent a sector time");
   );
 }
 
-section("penalties");
+section("cones are a penalty");
 {
   const t = new Timing(axTrack());
   t.update(DT, { s: 0, onTrack: true }, true, 0);
   drive(t, 0, 200, 20, { cones: 2 });
+  drive(t, 200, 600, 20);
+  const lap = t.laps[0];
+  ok(lap.cones === 2, `two cones (got ${lap.cones})`);
+  ok(lap.valid === true, "a coned but on-course lap still counts");
+  near(lap.total - lap.raw, 2 * CONE_PENALTY_S, 1e-6, "the score is the raw time plus 2 s a cone");
+}
+
+section("leaving the course throws the lap away");
+{
+  // Stricter than FSAE, which scores +20 s and KEEPS the time. See the note
+  // at the top of timing.js: this is a leaderboard people practise against
+  // with nobody marshalling it.
+  const t = new Timing(axTrack());
+  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  drive(t, 0, 200, 20, { cones: 1 });
   // One excursion, counted once however many frames it lasts.
   drive(t, 200, 300, 20, { onTrack: false });
   drive(t, 300, 400, 20, { onTrack: false });
   drive(t, 400, 600, 20);
   const lap = t.laps[0];
-  ok(lap.cones === 2, `two cones (got ${lap.cones})`);
   ok(lap.off === 1, `one excursion, not one per frame (got ${lap.off})`);
-  near(
-    lap.total - lap.raw,
-    2 * CONE_PENALTY_S + OFF_COURSE_PENALTY_S,
-    1e-6,
-    "the score is the raw time plus the penalties",
-  );
+  ok(lap.valid === false, "the lap is invalid");
+  ok(t.best == null, "and it is not the best lap");
+  ok(t.bestRaw == null, "...nor the best raw lap");
+  ok(lap.raw > 0, "the lap is still recorded -- a driver wants to see it");
+  ok(t.bestSectors.every((v) => v == null), "and none of its sectors became a best");
+}
+
+section("you cannot cut the course to buy a leaderboard time");
+{
+  const t = new Timing(axTrack());
+  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  drive(t, 0, 200, 20); drive(t, 200, 400, 20); drive(t, 400, 600, 20);
+  const clean = t.laps[0].total;
+  ok(t.best != null, "the clean lap is the best");
+
+  // Now a QUICKER lap that went off. It must not take the record.
+  t.reset({ keepBest: true });
+  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  drive(t, 0, 200, 40);
+  drive(t, 200, 260, 40, { onTrack: false });
+  drive(t, 260, 400, 40); drive(t, 400, 600, 40);
+  const cheat = t.laps[0];
+  ok(cheat.raw < clean, "the off-course lap really was quicker");
+  ok(cheat.valid === false, "but it is invalid");
+  near(t.best.total, clean, 1e-6, "so the clean lap is still the best");
+  ok(FSAE_OFF_COURSE_PENALTY_S === 20, "and the rulebook figure is on record as 20 s");
 }
 
 section("a closed course laps rather than finishing");

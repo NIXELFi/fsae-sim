@@ -2,14 +2,36 @@
 //
 // Rules that matter here (2026 FSAE rules, events D.7 and D.8):
 //   * a cone knocked down or knocked out of its box is +2.000 s
-//   * leaving the course is Off Course -- a DNF on a real autocross run, which
-//     would end the game, so it is scored as a +10 s penalty per excursion
-//     instead and flagged in the HUD. The run stays honest about it.
 //   * autocross is a single timed run from the start line to the finish line
 //   * endurance is a closed circuit, timed per lap
+//
+// OFF COURSE: WE ARE STRICTER THAN THE RULEBOOK, ON PURPOSE.
+//
+// FSAE scores an off course as +20 s and KEEPS the time -- "a 20-second
+// penalty for going off course and not re-entering at a point prior to the
+// missed gate" (FSAE IC Handbook, Autocross event). It is not a DNF, and a
+// comment here used to say it was, at +10 s, which was wrong twice over.
+//
+// This simulator throws the lap away instead. That is a team decision and not
+// a rules one, and the reason is that the two are not the same problem. At a
+// competition an off course is seen, marshalled and re-run; here it is a
+// number on a board that people practise against, with nobody watching and
+// nothing physical stopping a driver from straightlining a slalom to find a
+// tenth. A leaderboard is only worth having if every time on it was driven
+// the same way, so a lap that left the course does not get a time at all.
+//
+// The lap is still RECORDED in full -- the telemetry, the excursion count and
+// the raw time are all there, and a driver wants to see what it was worth. It
+// simply cannot be a best, a reference, a sector best, or anything else that
+// counts as a time.
 
 export const CONE_PENALTY_S = 2.0;
-export const OFF_COURSE_PENALTY_S = 10.0;
+
+/**
+ * What FSAE would add for an off course. Not applied -- see above -- and kept
+ * so the UI can say what the lap would have scored under the rulebook.
+ */
+export const FSAE_OFF_COURSE_PENALTY_S = 20.0;
 
 export class Timing {
   constructor(track) {
@@ -58,7 +80,19 @@ export class Timing {
 
   get lapTime() { return this.state === "running" ? this.elapsed - this.lapStart : 0; }
 
-  get penaltyS() { return this.cones * CONE_PENALTY_S + this.offCourse * OFF_COURSE_PENALTY_S; }
+  get penaltyS() { return this.cones * CONE_PENALTY_S; }
+
+  /**
+   * Has this lap left the course?
+   *
+   * One excursion is enough and it cannot be undone by coming back: the lap
+   * is a DNF from the moment the car is off, which is why the HUD can say so
+   * immediately rather than waiting for the line.
+   */
+  get lapInvalid() { return this.offCourse > 0; }
+
+  /** What this lap would have scored under FSAE's +20 s, for the record. */
+  get fsaeTotal() { return this.lapTime + this.penaltyS + this.offCourse * FSAE_OFF_COURSE_PENALTY_S; }
 
   /** Running total for the current lap including penalties accrued in it. */
   get provisionalTotal() { return this.lapTime + this.penaltyS; }
@@ -103,7 +137,7 @@ export class Timing {
     if (!loc.onTrack && !this.wasOffCourse) {
       this.offCourse++;
       this.wasOffCourse = true;
-      this.say(`OFF COURSE +${OFF_COURSE_PENALTY_S.toFixed(0)}s`, 2);
+      this.say("OFF COURSE - LAP INVALID", 2.5);
     } else if (loc.onTrack && this.wasOffCourse) {
       this.wasOffCourse = false;
     }
@@ -152,14 +186,18 @@ export class Timing {
       const split = this.lapTime - this.sectorStart;
       this.sectorStart = this.lapTime;
       this.sectorSplits.push(split);
+      // Reported against the best so far, but NOT folded into it. Sector
+      // bests are decided at the flag, in `completeLap`, once it is known
+      // whether the lap counted -- see the note there.
       const prevBest = this.bestSectors[this.sectorIndex];
-      if (prevBest == null || split < prevBest) {
-        this.bestSectors[this.sectorIndex] = split;
-        this.lastSplitDelta = prevBest == null ? null : split - prevBest;
-        this.say(`S${this.sectorIndex + 1} ${fmt(split)}${prevBest == null ? "" : "  BEST"}`, 2);
+      const n = this.sectorIndex + 1;
+      if (prevBest == null) {
+        this.lastSplitDelta = null;
+        this.say(`S${n} ${fmt(split)}`, 2);
       } else {
         this.lastSplitDelta = split - prevBest;
-        this.say(`S${this.sectorIndex + 1} ${fmt(split)}  +${(split - prevBest).toFixed(2)}`, 2);
+        const d = split - prevBest;
+        this.say(`S${n} ${fmt(split)}  ${d < 0 ? "" : "+"}${d.toFixed(2)}`, 2);
       }
       this.sectorIndex++;
       crossedThisFrame++;
@@ -183,6 +221,33 @@ export class Timing {
     this.prevS = loc.s;
   }
 
+  /**
+   * Fold this lap's splits into the session's sector bests.
+   *
+   * At the FLAG, not as each boundary is crossed, and that is the whole
+   * point. A lap is only known to have left the course once it has; a sector
+   * driven cleanly before the excursion would otherwise already be in the
+   * bests by the time the car went off. Which is exactly the thing to guard
+   * against -- drive one sector flat out, run wide in the next where there is
+   * no consequence, and the theoretical best keeps the sector you bought.
+   * Called only for a valid lap.
+   *
+   * A split whose PREVIOUS boundary was never crossed is not a sector time
+   * either: `sectorStart` is still back at the last boundary that was, so the
+   * split spans more than one sector. Only the immediate predecessor matters
+   * -- once a boundary is crossed again the following split is measured from
+   * it and is honest.
+   */
+  foldSectorBests() {
+    for (let i = 0; i < this.sectorSplits.length; i++) {
+      const v = this.sectorSplits[i];
+      if (v == null) continue;
+      if (i > 0 && this.sectorSplits[i - 1] == null) continue;
+      const prev = this.bestSectors[i];
+      if (prev == null || v < prev) this.bestSectors[i] = v;
+    }
+  }
+
   completeLap() {
     const raw = this.lapTime;
     // The stretch from the last boundary to the line is a sector too, and it
@@ -196,16 +261,7 @@ export class Timing {
       // whole-lap time into an earlier sector's best.
       const i = this.track.sectors.length;
       while (this.sectorSplits.length < i) this.sectorSplits.push(null);
-      const split = raw - this.sectorStart;
-      this.sectorSplits[i] = split;
-      // A final sector that follows a skipped one is not a sector time either:
-      // `sectorStart` is still back at the last boundary that was actually
-      // crossed, so the "split" spans more than one sector.
-      const trustworthy = this.sectorSplits.slice(0, i).every((v) => v != null);
-      const prevBest = this.bestSectors[i];
-      if (trustworthy && (prevBest == null || split < prevBest)) {
-        this.bestSectors[i] = split;
-      }
+      this.sectorSplits[i] = raw - this.sectorStart;
     }
     const entry = {
       lap: this.lap,
@@ -213,10 +269,17 @@ export class Timing {
       cones: this.cones,
       off: this.offCourse,
       total: raw + this.penaltyS,
+      // An off course is a DNF. The lap is kept and shown -- a driver wants
+      // to know what it was worth -- but it is not a time, so nothing that
+      // ranks, references or averages may take it.
+      valid: !this.lapInvalid,
     };
     this.laps.push(entry);
-    if (this.best == null || entry.total < this.best.total) this.best = entry;
-    if (this.bestRaw == null || raw < this.bestRaw) this.bestRaw = raw;
+    if (entry.valid) {
+      if (this.best == null || entry.total < this.best.total) this.best = entry;
+      if (this.bestRaw == null || raw < this.bestRaw) this.bestRaw = raw;
+      this.foldSectorBests();
+    }
     // Before the reset below wipes the splits this lap was scored on.
     if (this.onLap) {
       try { this.onLap(entry, this.sectorSplits.slice()); }
@@ -224,7 +287,10 @@ export class Timing {
     }
 
     if (this.state !== "finished") {
-      this.say(`LAP ${this.lap}  ${fmt(entry.total)}`, 3);
+      this.say(
+        entry.valid ? `LAP ${this.lap}  ${fmt(entry.total)}` : `LAP ${this.lap}  INVALID - OFF COURSE`,
+        3,
+      );
     }
 
     // Penalties are scored per lap, so the counters restart with the lap.

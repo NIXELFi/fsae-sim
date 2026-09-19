@@ -479,7 +479,7 @@ export class ReplayPanel {
         <span class="g">${gap == null ? (isBest ? "best" : "") : `+${gap.toFixed(3)}`}</span>
         <span class="s">${l.sectors.map((s) => s.toFixed(2)).join(" / ") || ""}</span>
         ${l.cones ? `<span class="p">${l.cones}c</span>` : ""}
-        ${l.off ? `<span class="p">${l.off}off</span>` : ""}
+        ${l.off ? `<span class="p">OFF - no time</span>` : ""}
       </button>`;
     }).join("");
   }
