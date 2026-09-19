@@ -67,8 +67,13 @@ async function attachWhenReady(deadlineMs = 30000) {
         ws.addEventListener("error", () => rej(new Error("socket")), { once: true });
         setTimeout(() => rej(new Error("socket timeout")), 4000);
       });
-      const state = await evaluate(ws, "document.readyState", 1000 + attempt);
-      if (state === "complete" || state === "interactive") return { ws, page };
+      // The REAL document, not the about:blank one whose target already
+      // carries the pending url: WebView2 reports the new url on the target
+      // before the new document commits, so `document.readyState` here can be
+      // "complete" for a page that is about to be torn down. The title is
+      // only ever set by the frontend's own <title>, so it is the tell.
+      const title = await evaluate(ws, "document.title", 1000 + attempt);
+      if (typeof title === "string" && title.includes("Driver-in-Loop")) return { ws, page };
     } catch { /* context died mid-navigation; try again */ }
 
     try { ws?.close(); } catch { /* ignore */ }
