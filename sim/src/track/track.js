@@ -6,6 +6,9 @@
 // polyline. Both lookups go through a uniform spatial hash because the
 // endurance course is 2123 points and 586 cones and this runs every frame.
 
+import { SDM26 } from "../vehicle/params.js";
+import { bodyBoxFor } from "../render/carmesh.js";
+
 const CELL = 12; // m, spatial hash cell size
 
 class Grid {
@@ -139,11 +142,27 @@ export class Track {
     let he = psi - h;
     while (he > Math.PI) he -= 2 * Math.PI;
     while (he < -Math.PI) he += 2 * Math.PI;
+    // Off course is FSAE D.8.1.7.b: "all four wheels outside the course
+    // boundary". The car is located by its CG, so the test moves out by the
+    // reach of the tyre nearest the course -- half the track plus half a
+    // tyre, from the footprint the cone test uses -- and a wheel with any of
+    // its contact patch still on the line is on the course. This was a bare
+    // 0.6, which is half the track and nothing else: it called the car off
+    // with the outer 9.5 cm of its inside tyres still on the line. Read live
+    // rather than cached because the track width is a setup adjustment.
+    //
+    // Yaw is ignored, and the error is on the strict side: a car sideways
+    // across the line has a wheel further out than this assumes and is
+    // called off up to 30 cm early. The node heading is not steady enough to
+    // place wheels by -- it swings 40 degrees between adjacent 1 m nodes in
+    // a hairpin -- so a yaw-aware test would flicker exactly where it
+    // matters.
+    const wheelReach = bodyBoxFor(SDM26).halfWidth;
     return {
       index,
       s,
       lateral,
-      onTrack: Math.abs(lateral) <= this.width / 2 + 0.6,
+      onTrack: Math.abs(lateral) <= this.width / 2 + wheelReach,
       headingErrorRad: he,
       curvature: this.curvature[index],
     };

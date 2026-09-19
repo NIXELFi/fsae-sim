@@ -13,7 +13,7 @@
     "data": "python tools/prepare_data.py",
     "icons": "python tools/make_icons.py",
     "validate": "node tools/validate.js",
-    "test": "node tools/check_shaders.mjs && node tools/test_bindings.mjs && node tools/test_input_class.mjs && node tools/test_timing.mjs && node tools/test_respawn.mjs && node tools/test_replay.mjs && node tools/test_recorder.mjs && node tools/test_delta.mjs && node tools/validate.js",
+    "test": "node tools/check_shaders.mjs && node tools/test_bindings.mjs && node tools/test_input_class.mjs && node tools/test_timing.mjs && node tools/test_track.mjs && node tools/test_respawn.mjs && node tools/test_replay.mjs && node tools/test_recorder.mjs && node tools/test_delta.mjs && node tools/validate.js",
     "smoke": "node tools/smoke_desktop.mjs"
   }
 }
