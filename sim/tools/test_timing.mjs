@@ -20,7 +20,9 @@
 // earlier, shorter one, which makes the theoretical best too SMALL. Nobody
 // checks a quick theoretical.
 
-import { Timing, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "../src/game/timing.js";
+import {
+  Timing, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S, OFF_COURSE_MIN_TRAVEL_M,
+} from "../src/game/timing.js";
 
 let failures = 0;
 let checks = 0;
@@ -44,7 +46,8 @@ const DT = 1 / 100;
 
 /**
  * Drive from `fromS` to `toS` at a steady speed, one 100 Hz step at a time.
- * Returns the seconds it took.
+ * The speed goes to `Timing` as well, because an excursion is measured by
+ * how far the car travelled while off. Returns the seconds it took.
  */
 function drive(t, fromS, toS, mps, { onTrack = true, cones = 0 } = {}) {
   let s = fromS;
@@ -52,7 +55,7 @@ function drive(t, fromS, toS, mps, { onTrack = true, cones = 0 } = {}) {
   let coneAt = cones;
   while (s < toS) {
     s = Math.min(toS, s + mps * DT);
-    t.update(DT, { s, onTrack }, true, coneAt);
+    t.update(DT, { s, onTrack }, mps, coneAt);
     coneAt = 0;
     elapsed += DT;
   }
@@ -68,7 +71,7 @@ section("a lap files one sector per stretch, as DURATIONS");
   let filed = null;
   t.onLap = (_entry, sectors) => { filed = sectors.slice(); };
   // Off the line first: the clock starts when the car moves.
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   ok(t.state === "running", "green when the car moves");
 
   drive(t, 0, 200, 20);        // S1: 200 m at 20 m/s = 10 s
@@ -89,7 +92,7 @@ section("a lap files one sector per stretch, as DURATIONS");
 section("a theoretical best is a lap time, not a sum of running totals");
 {
   const t = new Timing(axTrack());
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   drive(t, 0, 200, 20);
   drive(t, 200, 400, 10);
   drive(t, 400, 600, 20);
@@ -97,7 +100,7 @@ section("a theoretical best is a lap time, not a sum of running totals");
 
   // A second run, quicker in the middle and slower at the end.
   t.reset({ keepBest: true });
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   drive(t, 0, 200, 20);        // same
   drive(t, 200, 400, 20);      // 10 s instead of 20
   drive(t, 400, 600, 10);      // 20 s instead of 10
@@ -116,12 +119,12 @@ section("a jump in course distance does not invent a sector time");
 {
   // `loc.s` teleporting is what a respawn or an off-course re-entry does.
   const t = new Timing(axTrack());
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   let filed = null;
   t.onLap = (_entry, sectors) => { filed = sectors.slice(); };
   drive(t, 0, 150, 20);
   // Straight past BOTH boundaries in one step.
-  t.update(DT, { s: 450, onTrack: true }, true, 0);
+  t.update(DT, { s: 450, onTrack: true }, 1, 0);
   ok(t.sectorIndex === 2, `the index keeps up with the geometry (got ${t.sectorIndex})`);
   ok(t.sectorSplits[1] === null, "the sector that was jumped over has no time");
   drive(t, 450, 600, 20);
@@ -136,7 +139,7 @@ section("a jump in course distance does not invent a sector time");
 section("cones are a penalty");
 {
   const t = new Timing(axTrack());
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   drive(t, 0, 200, 20, { cones: 2 });
   drive(t, 200, 600, 20);
   const lap = t.laps[0];
@@ -151,7 +154,7 @@ section("leaving the course throws the lap away");
   // at the top of timing.js: this is a leaderboard people practise against
   // with nobody marshalling it.
   const t = new Timing(axTrack());
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   drive(t, 0, 200, 20, { cones: 1 });
   // One excursion, counted once however many frames it lasts.
   drive(t, 200, 300, 20, { onTrack: false });
@@ -169,14 +172,14 @@ section("leaving the course throws the lap away");
 section("you cannot cut the course to buy a leaderboard time");
 {
   const t = new Timing(axTrack());
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   drive(t, 0, 200, 20); drive(t, 200, 400, 20); drive(t, 400, 600, 20);
   const clean = t.laps[0].total;
   ok(t.best != null, "the clean lap is the best");
 
   // Now a QUICKER lap that went off. It must not take the record.
   t.reset({ keepBest: true });
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   drive(t, 0, 200, 40);
   drive(t, 200, 260, 40, { onTrack: false });
   drive(t, 260, 400, 40); drive(t, 400, 600, 40);
@@ -190,10 +193,10 @@ section("you cannot cut the course to buy a leaderboard time");
 section("a closed course laps rather than finishing");
 {
   const t = new Timing({ closed: true, length: 1000, sectors: [500], resetCones() {} });
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   drive(t, 0, 999, 50);
   // Wrap past the line.
-  t.update(DT, { s: 2, onTrack: true }, true, 0);
+  t.update(DT, { s: 2, onTrack: true }, 1, 0);
   ok(t.laps.length === 1, "crossing the line completes a lap");
   ok(t.state === "running", "and the session carries on");
   ok(t.lap === 2, "onto lap 2");
@@ -203,11 +206,72 @@ section("a closed course laps rather than finishing");
 section("reversing over the line is not a lap");
 {
   const t = new Timing({ closed: true, length: 1000, sectors: [], resetCones() {} });
-  t.update(DT, { s: 0, onTrack: true }, true, 0);
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
   // Nudge forward, then back over the line without going round.
-  t.update(DT, { s: 990, onTrack: true }, true, 0);
-  t.update(DT, { s: 5, onTrack: true }, true, 0);
+  t.update(DT, { s: 990, onTrack: true }, 1, 0);
+  t.update(DT, { s: 5, onTrack: true }, 1, 0);
   ok(t.laps.length === 0, "a lap needs the far side of the course driven");
+}
+
+section("a lap that begins off the course is not a clean lap");
+{
+  // THE BUG THIS EXISTS FOR: `completeLap` reset the excursion count but not
+  // the excursion, so a car still off the course at the line started the
+  // next lap with nothing watching it. On endurance: lap 1 goes off at
+  // 900 m and crosses the line still off (invalid, and it was); lap 2 begins
+  // off course, cuts the first 150 m through turn 1, rejoins and finishes --
+  // and came out off: 0, valid: true. That is exactly the cheat the rule
+  // exists to stop.
+  const t = new Timing({ closed: true, length: 1000, sectors: [], resetCones() {} });
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(t, 0, 900, 20);
+  drive(t, 900, 999, 20, { onTrack: false });
+  t.update(DT, { s: 2, onTrack: false }, 20, 0);       // over the line, still off
+  ok(t.laps.length === 1, "lap 1 completed");
+  ok(t.laps[0].valid === false, "lap 1 left the course and is invalid");
+  drive(t, 2, 150, 20, { onTrack: false });             // the cut
+  drive(t, 150, 999, 20);
+  t.update(DT, { s: 2, onTrack: true }, 20, 0);
+  ok(t.laps.length === 2, "lap 2 completed");
+  ok(t.laps[1].off === 1, `lap 2 began off course, so it has an excursion (got ${t.laps[1].off})`);
+  ok(t.laps[1].valid === false, "and it is invalid");
+  ok(t.best == null, "so there is still no best lap");
+}
+
+section("a blip over the line is not an off course");
+{
+  // FSAE D.11.3.2.a penalises going off "and not reentering at or prior to
+  // the point of exit": the 20 s is for the shortcut, and rejoining where
+  // you left is not an OC at all. A car that puts four wheels a few
+  // centimetres over the line for less than its own length rejoined where it
+  // left, and voiding a 43 s run for it (20260919-014151-autocross-qs3c:
+  // nine rows, 3 cm over) is not what "no off-track time" meant.
+  const t = new Timing(axTrack());
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(t, 0, 200, 20);
+  drive(t, 200, 200.4, 7.5, { onTrack: false });        // 40 cm, as in the archive
+  drive(t, 200.4, 600, 20);
+  ok(t.laps[0].off === 0, `a 40 cm blip is not an excursion (got ${t.laps[0].off})`);
+  ok(t.laps[0].valid === true, "and the lap counts");
+  ok(t.best != null, "and it is the best lap");
+
+  // Past the tolerance it is the same off course it always was.
+  const u = new Timing(axTrack());
+  u.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(u, 0, 200, 20);
+  drive(u, 200, 200 + OFF_COURSE_MIN_TRAVEL_M + 1, 20, { onTrack: false });
+  drive(u, 200 + OFF_COURSE_MIN_TRAVEL_M + 1, 600, 20);
+  ok(u.laps[0].off === 1, "a metre past the tolerance is one excursion");
+  ok(u.laps[0].valid === false, "and the lap is invalid");
+
+  // The tolerance is distance, not time: creeping across a corner at walking
+  // pace is still driving across it, and sitting still gains nothing.
+  const w = new Timing(axTrack());
+  w.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(w, 0, 200, 20);
+  drive(w, 200, 204, 0.8, { onTrack: false });          // four metres in five seconds
+  drive(w, 204, 600, 20);
+  ok(w.laps[0].off === 1, "creeping four metres off course counts");
 }
 
 console.log(`\n${checks - failures}/${checks} checks passed`);

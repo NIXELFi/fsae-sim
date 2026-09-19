@@ -1,15 +1,20 @@
 // Lap timing and FSAE scoring penalties.
 //
-// Rules that matter here (2026 FSAE rules, events D.7 and D.8):
-//   * a cone knocked down or knocked out of its box is +2.000 s
-//   * autocross is a single timed run from the start line to the finish line
-//   * endurance is a closed circuit, timed per lap
+// Rules that matter here (FSAE Rules 2021 V1; autocross is D.11, endurance
+// is D.12, and D.8 is the definitions section they both lean on):
+//   * D.11.3.1 / D.12.12.1: a cone knocked down or out of its box (DOO) is
+//     +2.000 s
+//   * D.11.4.1: corrected time = run time + 2 s per DOO + 20 s per OC
+//   * autocross is a single timed run from the start line to the finish line;
+//     endurance is a closed circuit, timed per lap
 //
 // OFF COURSE: WE ARE STRICTER THAN THE RULEBOOK, ON PURPOSE.
 //
-// FSAE scores an off course as +20 s and KEEPS the time -- "a 20-second
-// penalty for going off course and not re-entering at a point prior to the
-// missed gate" (FSAE IC Handbook, Autocross event). It is not a DNF, and a
+// D.8.1.7 defines an off course (OC) as the vehicle having "all four wheels
+// outside the course boundary as indicated by cones, edge marking or the edge
+// of the paved surface", or missing a gate. D.11.3.2 / D.12.12.2 then score
+// it: "the driver must reenter the track at or prior to the point of exit or
+// receive a 20 second penalty". The time is KEPT. It is not a DNF, and a
 // comment here used to say it was, at +10 s, which was wrong twice over.
 //
 // This simulator throws the lap away instead. That is a team decision and not
@@ -19,6 +24,13 @@
 // nothing physical stopping a driver from straightlining a slalom to find a
 // tenth. A leaderboard is only worth having if every time on it was driven
 // the same way, so a lap that left the course does not get a time at all.
+//
+// What the rulebook DOES settle is which excursions count. Its penalty is for
+// leaving the course and rejoining further along it -- for the shortcut --
+// and an excursion that rejoins where it left carries no penalty at all. So
+// a car that puts four wheels a few centimetres over the line for a car's
+// length has not gone off course by the rule that defines the term, and it
+// is not scored as one here either. See `OFF_COURSE_MIN_TRAVEL_M`.
 //
 // The lap is still RECORDED in full -- the telemetry, the excursion count and
 // the raw time are all there, and a driver wants to see what it was worth. It
@@ -32,6 +44,44 @@ export const CONE_PENALTY_S = 2.0;
  * so the UI can say what the lap would have scored under the rulebook.
  */
 export const FSAE_OFF_COURSE_PENALTY_S = 20.0;
+
+/**
+ * How far the car has to travel with all four wheels off the course before
+ * the excursion counts as an off course.
+ *
+ * This is the rulebook's own reading, not a concession. D.11.3.2.a penalises
+ * going off "and not reentering at or prior to the point of exit": rejoining
+ * where you left gained nothing and is not an OC, the 20 s is for rejoining
+ * further along. An excursion that ends a car's length from where it began
+ * therefore is not one, and without this every one of them voided a lap --
+ * 20260919-014151-autocross-qs3c lost a 43.3 s run to nine rows 3 cm over
+ * the line. Our boundary is exact to the centimetre; a marshal's is a line
+ * of cones read by eye.
+ *
+ * Measured as distance TRAVELLED while off, though the rule is written in
+ * terms of where the car rejoined. `loc.s` is a projection onto the nearest
+ * 1 m node's heading, and in a hairpin it is not steady enough to read a
+ * re-entry point off: in 20260919-020416-endurance-z4bp the car travelled
+ * 0.37 m through a blip while `s` advanced 2.69 m, because the nearest node
+ * changed three times. Travelled distance is a speed integral, so it cannot
+ * be gamed by sitting still or idling across a corner -- rejoining ahead of
+ * where you left means travelling at least that far.
+ *
+ * Two metres. The archive's blips are 0.37 m and 1.31 m of travel and the
+ * shortest excursion that actually put the car off the course is over 4 m.
+ * And two metres driven past the boundary cannot cut more than about a
+ * metre off the driving line even at the inside of a hairpin, which is under
+ * a tenth at any speed the car has there. Anything longer scores exactly as
+ * it did before: one excursion, the lap is gone.
+ */
+export const OFF_COURSE_MIN_TRAVEL_M = 2;
+
+/**
+ * Speed at which the car counts as rolling: the clock starts the moment the
+ * car moves off the line, and this is what "moves" means. Below it the car
+ * is creeping on the clutch or being nudged by a respawn.
+ */
+export const MOVING_MPS = 0.6;
 
 export class Timing {
   constructor(track) {
@@ -60,6 +110,10 @@ export class Timing {
     this.cones = 0;
     this.offCourse = 0;
     this.wasOffCourse = false;
+    // The excursion in progress: metres travelled since the car left the
+    // course, and whether it has been charged to the current lap yet.
+    this.offTravelM = 0;
+    this.offCharged = false;
     this.prevS = 0;
     this.sectorIndex = 0;
     this.sectorSplits = [];
@@ -86,8 +140,8 @@ export class Timing {
    * Has this lap left the course?
    *
    * One excursion is enough and it cannot be undone by coming back: the lap
-   * is a DNF from the moment the car is off, which is why the HUD can say so
-   * immediately rather than waiting for the line.
+   * is a DNF from the moment the excursion has gone far enough to count,
+   * which is why the HUD can say so then rather than waiting for the line.
    */
   get lapInvalid() { return this.offCourse > 0; }
 
@@ -105,17 +159,17 @@ export class Timing {
   /**
    * @param dt        seconds
    * @param loc       Track.locate() result
-   * @param moving    is the car actually rolling
+   * @param speedMps  how fast the car is actually going
    * @param newCones  cones knocked down since the last call
    */
-  update(dt, loc, moving, newCones) {
+  update(dt, loc, speedMps, newCones) {
     this.clock += dt;
     if (this.clock > this.messageUntil) this.message = "";
     if (this.state === "finished") return;
 
     if (this.state === "staged") {
       // The clock starts the moment the car moves off the line.
-      if (moving) {
+      if (speedMps > MOVING_MPS) {
         this.state = "running";
         this.lap = 1;
         this.lapStart = 0;
@@ -133,12 +187,24 @@ export class Timing {
       this.say(`CONE +${(newCones * CONE_PENALTY_S).toFixed(0)}s`, 1.6);
     }
 
-    // Off course: count one penalty per excursion, not per frame.
-    if (!loc.onTrack && !this.wasOffCourse) {
-      this.offCourse++;
-      this.wasOffCourse = true;
-      this.say("OFF COURSE - LAP INVALID", 2.5);
-    } else if (loc.onTrack && this.wasOffCourse) {
+    // Off course: one excursion is one penalty, not one per frame, and it is
+    // charged only once the car has gone far enough off to have rejoined
+    // somewhere other than where it left -- see `OFF_COURSE_MIN_TRAVEL_M`.
+    // Distance rather than time, so that creeping across a corner at walking
+    // pace counts exactly as driving across it does.
+    if (!loc.onTrack) {
+      if (!this.wasOffCourse) {
+        this.wasOffCourse = true;
+        this.offTravelM = 0;
+        this.offCharged = false;
+      }
+      this.offTravelM += speedMps * dt;
+      if (!this.offCharged && this.offTravelM > OFF_COURSE_MIN_TRAVEL_M) {
+        this.offCharged = true;
+        this.offCourse++;
+        this.say("OFF COURSE - LAP INVALID", 2.5);
+      }
+    } else if (this.wasOffCourse) {
       this.wasOffCourse = false;
     }
 
@@ -298,11 +364,39 @@ export class Timing {
     this.lapStart = this.elapsed;
     this.cones = 0;
     this.offCourse = 0;
+    // An excursion still in progress at the line belongs to the new lap as
+    // well: the car is starting it off the course. Only the CHARGE resets --
+    // the distance keeps counting -- so a car that left at the end of one
+    // lap and cuts the first corner of the next is charged for both, and a
+    // blip that straddles the line is still one blip. Without this a lap
+    // that began off course counted as clean however far it cut, which is
+    // exactly the cheat the rule exists to stop.
+    this.offCharged = false;
     this.sectorIndex = 0;
     this.sectorSplits = [];
     this.sectorStart = 0;
     this.track.resetCones();
   }
+}
+
+/**
+ * What a split reads against the best that stood before its lap.
+ *
+ * `best` is only ever claimed for a lap that COUNTED. The finish card used
+ * to label any split quicker than the previous best as the best, including
+ * one from a lap that left the course -- so the same card said "Scored: NO
+ * TIME - OFF COURSE" and, directly under it, "S1 13.500 best".
+ * `foldSectorBests` is never called for that lap, so the split was banked
+ * nowhere and is the best of nothing. It is still reported against the
+ * previous best: the driver wants to know it was quicker, they just do not
+ * get to keep it.
+ *
+ * @returns {{ best: boolean, delta: number|null }}  `delta` is the gap to the
+ *          previous best, or null when there was none to compare against
+ */
+export function sectorVerdict(split, prevBest, lapValid) {
+  const delta = prevBest == null ? null : split - prevBest;
+  return { best: !!lapValid && (delta == null || delta <= 0), delta };
 }
 
 export function fmt(seconds) {

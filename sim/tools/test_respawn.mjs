@@ -151,7 +151,7 @@ console.log("\nand the clock stays staged");
 
   const driving = car._respawnSeq;
   car.apply(snapshot(driving, { x: 0, y: 0, u: 22 }));
-  timing.update(1 / 60, loc, car.speed > 0.6, 0);
+  timing.update(1 / 60, loc, car.speed, 0);
   ok(timing.state === "running", "driving off the line starts the clock");
 
   timing.reset({ keepBest: true });
@@ -159,14 +159,14 @@ console.log("\nand the clock stays staged");
   // Three frames of in-flight snapshots from the old drive.
   for (let i = 0; i < 3; i++) {
     car.apply(snapshot(driving, { x: 1 + i, y: 0, u: 22 }));
-    timing.update(1 / 60, loc, car.speed > 0.6, 0);
+    timing.update(1 / 60, loc, car.speed, 0);
   }
   ok(timing.state === "staged", "a restart leaves the clock on the line");
   ok(timing.lapTime === 0, "...and at zero");
 
   // Now actually drive away.
   car.apply(snapshot(car._respawnSeq, { x: 0.2, y: 0, u: 3 }));
-  timing.update(1 / 60, loc, car.speed > 0.6, 0);
+  timing.update(1 / 60, loc, car.speed, 0);
   ok(timing.state === "running", "and it starts when the driver does");
 }
 

@@ -786,10 +786,9 @@ class Game {
     // ---- course state ----
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
     const hits = this.track.strikeCones(this.pose(), bodyBoxFor(SDM26));
-    const moving = this.car.speed > 0.6;
     const wasStaged = this.timing.state === "staged";
     const wasRunning = this.timing.state === "running";
-    this.timing.update(dt, loc, moving, hits);
+    this.timing.update(dt, loc, this.car.speed, hits);
     // Autocross ends at the finish line. The card is arranged in
     // `onRunFinished`; the run itself is banked at the bottom of this frame,
     // after the log has taken the finishing step. A closed course never
