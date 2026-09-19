@@ -73,6 +73,12 @@ section("the action table");
   for (const id of Object.keys(DEFAULT_KEYS)) {
     ok(ids.includes(id), `DEFAULT_KEYS.${id} is an action the panel can show`);
   }
+  // Both directions: `ACTION_GROUPS` is a second description of the `group`
+  // field, so a group with nothing in it means a heading with no rows under
+  // it, and a group missing from the list means rows that never render.
+  for (const g of ACTION_GROUPS) {
+    ok(ACTIONS.some((a) => a.group === g), `the "${g}" group has actions in it`);
+  }
 
   // Two actions on one key is a bug you find at speed, not a preference.
   const owner = new Map();

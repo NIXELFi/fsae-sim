@@ -426,8 +426,10 @@ export class ControlsPanel {
         "small",
         "ctl-hint",
         "Click a row, then move the thing it is for: the axis that moves is " +
-          "the one it binds to. Sweeping a pedal all the way and letting it " +
-          "go also calibrates its travel. Esc stops listening.",
+          "the one it binds to. Sweeping a pedal all the way and letting it go " +
+          "also calibrates its travel -- so take your feet off the others " +
+          "first, or the one you are resting on is read as its own rest " +
+          "position. Esc stops listening.",
       ),
     );
 
