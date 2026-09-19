@@ -33,6 +33,7 @@
 // nothing else here has a motor.
 
 import { defaultKeys, UNBOUND } from "./controlBindings.js";
+import WHEEL_BRANDS from "./wheelBrands.json" with { type: "json" };
 
 const STORAGE_KEY = "fsae-sim.controls.v1";
 
@@ -570,13 +571,17 @@ export function detectProfile(padId) {
   if (!id) return "keyboard";
 
   // Wheels first: several report vendor names that also contain "gamepad".
-  if (
-    /logitech|g29|g920|g923|g27|g25|driving force|thrustmaster|t300|t150|tmx|t248|t500|fanatec|clubsport|csl|podium|moza|simucube|simagic|cammus|wheel|racing/.test(
-      id,
-    )
-  ) {
-    return "wheel";
-  }
+  //
+  // The keywords come from the same file the desktop rig compiles in, and
+  // that is the point of the file. There were two lists, one per language,
+  // and they had drifted: the rig knew asetek, vrs and "base", this one did
+  // not. A base the rig fails to acquire falls back to the Gamepad API and
+  // is classified HERE -- and since `Input.steerDeviceIsWheel` decides which
+  // leaderboard a run lands on, a keyword missing from this side put a wheel
+  // run on the controller board. The bare "logitech" this list carried is
+  // gone with it: every Logitech wheel names its model, and the token was
+  // matching their gamepads.
+  if (WHEEL_BRANDS.wheel.some((k) => id.includes(k))) return "wheel";
   if (/dualshock|dualsense|playstation|sony|054c|wireless controller/.test(id)) {
     return "gamepad-ps";
   }

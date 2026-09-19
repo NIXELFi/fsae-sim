@@ -1053,6 +1053,7 @@ name = "fsae-sim"
 version = "0.3.0"
 dependencies = [
  "serde",
+ "serde_json",
  "sim-core",
  "tauri",
  "tauri-build",

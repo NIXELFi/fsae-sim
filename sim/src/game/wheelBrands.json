@@ -1,0 +1,31 @@
+{
+  "note": "The one list of steering-wheel name keywords. Read by detectProfile in src/game/controlProfiles.js and by looks_like_wheel in src-tauri/src/wheel.rs; a device whose name contains any of these, case-insensitively, is a wheel. It decides which leaderboard a run lands on. Vendors that also make gamepads (Logitech, Thrustmaster) are listed by model rather than by name, because a bare vendor token put their gamepads on the wheel board.",
+  "wheel": [
+    "wheel",
+    "base",
+    "racing",
+    "driving force",
+    "g25",
+    "g27",
+    "g29",
+    "g920",
+    "g923",
+    "t150",
+    "t248",
+    "t300",
+    "t500",
+    "tmx",
+    "tx ",
+    "t-gt",
+    "fanatec",
+    "csl",
+    "clubsport",
+    "podium",
+    "moza",
+    "simucube",
+    "simagic",
+    "cammus",
+    "asetek",
+    "vrs"
+  ]
+}

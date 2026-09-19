@@ -14,6 +14,10 @@
 // through each of those branches, including the mismatched pairs, and then
 // check that the recorder's reduction of the totals agrees.
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { detectInputClass, MIN_STEER_S } from "../src/game/recorder.js";
 
 const listeners = new Map();
@@ -149,6 +153,34 @@ section("the profile is a dropdown and does not get a vote");
   input.poll();
   ok(input.steerSource === "wheel", "a branded base with no actuator at all is a wheel by its name");
   input.nativeDevice = null;
+}
+
+// ------------------------------------------------------------- the one list --
+
+section("the wheel keyword list is one list, and the rig reads the same file");
+{
+  // The rig's `looks_like_wheel` and the webview's `detectProfile` had a list
+  // each, and they had drifted: the rig knew asetek, vrs and "base", the
+  // webview did not. A base the rig fails to acquire is classified by the
+  // webview's list -- which now decides a leaderboard.
+  const { detectProfile } = await import("../src/game/controlProfiles.js");
+  ok(detectProfile("VRS DirectForce Pro") === "wheel", "vrs is a wheel on the webview side");
+  ok(detectProfile("Asetek Invicta") === "wheel", "asetek is a wheel on the webview side");
+  ok(detectProfile("Unbranded Direct Drive Base") === "wheel", "a base is a wheel on the webview side");
+  ok(detectProfile("Logitech G923 Racing Wheel USB") === "wheel", "a Logitech wheel is still a wheel");
+  ok(detectProfile("Thrustmaster T300RS Racing wheel") === "wheel", "a Thrustmaster wheel is still a wheel");
+  ok(detectProfile("Logitech Gamepad F310") !== "wheel", "a Logitech gamepad is not a wheel");
+  ok(detectProfile("Thrustmaster eSwap X Pro Controller") !== "wheel", "a Thrustmaster gamepad is not a wheel");
+
+  const here = dirname(fileURLToPath(import.meta.url));
+  const list = JSON.parse(readFileSync(join(here, "..", "src", "game", "wheelBrands.json"), "utf8"));
+  ok(Array.isArray(list.wheel) && list.wheel.length > 10, "the list is a JSON array");
+  ok(list.wheel.every((k) => typeof k === "string" && k.length > 0 && k === k.toLowerCase()),
+     "every keyword is a non-empty lower-case string, as both sides lower-case the name before matching");
+  const rust = readFileSync(join(here, "..", "src-tauri", "src", "wheel.rs"), "utf8");
+  ok(rust.includes('include_str!("../../src/game/wheelBrands.json")'),
+     "wheel.rs compiles the same file in rather than carrying a list of its own");
+  ok(!/\["wheel", "base", "moza"/.test(rust), "and the old inline list is gone");
 }
 
 // ----------------------------------------------------------------- the noise --

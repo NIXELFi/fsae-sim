@@ -16,6 +16,9 @@ tauri = { version = "2", features = [] }
 # first for the exclusive DirectInput acquire on the wheel.
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
+# Already in the tree under tauri; used directly to read the wheel keyword
+# list the webview also reads (src/game/wheelBrands.json).
+serde_json = "1"
 # The vehicle model. The same crate the JS build is checked against
 # (sim/data/vehicle-golden.json); the desktop build runs it natively at 1 kHz.
 sim-core = { path = "../../native/crates/sim-core" }

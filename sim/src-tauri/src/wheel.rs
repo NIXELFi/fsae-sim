@@ -49,15 +49,36 @@ pub struct DeviceInfo {
     pub force_feedback: bool,
 }
 
+/// The one list of steering-wheel name keywords, shared with the webview.
+///
+/// `src/game/wheelBrands.json` is read here at compile time and by
+/// `detectProfile` in `controlProfiles.js` at load. There used to be two
+/// lists, one per language, and they had drifted: this side knew asetek, vrs
+/// and "base", the JS side did not. A base the rig failed to acquire falls
+/// back to the Gamepad API, where the JS list classifies it -- and that
+/// classification now decides which leaderboard the run lands on, so a
+/// keyword missing from one side put a wheel run on the controller board.
+const WHEEL_BRANDS_JSON: &str = include_str!("../../src/game/wheelBrands.json");
+
+#[derive(serde::Deserialize)]
+struct WheelBrands {
+    wheel: Vec<String>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wheel_brands() -> &'static [String] {
+    static BRANDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    BRANDS.get_or_init(|| {
+        let parsed: WheelBrands = serde_json::from_str(WHEEL_BRANDS_JSON).expect("wheelBrands.json: {\"wheel\": [...]}");
+        parsed.wheel
+    })
+}
+
 /// Does this product name look like a steering wheel base?
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn looks_like_wheel(name: &str) -> bool {
     let l = name.to_lowercase();
-    ["wheel", "base", "moza", "simucube", "fanatec", "logitech g", "g29", "g920", "g923", "g27",
-     "thrustmaster", "t300", "t150", "t248", "tx ", "t-gt", "simagic", "cammus", "asetek", "vrs",
-     "podium", "csl", "clubsport", "driving force"]
-        .iter()
-        .any(|k| l.contains(k))
+    wheel_brands().iter().any(|k| l.contains(k.as_str()))
 }
 
 /// Does this product name look like a pedal set, shifter or button box --
@@ -634,7 +655,12 @@ mod tests {
         assert!(looks_like_wheel("Logitech G923 Racing Wheel USB"));
         assert!(looks_like_wheel("Simucube 2 Sport"));
         assert!(looks_like_wheel("Thrustmaster T300RS Racing wheel"));
+        assert!(looks_like_wheel("VRS DirectForce Pro"));
+        assert!(looks_like_wheel("Asetek Invicta"));
         assert!(!looks_like_wheel("Xbox Controller"));
+        // Vendors that also make gamepads are listed by model, not by name.
+        assert!(!looks_like_wheel("Logitech Gamepad F310"));
+        assert!(!looks_like_wheel("Thrustmaster eSwap X Pro Controller"));
         assert!(looks_like_peripheral("MOZA SR-P Pedals"));
         assert!(looks_like_peripheral("Heusinkveld Sim Pedals Sprint"));
         assert!(!looks_like_peripheral("Fanatec Podium Wheel Base DD1"));
