@@ -513,6 +513,7 @@
   .rp-ghost { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; }
   .rp-ghost span { color: var(--dim); }
   .rp-ghost b { font-family: var(--mono); font-size: 13px; }
+  .rp-side select { font-size: 11.5px; padding: 5px 28px 5px 8px; margin-top: 6px; }
   .rp-ghost b.up { color: var(--ok); }
   .rp-ghost b.down { color: var(--bad); }
 
@@ -709,6 +710,19 @@
   .pause-card h2 { margin: 0 0 6px; font: 600 15px var(--mono); letter-spacing: .08em; color: var(--text); }
   .pause-card button { display: flex; justify-content: space-between; align-items: center; gap: 16px; width: 100%; text-align: left; }
   .pause-card kbd { font: 600 11px var(--mono); color: var(--dim); }
+  .pause-card button small { display: block; font-size: 10.5px; color: var(--dim-2); font-weight: 400; }
+  .pause-settings {
+    display: grid; gap: 6px; margin: 4px 0; padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  }
+  .pause-settings button > b { margin-left: auto; margin-right: 12px; font-weight: 500; color: var(--gold); font-size: 12px; }
+  .pause-volume { display: grid; grid-template-columns: auto 1fr 36px; gap: 12px; align-items: center; font-size: 12.5px; padding: 4px 14px; }
+  .pause-volume b { font: 500 12px var(--mono); color: var(--gold); text-align: right; }
+  /* Pad navigation. The class goes on once a d-pad has been used on a menu:
+     focus is then the cursor, so it has to be visible even when it was not
+     put there by the keyboard. */
+  body.pad-nav :focus { outline: 2px solid var(--gold); outline-offset: 2px; }
+  .pad-hint { display: none; font-size: 11px; color: var(--dim-2); margin: 10px 0 0; }
+  body.pad-nav .pad-hint { display: block; }
 
   /* The finish card carries a result as well as a menu, so it is a little
      wider and the scoreboard sits between the two. */
@@ -731,8 +745,21 @@
       <h2>PAUSED</h2>
       <button id="pauseResume" class="secondary" type="button"><span>Resume</span><kbd data-key="pause">Esc</kbd></button>
       <button id="pauseRestart" class="secondary" type="button"><span>Restart run</span><kbd data-key="restart">Backspace</kbd></button>
-      <button id="pauseHome" class="secondary" type="button"><span>Home screen and settings</span><kbd data-key="home">H</kbd></button>
+      <!-- Ends the timed session on a lapped course and shows the lap table.
+           Autocross ends itself at the line; see `showFinishMenu`. -->
+      <button id="pauseEnd" class="secondary" type="button" hidden><span>End session</span></button>
+      <!-- The things a driver stops to change. Going Home for these ends the
+           recording; here they do not. -->
+      <div class="pause-settings">
+        <button id="pauseCamera" class="secondary" type="button"><span>Camera</span><b>-</b><kbd data-key="camera">C</kbd></button>
+        <button id="pauseDensity" class="secondary" type="button"><span>Overlay</span><b>-</b><kbd data-key="hudDensity">U</kbd></button>
+        <button id="pauseDash" class="secondary" type="button"><span>Dash</span><b>-</b><kbd data-key="dashMode">J</kbd></button>
+        <button id="pauseTc" class="secondary" type="button"><span>Traction control</span><b>-</b><kbd data-key="traction">T</kbd></button>
+        <label class="pause-volume"><span>Volume</span><input id="pauseVolume" type="range" min="0" max="1" step="0.05"><b>-</b></label>
+      </div>
+      <button id="pauseHome" class="secondary" type="button"><span>Home screen<small>ends this recording</small></span><kbd data-key="home">H</kbd></button>
       <button id="pauseQuit" class="secondary" type="button" hidden><span>Quit</span></button>
+      <p class="pad-hint">D-pad moves, A selects, B resumes</p>
     </div>
   </div>
 
@@ -748,6 +775,7 @@
       <button id="finishRoll" class="secondary" type="button"><span>Keep driving</span><kbd data-key="pause">Esc</kbd></button>
       <button id="finishHome" class="secondary" type="button"><span>Home screen and settings</span><kbd data-key="home">H</kbd></button>
       <button id="finishQuit" class="secondary" type="button" hidden><span>Quit</span><kbd>Q</kbd></button>
+      <p class="pad-hint">D-pad moves, A selects, B keeps driving</p>
     </div>
   </div>
 
@@ -815,7 +843,11 @@
             </div>
             <div>
               <h3>Recorded runs</h3>
-              <p class="lead">Newest first. Replay drives the car from the log.</p>
+              <p class="lead">Newest first. Replay drives the car from the log; Chase puts its best lap on the live delta.</p>
+              <select id="runsFilter" style="margin-bottom:8px" aria-label="Which runs to list">
+                <option value="course">This course</option>
+                <option value="all">Every course</option>
+              </select>
               <div id="runsList" class="runs-list">
                 <p class="note">Nothing recorded yet.</p>
               </div>
@@ -903,6 +935,7 @@
       <h2>Session</h2>
       <dl>
         <dt>Course</dt><dd id="sCourse"><b>-</b></dd>
+        <dt>Chasing</dt><dd id="sReference"><span class="off">your best this session</span></dd>
         <dt>Car</dt><dd id="sCar"><b>SDM26</b></dd>
         <dt>Aids</dt><dd id="sAids"><span class="off">none</span></dd>
         <dt>Throttle</dt><dd id="sEtc"><span class="off">-</span></dd>
@@ -916,6 +949,7 @@
         <button id="restartBtn" class="secondary" hidden>Restart run</button>
         <span id="loadNote" class="note">Loading...</span>
         <p class="hint"><kbd>Menu</kbd> or <kbd>Esc</kbd> pauses; <kbd>L3</kbd> or <kbd>H</kbd> returns here. Drag the scene to look around the car.</p>
+        <p class="pad-hint">On the pad: Menu starts the engine, bumpers switch tabs, d-pad moves, A selects.</p>
       </div>
     </aside>
   </div>

@@ -373,6 +373,7 @@ class Game {
     // A new course means a new reference: a time-at-distance table for the
     // autocross means nothing on the endurance loop.
     this.deltaTimer = new DeltaTimer(track.length);
+    this.chasingRunId = null;
     this.renderer.setTrack(track);
 
     // Remembered across track changes so the file is fetched once.
@@ -685,7 +686,8 @@ class Game {
     this.swallowPauseEdge = false;
     // The pause overlay offers a restart, so it has to work from there.
     if (this.input.edges.restart) { this.restart(); this.setPaused(false); }
-    if (this.paused) { this.holdNative(); return; }
+    // The cards are navigable from the pad; see `padNav` in boot.
+    if (this.paused) { this.padNav?.(); this.holdNative(); return; }
 
     this.clock += dt;
 
@@ -1231,6 +1233,7 @@ class Game {
     }
     const replay = new Replay(manifest, parseTelemetry(telemetry));
     if (!replay.rows) throw new Error("that run has no telemetry in it");
+    replay.runId = runId;
 
     this.exitReplay({ keepMenu: true });
     this.replay = replay;
@@ -1253,11 +1256,29 @@ class Game {
       onExit: () => { this.exitReplay(); },
       onCamera: () => {
         this.cameraIndex = (this.cameraIndex + 1) % CAMERAS.length;
+        this.replayPanel?.setCameraName(CAMERAS[this.cameraIndex].name);
       },
+      onGhost: (id) => { if (id) void this.loadGhost(id); else this.clearGhost(); },
     });
+    this.replayPanel.setCameraName(CAMERAS[this.cameraIndex].name);
     if (ghostId) await this.loadGhost(ghostId);
     this.applyReplayFrame();
+    // The other runs on this course, for the ghost picker. Not awaited: the
+    // replay is already playing and the list can arrive when it arrives.
+    const panel = this.replayPanel;
+    listRuns(60).then((runs) => {
+      if (this.replayPanel !== panel) return;
+      panel.setGhostChoices(runs
+        .filter((r) => r.runId !== runId && (r.manifest.track ?? null) === (this.trackId ?? null))
+        .map((r) => ({ runId: r.runId, label: runLabel(r.runId, r.manifest) })));
+    }).catch(() => {});
     return replay;
+  }
+
+  /** Take the ghost out of the scene. */
+  clearGhost() {
+    this.ghost = null;
+    this.replayPanel?.setGhost(null);
   }
 
   /**
@@ -1303,6 +1324,7 @@ class Game {
       }
       const g = new Replay(manifest, parseTelemetry(telemetry));
       if (!g.rows) throw new Error("the ghost run has no telemetry");
+      g.runId = runId;
       this.ghost = g;
       this.replayPanel?.setGhost(g);
     } catch (err) {
@@ -1593,26 +1615,7 @@ class Game {
       row("Result", "not scored");
     }
     d.finishStats.innerHTML = rows.join("");
-
-    // The replay is only offered once the run is actually on disk, and only
-    // when there was something worth saving -- a lap that was never written
-    // cannot be watched, and a button that errors is worse than no button.
-    d.finishWatch.hidden = true;
-    const save = this.finishSave;
-    if (save) {
-      save.then((res) => {
-        if (res?.runId && this._finishToken === token) {
-          this.finishRunId = res.runId;
-          d.finishWatch.hidden = false;
-        }
-      }).catch(() => { /* the save already reported itself */ });
-    } else if (entry) {
-      // There was a lap but nothing was written. Say so on the card rather
-      // than leaving a button quietly missing.
-      rows.push('<span class="k">Replay</span>');
-      rows.push(`<span class="v">${this.notSavedNote ?? "not saved"}</span>`);
-      d.finishStats.innerHTML = rows.join("");
-    }
+    this._offerReplay(token, !!entry);
 
     d.finishMenu.hidden = false;
     this.setPaused(true);
@@ -1626,6 +1629,94 @@ class Game {
     this.finished = false;
     this.finishRunId = null;
     this.dom.finishMenu.hidden = true;
+    // A session card borrows this DOM; put it back for the next finish.
+    document.getElementById("finishTitle").textContent = "RUN COMPLETE";
+    document.getElementById("finishRoll").hidden = false;
+  }
+
+  /**
+   * End a lapped session and show its lap table.
+   *
+   * Autocross ends itself at the line and gets a card. Endurance and the
+   * venue never end, so a driver who was done had only Home: no lap table,
+   * no theoretical best, no offer to watch it back. This is the same card
+   * with the session's laps on it, and the run is banked exactly as an
+   * autocross run is.
+   */
+  endSession() {
+    if (!this.timing || !this.track?.closed) return;
+    const t = this.timing;
+    const laps = t.laps.slice();
+    const best = t.best;
+    const bestSectors = t.bestSectors.slice();
+    const rec = this.recorder;
+    this.notSavedNote = rec && !rec.worthSaving ? rec.notSavedReason : null;
+    this.finishSave = this.endRun("ended");
+    this.dom.pauseMenu.hidden = true;
+    this.finishAt = null;
+    if (this.finished) return;
+    this.finished = true;
+    const token = ++this._finishToken;
+    const d = this.dom;
+    document.getElementById("finishTitle").textContent = "SESSION OVER";
+    d.finishHead.textContent =
+      `${this.track?.name ?? ""}${this.driverName ? `  --  ${this.driverName}` : ""}` +
+      `  --  ${laps.length} lap${laps.length === 1 ? "" : "s"}`;
+    const rows = [];
+    for (const lap of laps) {
+      const tag = lap.valid === false ? '<span class="v pen">off course</span>'
+        : lap === best ? '<span class="v" style="color:var(--gold)">best</span>'
+        : lap.cones > 0 ? `<span class="v pen">${lap.cones} cone${lap.cones === 1 ? "" : "s"}</span>`
+        : '<span class="v"></span>';
+      rows.push(`<span class="k">L${lap.lap}  ${fmt(lap.total)}</span>${tag}`);
+    }
+    if (laps.length) rows.push('<span class="rule"></span>');
+    if (best) {
+      rows.push('<span class="k total">Best</span>');
+      rows.push(`<span class="v total">${fmt(best.total)}</span>`);
+    } else {
+      rows.push('<span class="k total">Best</span>');
+      rows.push('<span class="v total pen">NO VALID LAP</span>');
+    }
+    const sectors = this.track.sectors?.length ? this.track.sectors.length + 1 : 0;
+    if (sectors && bestSectors.length === sectors && bestSectors.every((v) => v != null)) {
+      const theo = bestSectors.reduce((a, b) => a + b, 0);
+      rows.push('<span class="k">Theoretical</span>');
+      rows.push(`<span class="v">${fmt(theo)}</span>`);
+      rows.push(`<span class="k">Best sectors</span><span class="v">${bestSectors.map(fmt).join("  ")}</span>`);
+    }
+    d.finishStats.innerHTML = rows.join("");
+    // "Keep driving" makes no sense once the run is banked: the drive would
+    // be unrecorded until the next restart.
+    document.getElementById("finishRoll").hidden = true;
+    this._offerReplay(token, laps.length > 0);
+    d.finishMenu.hidden = false;
+    this.setPaused(true);
+    d.finishAgain.focus();
+  }
+
+  /**
+   * Show "Watch the replay" once the run is actually on disk, and only when
+   * there was something worth saving -- a lap that was never written cannot
+   * be watched, and a button that errors is worse than no button.
+   */
+  _offerReplay(token, hadLap) {
+    const d = this.dom;
+    d.finishWatch.hidden = true;
+    const save = this.finishSave;
+    if (save) {
+      save.then((res) => {
+        if (res?.runId && this._finishToken === token) {
+          this.finishRunId = res.runId;
+          d.finishWatch.hidden = false;
+        }
+      }).catch(() => { /* the save already reported itself */ });
+    } else if (hadLap) {
+      // There was a lap but nothing was written. Say so on the card rather
+      // than leaving a button quietly missing.
+      d.finishStats.insertAdjacentHTML("beforeend",
+        `<span class="k">Replay</span><span class="v">${this.notSavedNote ?? "not saved"}</span>`);
+    }
   }
 
   /**
@@ -1673,11 +1764,18 @@ class Game {
    * whatever that action is bound to now.
    */
   syncMenuKeys() {
-    const K = this.input?.profile?.keys ?? {};
+    const prof = this.input?.profile ?? {};
+    const K = prof.keys ?? {};
     for (const el of document.querySelectorAll("[data-key]")) {
       const codes = K[el.dataset.key] ?? [];
-      // Only the first: the chip is a reminder, not the binding table.
-      el.textContent = codes.length ? keyLabel(codes[0]) : "";
+      // Only the first: the chip is a reminder, not the binding table. The
+      // device's button beside it, when the driver is on one -- a card that
+      // only names keys is no use to somebody holding a pad.
+      const parts = [];
+      if (codes.length) parts.push(keyLabel(codes[0]));
+      const dev = deviceButtonName(prof, el.dataset.key);
+      if (dev) parts.push(dev);
+      el.textContent = parts.join(" / ");
     }
   }
 
@@ -1688,6 +1786,12 @@ class Game {
     // car" from either of them, and the run is over either way.
     if (!on) this.hideFinishMenu();
     this.dom.pauseMenu.hidden = !on || this.finished;
+    if (!this.dom.pauseMenu.hidden) {
+      // The card's settings rows show the live values; see boot.
+      this.refreshPauseCard?.();
+      // Focus lands on Resume so Enter and the pad's A do the obvious thing.
+      document.getElementById("pauseResume")?.focus();
+    }
     // A paused engine is silent, not frozen at the last operating point.
     this.audio.setRunning(!on);
     this.input.driving = this.driving;
@@ -1801,6 +1905,22 @@ function wireTabs() {
   let saved = null;
   try { saved = localStorage.getItem("fsae-sim.tab"); } catch { /* ignore */ }
   if (saved && tabs.some((t) => t.dataset.pane === saved)) show(saved);
+  /** The next tab along, for the bumpers and the arrow keys. */
+  const step = (dir) => {
+    const i = tabs.findIndex((t) => t.getAttribute("aria-selected") === "true");
+    show(tabs[(Math.max(0, i) + dir + tabs.length) % tabs.length].dataset.pane);
+  };
+  // Left/right on a focused tab, the way a tablist is expected to work.
+  for (const t of tabs) {
+    t.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        e.preventDefault();
+        step(e.key === "ArrowRight" ? 1 : -1);
+        tabs.find((x) => x.getAttribute("aria-selected") === "true")?.focus();
+      }
+    });
+  }
+  return { show, step };
 }
 
 /**
@@ -1848,6 +1968,19 @@ function updateSession() {
   const profile = game.input?.settings?.active?.();
   if (profile) dom.sControls.innerHTML = `<b>${esc(profile.label)}</b>`;
 
+  // What the live delta is measured against, and the archive's best on this
+  // course when it is nothing yet -- the number worth chasing.
+  const ref = game.deltaTimer?.describeReference();
+  const sRef = document.getElementById("sReference");
+  if (sRef) {
+    const pb = bestOnCourse.get(game.trackId);
+    sRef.innerHTML = ref
+      ? `<b>${esc(ref.label ?? "reference")}</b><small class="mono">${fmt(ref.lapS)}</small>`
+      : pb
+        ? `<span class="off">your best this session</span><small>archive best ${fmt(pb.best)}, ${esc(pb.driver)}</small>`
+        : `<span class="off">your best this session</span>`;
+  }
+
   if (dom.sDriver) {
     const from = game.launchedBy ? `<small class="changed">set by the launcher, this session only</small>` : "";
     dom.sDriver.innerHTML = game.driverName
@@ -1879,6 +2012,16 @@ const PAD_BUTTON_NAMES = {
   12: "D-pad up", 13: "D-pad down", 14: "D-pad left", 15: "D-pad right",
 };
 
+/** What the active device calls the button an action is on, or "" if none. */
+function deviceButtonName(prof, slot) {
+  if (!prof || !(prof.kind === "gamepad" || prof.kind === "wheel")) return "";
+  const idx = prof.buttons?.[slot];
+  if (typeof idx !== "number" || idx < 0) return "";
+  return prof.labels?.[slot]
+    ?? (prof.kind === "gamepad" ? PAD_BUTTON_NAMES[idx] : null)
+    ?? buttonLabel(idx, prof.labels, slot);
+}
+
 /**
  * The key reference on the Controls tab, built from the bindings table and
  * whatever the active profile has each control on right now.
@@ -1909,14 +2052,8 @@ function renderCheatsheet() {
       if (a.group !== group) continue;
       const chips = (K[a.id] ?? []).slice(0, 2).map(keyLabel).filter(Boolean).map(kbd);
       if (onDevice && !a.keysOnly) {
-        const slot = buttonSlot(a);
-        const idx = B[slot];
-        if (typeof idx === "number" && idx >= 0) {
-          const name = prof.labels?.[slot]
-            ?? (prof.kind === "gamepad" ? PAD_BUTTON_NAMES[idx] : null)
-            ?? buttonLabel(idx, prof.labels, slot);
-          chips.push(kbd(name));
-        }
+        const name = deviceButtonName(prof, buttonSlot(a));
+        if (name) chips.push(kbd(name));
       }
       // The axes a device steers and pedals with are in the calibration
       // section above; here they only need naming.
@@ -1981,6 +2118,8 @@ function etcSummary(map) {
 }
 
 let game;
+/** `boot`'s course loader, for the Runs tab's Chase. */
+let loadCourseFromSelect = async () => false;
 
 async function boot() {
   installDesktopBehaviour();
@@ -1988,7 +2127,7 @@ async function boot() {
   // Before anything can open a recorder, so no run is stamped with the
   // fallback when the shell could have said.
   await resolveSimVersion();
-  wireTabs();
+  const tabs = wireTabs();
 
   // Restore saved overrides BEFORE the sheet renders, so the sliders come up
   // showing what the car is actually running. PARAM_DEFAULTS was captured at
@@ -2076,6 +2215,7 @@ async function boot() {
     return true;
   };
   dom.trackSel.addEventListener("change", loadCourse);
+  loadCourseFromSelect = loadCourse;
 
   // Losing the window (alt-tab, minimise, another app grabbing focus) pauses
   // the run: keyboard state is already cleared on blur, but the rig would
@@ -2163,6 +2303,7 @@ async function boot() {
       updateSession();
     });
   }
+  document.getElementById("runsFilter")?.addEventListener("change", () => refreshRuns());
   runsDirectory().then((d) => { if (dom.runsDir) dom.runsDir.textContent = d; })
     .catch(() => { if (dom.runsDir) dom.runsDir.textContent = "unavailable"; });
   refreshRuns();
@@ -2213,6 +2354,99 @@ async function boot() {
   dom.startBtn.addEventListener("click", () => enterSim(!game.started));
   dom.restartBtn.addEventListener("click", () => enterSim(true));
 
+  // ---- pad navigation ------------------------------------------------------
+  //
+  // Everything on the home screen, on the cards and in the replay is
+  // reachable from the device: the d-pad (or hat) moves, A selects, B backs
+  // out, the shift paddles switch tabs and Menu starts the engine. Focus is
+  // the cursor, so the same elements the mouse clicks are what the pad
+  // drives, and nothing here is a second copy of a menu. A driver on the rig
+  // should never have to reach for a mouse.
+  const focusables = (root) => [...root.querySelectorAll("button, input, select")]
+    .filter((el) => !el.disabled && !el.hidden && !el.closest("[hidden]") &&
+                    el.offsetParent !== null &&
+                    // The tab strip is the bumpers' job; up/down goes to content.
+                    !el.classList.contains("tab") &&
+                    // Nothing on a pad can type into a text field.
+                    !(el.tagName === "INPUT" && el.type === "text"));
+  const moveFocus = (list, dir) => {
+    if (!list.length) return;
+    const cur = list.indexOf(document.activeElement);
+    const next = cur < 0 ? (dir > 0 ? 0 : list.length - 1) : (cur + dir + list.length) % list.length;
+    list[next].focus();
+    list[next].scrollIntoView?.({ block: "nearest" });
+  };
+  const nudgeSelect = (el, dir) => {
+    const n = el.options.length;
+    if (!n) return;
+    el.selectedIndex = (el.selectedIndex + dir + n) % n;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const nudgeRange = (el, dir) => {
+    const lo = Number(el.min), hi = Number(el.max);
+    const step = Number(el.step) || (hi - lo) / 100;
+    el.value = String(Math.min(hi, Math.max(lo, Number(el.value) + dir * step)));
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const padNav = () => {
+    const M = game.input.menu;
+    if (!M) return;
+    let any = false;
+    for (const k in M) if (M[k]) { any = true; break; }
+    if (!any) return;
+    // From here on focus is the cursor and has to be visible.
+    document.body.classList.add("pad-nav");
+    const el = document.activeElement;
+
+    if (game.replaying) {
+      const r = game.replay;
+      if (M.accept) r.toggle();
+      if (M.left) r.nudge(-1);
+      if (M.right) r.nudge(1);
+      if (M.up) r.setRate(r.rate * 2);
+      if (M.down) r.setRate(r.rate / 2);
+      if (M.prevTab) r.nudge(-5);
+      if (M.nextTab) r.nudge(5);
+      if (M.back) { game.exitReplay(); return; }
+      game.applyReplayFrame();
+      game.replayPanel?.paint(0, true);
+      return;
+    }
+
+    if (!dom.menu.hidden) {
+      if (M.start) { if (!dom.startBtn.disabled) enterSim(!game.started); return; }
+      if (M.back && game.started) { enterSim(false); return; }
+      if (M.nextTab || M.prevTab) { tabs.step(M.nextTab ? 1 : -1); return; }
+      const list = focusables(dom.menu);
+      if (M.up) moveFocus(list, -1);
+      if (M.down) moveFocus(list, 1);
+      if (M.left || M.right) {
+        const dir = M.right ? 1 : -1;
+        if (el?.tagName === "SELECT") nudgeSelect(el, dir);
+        else if (el?.tagName === "INPUT" && el.type === "range") nudgeRange(el, dir);
+        else tabs.step(dir);
+      }
+      if (M.accept && el && list.includes(el)) {
+        if (el.tagName === "SELECT") nudgeSelect(el, 1);
+        else if (!(el.tagName === "INPUT" && el.type === "range")) el.click();
+      }
+      return;
+    }
+
+    if (game.paused) {
+      const card = game.finished ? dom.finishMenu : dom.pauseMenu;
+      const list = focusables(card);
+      if (M.up) moveFocus(list, -1);
+      if (M.down) moveFocus(list, 1);
+      if ((M.left || M.right) && el?.tagName === "INPUT" && el.type === "range") nudgeRange(el, M.right ? 1 : -1);
+      if (M.accept) (list.includes(el) ? el : list[0])?.click();
+      // B is "back to the car" from either card, exactly as Esc is.
+      if (M.back) { game.setPaused(false); dom.gl.focus(); }
+    }
+  };
+  game.padNav = padNav;
+
   // The pause menu. The keys still work (input.js); these are the same
   // actions for a mouse.
   document.getElementById("pauseResume").addEventListener("click", () => { game.setPaused(false); dom.gl.focus(); });
@@ -2228,6 +2462,47 @@ async function boot() {
     quitBtn.hidden = false;
     quitBtn.addEventListener("click", quitToShell);
   }
+
+  // The settings a driver stops to change, on the card, so changing them
+  // does not mean going Home and ending the recording.
+  const DASH_LABELS = { auto: "car + overlay outside", overlay: "screen overlay", car: "car's only" };
+  const pauseEl = (id) => document.getElementById(id);
+  const refreshPauseCard = () => {
+    const set = (id, v) => { const b = pauseEl(id)?.querySelector("b"); if (b) b.textContent = v; };
+    set("pauseCamera", CAMERAS[game.cameraIndex]?.name ?? "");
+    set("pauseDensity", game.hud.density);
+    set("pauseDash", DASH_LABELS[game.hud.dashMode] ?? game.hud.dashMode);
+    set("pauseTc", game.assists.traction ? "on" : "off");
+    const vol = pauseEl("pauseVolume");
+    if (vol) {
+      vol.value = String(game.audio.mix.master);
+      vol.parentElement.querySelector("b").textContent = `${Math.round(game.audio.mix.master * 100)}%`;
+    }
+    const end = pauseEl("pauseEnd");
+    if (end) end.hidden = !(game.track?.closed && game.timing?.laps?.length);
+  };
+  game.refreshPauseCard = refreshPauseCard;
+  pauseEl("pauseCamera").addEventListener("click", () => {
+    game.cameraIndex = (game.cameraIndex + 1) % CAMERAS.length;
+    refreshPauseCard();
+  });
+  pauseEl("pauseDensity").addEventListener("click", () => { game.hud.cycleDensity(); refreshPauseCard(); });
+  pauseEl("pauseDash").addEventListener("click", () => {
+    const m = game.hud.cycleDashMode();
+    if (dom.dashMode) dom.dashMode.value = m;
+    refreshPauseCard();
+  });
+  pauseEl("pauseTc").addEventListener("click", () => {
+    dom.tcToggle.checked = !dom.tcToggle.checked;
+    sync();
+    refreshPauseCard();
+  });
+  pauseEl("pauseVolume").addEventListener("input", () => {
+    game.audio.setVolume("master", pauseEl("pauseVolume").value);
+    game.audioPanel?.render?.();
+    refreshPauseCard();
+  });
+  pauseEl("pauseEnd").addEventListener("click", () => game.endSession());
 
   // ---- the end-of-run card ----
   // Every item is also a key, and both go through the same handlers so the
@@ -2405,12 +2680,15 @@ async function boot() {
         game.input.driving = false;
         game.input.poll();
         game.holdNative();
+        padNav();
         game.replayFrame(dt);
       } else if (!dom.menu.hidden) {
-        // Still poll so the pad-connected badge is live in the menu.
+        // Still poll so the pad-connected badge is live in the menu -- and
+        // so the pad can drive the menu.
         game.input.driving = false;
         game.input.poll();
         game.holdNative();
+        padNav();
       } else {
         game.update(dt);
       }
@@ -2431,6 +2709,18 @@ async function boot() {
   requestAnimationFrame(frame);
 }
 
+/** The quickest scored lap in the archive, per course: { best, driver, runId }. */
+const bestOnCourse = new Map();
+
+/** One line naming a run, for pickers. */
+function runLabel(runId, m) {
+  const st = m.stats ?? {};
+  const when = m.startedAt ? new Date(m.startedAt) : null;
+  const whenText = when && !isNaN(when) ? when.toLocaleString(undefined,
+    { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : runId;
+  return `${m.driver || "Unknown"} ${st.bestLapS != null ? fmt(st.bestLapS) : "--.---"} ${whenText}`;
+}
+
 /**
  * Redraw the recorded-runs list on the launch screen.
  *
@@ -2448,6 +2738,21 @@ async function refreshRuns() {
     host.innerHTML = `<p class="note error">Could not read recorded runs: ${escHtml(String(err?.message ?? err))}</p>`;
     return;
   }
+  // The archive best per course, for the session card.
+  bestOnCourse.clear();
+  for (const { runId, manifest: m } of runs) {
+    const best = m.stats?.bestLapS;
+    if (best == null || !m.track) continue;
+    const cur = bestOnCourse.get(m.track);
+    if (!cur || best < cur.best) bestOnCourse.set(m.track, { best, driver: m.driver || "Unknown", runId });
+  }
+  updateSession();
+
+  // This course by default: a time on the endurance loop says nothing about
+  // the autocross, and a shared archive fills up fast.
+  const filter = document.getElementById("runsFilter")?.value ?? "course";
+  const shown = filter === "all" ? runs : runs.filter((r) => (r.manifest.track ?? null) === (game?.trackId ?? null));
+
   if (dom.runsBadge) dom.runsBadge.textContent = runs.length ? String(runs.length) : "";
   if (!runs.length) {
     host.innerHTML = `<p class="note">${isDesktop
@@ -2455,19 +2760,29 @@ async function refreshRuns() {
       : "In a browser a finished run downloads instead of being filed. Drop it into Helios."}</p>`;
     return;
   }
+  if (!shown.length) {
+    host.innerHTML = `<p class="note">Nothing on this course yet; ${runs.length} run${runs.length === 1 ? "" : "s"} on others.</p>`;
+    return;
+  }
   host.innerHTML = "";
-  for (const { runId, manifest: m } of runs) {
+  const chasing = game?.deltaTimer?.describeReference()?.source === "loaded" ? game.chasingRunId : null;
+  for (const { runId, manifest: m } of shown) {
     const st = m.stats ?? {};
     const best = st.bestLapS;
     const row = document.createElement("div");
     row.className = "run-row";
+    row.title = runId;
     const when = m.startedAt ? new Date(m.startedAt) : null;
     const whenText = when && !isNaN(when) ? when.toLocaleString(undefined,
       { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : runId;
     row.innerHTML =
       `<div class="who"><b>${escHtml(m.driver || "Unknown")}</b> &middot; ${escHtml(m.trackName || m.track || "?")}</div>` +
       `<div class="right"><span class="time">${best != null ? fmt(best) : "--.---"}</span>` +
-      `<button class="secondary" data-replay="${escHtml(runId)}">Replay</button></div>` +
+      `<button class="secondary" data-replay="${escHtml(runId)}">Replay</button>` +
+      (referenceLapOf(m.laps)
+        ? `<button class="secondary" data-chase="${escHtml(runId)}" title="Put this run's best lap on the live delta"${chasing === runId ? ' disabled' : ''}>${chasing === runId ? "Chasing" : "Chase"}</button>`
+        : "") +
+      `</div>` +
       `<div class="meta">${escHtml(whenText)} &middot; ${st.laps ?? 0} lap${st.laps === 1 ? "" : "s"}` +
       ` &middot; ${(st.durationS ?? 0).toFixed(1)} s` +
       ` &middot; ${st.totalCones ?? 0} cone${st.totalCones === 1 ? "" : "s"}` +
@@ -2478,6 +2793,41 @@ async function refreshRuns() {
   host.querySelectorAll("button[data-replay]").forEach((b) => {
     b.addEventListener("click", () => openReplay(b.dataset.replay));
   });
+  host.querySelectorAll("button[data-chase]").forEach((b) => {
+    b.addEventListener("click", () => chaseRun(b.dataset.chase));
+  });
+}
+
+/**
+ * Put a recorded run's best lap on the live delta, switching course first if
+ * it was set somewhere else. Until now this existed only as the launcher's
+ * `--reference` flag, so a driver at the rig had no way to chase a teammate.
+ */
+async function chaseRun(runId) {
+  if (!game || !runId) return;
+  try {
+    dom.loadNote.classList.remove("error");
+    const { manifest } = await loadRun(runId);
+    if (manifest.track && manifest.track !== game.trackId && TRACKS.some((t) => t.id === manifest.track)) {
+      dom.trackSel.value = manifest.track;
+      if (!(await loadCourseFromSelect())) return;
+    }
+    const ok = await game.loadReference(runId);
+    if (ok) {
+      // Which run, so the list can say "Chasing" on the right row.
+      game.chasingRunId = runId;
+      dom.loadNote.textContent = "";
+    } else {
+      dom.loadNote.textContent = "That run has no lap on this course to chase.";
+      dom.loadNote.classList.add("error");
+    }
+    updateSession();
+    refreshRuns();
+  } catch (err) {
+    console.error("could not chase that run", err);
+    dom.loadNote.textContent = `Could not load that run: ${err?.message ?? err}`;
+    dom.loadNote.classList.add("error");
+  }
 }
 
 /**

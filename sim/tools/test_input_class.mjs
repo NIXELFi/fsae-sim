@@ -219,6 +219,39 @@ section("seconds of steering reduce to a board");
   ok(detectInputClass({}) === null, "and so does an empty total");
 }
 
+// ------------------------------------------------------- menu navigation --
+
+section("the pad drives the menus with the buttons it drives the car with");
+{
+  const input = rig("gamepad-xbox");
+  const pad = usePad("Xbox 360 Controller (XInput STANDARD GAMEPAD)");
+  input.poll();
+  pad.buttons[12].pressed = true;   // d-pad up
+  pad.buttons[0].pressed = true;    // A
+  pad.buttons[9].pressed = true;    // Menu
+  pad.buttons[5].pressed = true;    // RB
+  input.poll();
+  ok(input.menu.up === true, "d-pad up is a menu edge");
+  ok(input.menu.accept === true, "A accepts");
+  ok(input.menu.start === true, "Menu starts the engine");
+  ok(input.menu.nextTab === true, "RB is the next tab");
+  ok(input.menu.down === false && input.menu.back === false, "nothing else fired");
+  ok(input.edges.pause === true, "and the driving edges still see the same press");
+  input.poll();
+  ok(input.menu.up === false && input.menu.accept === false && input.menu.start === false,
+     "a held button is one edge, not a stream of them");
+  for (const b of [12, 0, 9, 5]) pad.buttons[b].pressed = false;
+  pad.buttons[1].pressed = true;    // B
+  input.poll();
+  ok(input.menu.back === true, "B backs out");
+}
+{
+  noPad();
+  const input = rig("keyboard");
+  input.poll();
+  ok(Object.values(input.menu).every((v) => v === false), "no device, no menu edges");
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
   console.error(`${failures} FAILED`);

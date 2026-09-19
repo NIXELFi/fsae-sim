@@ -89,6 +89,16 @@ export class Input {
     // panel offers to bind cannot be one the game never reads.
     this.edges = {};
     for (const a of ACTIONS) if (!HOLD_ACTIONS.has(a.id)) this.edges[a.id] = false;
+    /**
+     * Menu navigation from the device, for the screens the driving edges do
+     * not reach: the home screen, the pause and finish cards, the replay
+     * transport. Read off the same bound buttons -- the d-pad or hat moves,
+     * launch (A) selects, recover (B) backs out, the shift paddles switch
+     * tabs and pause (Menu) starts the engine -- so a wheel with its own
+     * mapping navigates with the same buttons it drives with.
+     */
+    this.menu = { up: false, down: false, left: false, right: false,
+      accept: false, back: false, prevTab: false, nextTab: false, start: false };
     // D-pad up/down auto-repeat. At 0.1% a press, walking roll stiffness a few
     // points would be dozens of taps, so held presses repeat and then speed up.
     this._holdSince = { setupUp: 0, setupDown: 0 };
@@ -477,6 +487,7 @@ export class Input {
   /** Read the pad and keyboard into `state` and `edges`. Call once per frame. */
   poll() {
     for (const k of Object.keys(this.edges)) this.edges[k] = false;
+    for (const k of Object.keys(this.menu)) this.menu[k] = false;
 
     const p = this.pad();
     const prof = this.profile;
@@ -547,6 +558,16 @@ export class Input {
       for (const a of EDGE_ACTIONS) {
         if (edge(B[buttonSlot(a)])) this.edges[a.id] = true;
       }
+      const M = this.menu;
+      M.up = edge(B.dpadUp);
+      M.down = edge(B.dpadDown);
+      M.left = edge(B.dpadLeft);
+      M.right = edge(B.dpadRight);
+      M.accept = edge(B.launch);
+      M.back = edge(B.reset);
+      M.prevTab = edge(B.downshift);
+      M.nextTab = edge(B.upshift);
+      M.start = edge(B.pause);
 
       // D-pad: left/right pick the setting (above, as setupPrev/setupNext),
       // up/down move it and repeat while held.

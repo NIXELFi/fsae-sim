@@ -165,6 +165,33 @@ export class ReplayPanel {
       ? `${ghost.manifest.driver ?? "Ghost"} ${ghost.bestLap ? fmt(ghost.bestLap.total) : ""}`.trim()
       : "none";
     this.el.root.classList.toggle("has-ghost", !!ghost);
+    if (this.el.ghostPick) this.el.ghostPick.value = ghost?.runId ?? "";
+  }
+
+  /** Name the camera on its button, so cycling it is not a guess. */
+  setCameraName(name) {
+    const b = this.el.root.querySelector('[data-act="camera"]');
+    if (b) b.textContent = `Camera: ${name}`;
+  }
+
+  /**
+   * Offer the runs a ghost can be picked from -- same course, not this one.
+   * Ghosts used to be reachable only from a launcher's `--ghost` flag, which
+   * left the sim's own Runs tab with no way to put two drives side by side.
+   *
+   * @param runs  [{ runId, label }] newest first
+   */
+  setGhostChoices(runs) {
+    const sel = this.el.ghostPick;
+    if (!sel) return;
+    const cur = this.ghost?.runId ?? "";
+    sel.innerHTML = `<option value="">${runs.length ? "Pick a ghost..." : "No other run on this course"}</option>` +
+      runs.map((r) => `<option value="${esc(r.runId)}"${r.runId === cur ? " selected" : ""}>${esc(r.label)}</option>`).join("");
+    sel.hidden = false;
+    sel.onchange = () => {
+      const id = sel.value;
+      this.actions.onGhost?.(id || null);
+    };
   }
 
   build() {
@@ -229,6 +256,9 @@ export class ReplayPanel {
             <span data-ghostname>none</span>
             <b data-ghostgap></b>
           </div>
+          <select data-ghostpick title="Put another run on this course in the scene beside this one" hidden>
+            <option value="">Pick a ghost...</option>
+          </select>
           <h4>Events</h4>
           <div class="rp-events" data-events></div>
         </aside>
@@ -277,6 +307,7 @@ export class ReplayPanel {
       events: q("[data-events]"),
       ghostName: q("[data-ghostname]"),
       ghostGap: q("[data-ghostgap]"),
+      ghostPick: q("[data-ghostpick]"),
       pedals: q("[data-pedals]"),
       throttle: q("[data-bar='throttle']"),
       brake: q("[data-bar='brake']"),
