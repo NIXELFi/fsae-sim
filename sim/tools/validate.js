@@ -1304,6 +1304,47 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
   }
   check("a .gltf (JSON) file is refused", refused, 1, 1, "");
 }
+// ----------------------------------------------------------------- course ---
+// The course is as wide as the rules say, and the cones are on its edges.
+//
+// FSAE sets a different minimum width per event, and they are not the same
+// number:
+//
+//   D.11.1.1.g  Autocross  3.5 m
+//   D.12.2.2.g  Endurance  4.5 m
+//
+// The data pipeline used one constant for both, so the endurance course was
+// built a metre narrower than the real one. That is not cosmetic now that an
+// excursion voids a lap: the off-course line is taken from this width, so
+// laps were being thrown out for lines that are legal at Michigan.
+//
+// The cones are placed FROM the width, which is the other half of the same
+// fact -- a width changed without regenerating them leaves a course whose
+// boundary and whose cones disagree, and the driver believes the cones.
+{
+  const MIN_WIDTH_M = { autocross: 3.5, endurance: 4.5 };
+  for (const [event, minWidth] of Object.entries(MIN_WIDTH_M)) {
+    const t = JSON.parse(readFileSync(join(here, "..", "data", `track-${event}.json`), "utf8"));
+    check(`${event} is at least the rules minimum wide`, t.widthM, minWidth, 99, " m");
+    // Every cone, not a sample: one stale cone is one cone in the road.
+    const half = t.widthM / 2;
+    let worst = 0;
+    for (const [cx, cy] of t.cones) {
+      let bi = 0, bd = Infinity;
+      for (let i = 0; i < t.centerline.length; i++) {
+        const dx = cx - t.centerline[i][0], dy = cy - t.centerline[i][1];
+        const d = dx * dx + dy * dy;
+        if (d < bd) { bd = d; bi = i; }
+      }
+      const h = t.heading[bi];
+      const lat = -(cx - t.centerline[bi][0]) * Math.sin(h) + (cy - t.centerline[bi][1]) * Math.cos(h);
+      worst = Math.max(worst, Math.abs(Math.abs(lat) - half));
+    }
+    check(`${event} cones sit on the edge of that width`, worst, 0, 0.02, " m");
+  }
+}
+
+
 // ---------------------------------------------------------------- version ---
 // One build, one version number.
 //
