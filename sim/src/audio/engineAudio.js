@@ -1174,6 +1174,15 @@ export class Synthesizer {
 export const LIMITER_STUTTER_HZ = 24;
 export const LIMITER_DUTY = 0.5;
 
+/**
+ * Overrun crackle: on a closed throttle at speed a cylinder now and then
+ * gets a charge it fires late, and the exhaust pops. The chance per
+ * cylinder per cycle, and how hard the late charge burns relative to a
+ * half-load firing.
+ */
+export const CRACKLE_CHANCE = 0.22;
+export const CRACKLE_HEAT = 0.55;
+
 export const DEFAULT_AUDIO_CONFIG = {
   sampleRate: 48000,
   // 256 taps at 48 kHz covers the whole early-reflection structure the impulse
@@ -1226,9 +1235,14 @@ export class EngineAudio {
       exhaustK: spec.gas.exhaustKMin,
       /** On the rev limiter: the ignition is being cut, see `render`. */
       cut: false,
+      /** Closed throttle at speed: the odd cylinder pops, see `render`. */
+      overrun: false,
     };
     this.cal = calibrate(spec, this.op);
     this.cutPhase = 0;
+    /** The calibration a popping cylinder burns with, see `render`. */
+    this.popCal = null;
+    this.popRng = new Rng(0x5eed);
 
     this.flow = new Float32Array(this.cylinders.length);
     this.valveArea = new Float32Array(this.cylinders.length);
@@ -1254,16 +1268,21 @@ export class EngineAudio {
    * Move to a new operating point. Call at the physics rate, not per sample:
    * it re-solves the heat release and may retune every delay line.
    */
-  setOperatingPoint(rpm, throttle, torqueNm, cut = false) {
+  setOperatingPoint(rpm, throttle, torqueNm, cut = false, overrun = false) {
     const th = Math.min(Math.max(throttle, 0), 1);
     const load = Math.min(Math.max(torqueNm, 0) / 70, 1) * 0.6 + th * 0.4;
     const gas = this.spec.gas;
     const exhaustK = gas.exhaustKMin + (gas.exhaustKMax - gas.exhaustKMin) * load;
     const retune = Math.abs(exhaustK - this.op.exhaustK) > 5;
 
-    this.op = { rpm: Math.max(rpm, 0), throttle: th, targetTorqueNm: torqueNm, exhaustK, cut: !!cut };
+    this.op = { rpm: Math.max(rpm, 0), throttle: th, targetTorqueNm: torqueNm, exhaustK, cut: !!cut, overrun: !!overrun };
     this.cal = calibrate(this.spec, this.op);
     if (retune) this.exhaust.setGasState(gas, exhaustK);
+    // A late charge burns like a part-load firing, not like the overrun's
+    // own near-zero heat release; solved here, at the physics rate.
+    this.popCal = overrun
+      ? calibrate(this.spec, { ...this.op, throttle: 0.5, targetTorqueNm: 30 * CRACKLE_HEAT })
+      : null;
 
     // How loud this operating point should be, from the chemical power the
     // engine is actually releasing.
@@ -1277,7 +1296,10 @@ export class EngineAudio {
     const firingPerSecond = (this.op.rpm / 120) * this.cylinders.length;
     const chemicalPowerW = this.cal.heatReleaseJ * firingPerSecond;
     const rel = Math.min(chemicalPowerW / this.referencePowerW, 1);
-    this.levelTarget = p.levelFloor + (1 - p.levelFloor) * Math.pow(rel, p.levelExponent);
+    let levelTarget = p.levelFloor + (1 - p.levelFloor) * Math.pow(rel, p.levelExponent);
+    // Pops are heard at part-load level, not at the overrun's floor.
+    if (overrun) levelTarget = Math.max(levelTarget, p.levelFloor + 0.30 * (1 - p.levelFloor));
+    this.levelTarget = levelTarget;
   }
 
   /**
@@ -1318,6 +1340,7 @@ export class EngineAudio {
     // full combustion, then nothing, then full again -- which is what an
     // ignition cut sounds like through a 4-1 pipe.
     const cutPeriod = Math.max(1, Math.round(this.config.sampleRate / LIMITER_STUTTER_HZ));
+    const ivc = this.spec.timing.ivcDeg;
 
     for (let s = 0; s < out.length; s++) {
       let firing = this.running;
@@ -1330,6 +1353,16 @@ export class EngineAudio {
         let theta = this.crankDeg - cyl.phaseDeg;
         while (theta < 0) theta += 720;
         while (theta >= 720) theta -= 720;
+        // The crackle: at each intake-valve close on the overrun, this
+        // cylinder decides whether the charge it just trapped will light.
+        if (this.op.overrun && this.popCal) {
+          if (cyl.lastTheta != null && cyl.lastTheta < ivc && theta >= ivc) {
+            cyl.pop = this.popRng.uniform() < CRACKLE_CHANCE;
+          }
+        } else {
+          cyl.pop = false;
+        }
+        cyl.lastTheta = theta;
 
         const area = this.tables.valveAreaAt(theta);
         this.valveArea[i] = area;
@@ -1341,7 +1374,7 @@ export class EngineAudio {
         // the loop is stable.
         const back = this.exhaust.portPressure(i, ambient, area, cyl.portVelocity);
         this.flow[i] = firing
-          ? stepCylinder(this.spec, this.tables, cyl, this.crankDeg, dt, this.cal, this.op, back)
+          ? stepCylinder(this.spec, this.tables, cyl, this.crankDeg, dt, cyl.pop ? this.popCal : this.cal, this.op, back)
           : 0;
       }
 

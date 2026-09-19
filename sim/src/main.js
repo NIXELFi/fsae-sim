@@ -726,6 +726,7 @@ class Game {
     if (this.input.edges.camera) {
       this.cameraIndex = (this.cameraIndex + 1) % CAMERAS.length;
       saveCameraIndex(this.cameraIndex);
+      this.audio.setCamera(CAMERAS[this.cameraIndex].name);
       this.timing.say(CAMERAS[this.cameraIndex].name.toUpperCase(), 1.2);
     }
     if (this.input.edges.traction) {
@@ -1158,6 +1159,7 @@ class Game {
         rimFade,
       },
       ghost: this.ghost ? this.ghostPose() : null,
+      skid: this.skidIntensity(tel),
       // A cone through the nose is felt as well as heard: a short drop that
       // rides on the surface texture.
       heaveM: bump - Math.abs(tel.axG) * (SDM26.heaveMmG / 1000) * 0.5 * vib - 0.012 * this.hitKick,
@@ -1244,6 +1246,27 @@ class Game {
     this.renderer.updateDashPanel(
       (ctx, x, y, w, h) => this.hud.drawDash(ctx, x, y, w, h, state, { chrome: false }),
     );
+  }
+
+  /**
+   * How hard each tyre is sliding, 0..1, for the skid marks: [FL, FR, RL, RR].
+   *
+   * Past about 92% of the axle's grip the tyre is scrubbing; a locked wheel
+   * or a spinning one is sliding outright. The two wheels of an axle share
+   * a number, because the model reports grip per axle.
+   */
+  skidIntensity(tel) {
+    const sk = this._skid ?? (this._skid = [0, 0, 0, 0]);
+    if (this.car.speed < 1.5) { sk[0] = sk[1] = sk[2] = sk[3] = 0; return sk; }
+    const lockF = Math.max(0, -(tel.kappaF ?? 0) - 0.15) * 2.5;
+    const lockR = Math.max(0, -(tel.kappaR ?? 0) - 0.15) * 2.5;
+    const spinR = Math.max(0, (tel.kappaR ?? 0) - 0.15) * 2.5;
+    const scrubF = Math.max(0, (tel.utilF ?? 0) - 0.92) / 0.08;
+    const scrubR = Math.max(0, (tel.utilR ?? 0) - 0.92) / 0.08;
+    const f = Math.min(1, Math.max(lockF, scrubF));
+    const r = Math.min(1, Math.max(lockR, spinR, scrubR));
+    sk[0] = f; sk[1] = f; sk[2] = r; sk[3] = r;
+    return sk;
   }
 
   /** What the dash's sector strip shows for the lap under way. */
@@ -1387,12 +1410,14 @@ class Game {
     this.audio.start();
     this.audio.reset();
     this.audio.setEnabled(this.dom.audioToggle?.checked ?? true);
+    this.audio.setCamera(CAMERAS[this.cameraIndex].name);
     this.syncPointer();
 
     this.replayPanel = new ReplayPanel(this.dom.replayOverlay, replay, {
       onExit: () => { this.exitReplay(); },
       onCamera: () => {
         this.cameraIndex = (this.cameraIndex + 1) % CAMERAS.length;
+        this.audio.setCamera(CAMERAS[this.cameraIndex].name);
         this.replayPanel?.setCameraName(CAMERAS[this.cameraIndex].name);
       },
       onGhost: (id) => { if (id) void this.loadGhost(id); else this.clearGhost(); },
@@ -1587,6 +1612,9 @@ class Game {
     tel.bodySlipDeg = r.value("sim.body_slip_deg");
     tel.utilF = r.value("sim.util_front");
     tel.utilR = r.value("sim.util_rear");
+    // For the skid marks, which a replay lays down exactly as a drive does.
+    tel.kappaF = r.value("sim.kappa_front");
+    tel.kappaR = r.value("sim.kappa_rear");
 
     this.pedal = r.value("engine.aps") / 100;
     this.plate = r.value("engine.tps") / 100;
@@ -2481,6 +2509,7 @@ async function boot() {
     // is actually about to drive with.
     sync();
     game.audio.start();
+    game.audio.setCamera(CAMERAS[game.cameraIndex].name);
     dom.menu.hidden = true;
     dom.restartBtn.hidden = false;
     dom.startBtn.textContent = "Resume run";
@@ -2652,6 +2681,7 @@ async function boot() {
   pauseEl("pauseCamera").addEventListener("click", () => {
     game.cameraIndex = (game.cameraIndex + 1) % CAMERAS.length;
     saveCameraIndex(game.cameraIndex);
+    game.audio.setCamera(CAMERAS[game.cameraIndex].name);
     refreshPauseCard();
   });
   pauseEl("pauseDensity").addEventListener("click", () => { game.hud.cycleDensity(); refreshPauseCard(); });
@@ -2733,7 +2763,11 @@ async function boot() {
       case "ArrowDown": e.preventDefault(); r.setRate(r.rate / 2); break;
       case "Home": e.preventDefault(); r.seek(0); break;
       case "End": e.preventDefault(); r.seek(r.duration); break;
-      case "KeyC": game.cameraIndex = (game.cameraIndex + 1) % CAMERAS.length; break;
+      case "KeyC":
+        game.cameraIndex = (game.cameraIndex + 1) % CAMERAS.length;
+        game.audio.setCamera(CAMERAS[game.cameraIndex].name);
+        game.replayPanel?.setCameraName(CAMERAS[game.cameraIndex].name);
+        break;
       case "KeyL": if (r.bestLap) r.seekLap(r.bestLap.lap); break;
       case "KeyT": e.preventDefault(); game.replayPanel?.toggleTraces(); break;
       case "Tab": e.preventDefault(); game.replayPanel?.toggleBare(); break;

@@ -33,6 +33,14 @@ import { buildEnvironmentMesh } from "./envmesh.js";
 const CONE_DRAW_RANGE = 280; // m
 /** How solid the replay ghost is drawn. */
 const GHOST_ALPHA = 0.55;
+/** Skid marks kept on the surface: segments in a ring, oldest overwritten. */
+const SKID_MAX = 8000;
+/** Floats per segment: two triangles of (x, y, z, alpha). */
+const SKID_FLOATS = 6 * 4;
+/** Half-width of a mark, metres -- a 7 in slick leaves about this. */
+const SKID_HALF_W = 0.085;
+/** Height of the marks above the deck: over the ribbon, under a cone's plate. */
+const SKID_Y = 0.018;
 const SHADOW_SIZE = 2048;     // texels, per cascade
 // Two cascades: a tight box for the car's own shadow and a wide one so the
 // cones down the course carry shadows instead of popping into them.
@@ -478,6 +486,33 @@ void main() {
   frag = finish(applyFog(c, vWorld));
 }`;
 
+// Rubber on the road. A strip of dark quads laid where a tyre was sliding,
+// blended over whatever surface is there, fading with distance so the far
+// end of a long lap does not turn into a black smear.
+const SKID_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in float aAlpha;
+uniform mat4 uViewProj;
+out float vA;
+out vec3 vWorld;
+void main() {
+  vA = aAlpha;
+  vWorld = aPos;
+  gl_Position = uViewProj * vec4(aPos, 1.0);
+}`;
+
+const SKID_FS = `#version 300 es
+precision highp float;
+in float vA;
+in vec3 vWorld;
+uniform vec3 uEye;
+out vec4 frag;
+void main() {
+  float d = length(vWorld - uEye);
+  float fade = 1.0 - smoothstep(70.0, 180.0, d);
+  frag = vec4(0.015, 0.015, 0.02, vA * fade);
+}`;
+
 const RIBBON_VS = `#version 300 es
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in float aS;
@@ -796,6 +831,7 @@ export class Renderer {
     this.progSky = program(gl, SKY_VS, SKY_FS);
     this.progGround = program(gl, GROUND_VS, GROUND_FS);
     this.progRibbon = program(gl, RIBBON_VS, RIBBON_FS);
+    this.progSkid = program(gl, SKID_VS, SKID_FS);
     this.progProp = program(gl, PROP_VS, PROP_FS);
     this.progCar = program(gl, CAR_VS, CAR_FS);
     this.progScreen = program(gl, SCREEN_VS, SCREEN_FS);
@@ -808,6 +844,7 @@ export class Renderer {
     for (const [name, prog] of Object.entries({
       sky: this.progSky, ground: this.progGround, ribbon: this.progRibbon,
       prop: this.progProp, car: this.progCar, depthCar: this.progDepthCar, depthProp: this.progDepthProp,
+      skid: this.progSkid,
     })) {
       const map = {};
       const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
@@ -821,6 +858,7 @@ export class Renderer {
 
     this.quad = quadVao(gl);
     this.groundQuad = quadVao(gl);
+    this.skid = this.makeSkidBuffer();
 
     this.cone = this.makeInstanced(coneMesh(), 4096);
     this.post = this.makeInstanced(boxMesh(0.12, 2.1, 0.12, [0.85, 0.85, 0.88]), 8);
@@ -1219,6 +1257,7 @@ export class Renderer {
 
   /** Build the course ribbon and the static props for a track. */
   setTrack(track) {
+    this.clearSkids();
     const gl = this.gl;
     this.track = track;
     if (this.venue) this.deleteMesh(this.venue);
@@ -1434,6 +1473,7 @@ export class Renderer {
     // ---- wheel transforms and hub positions, used by both passes ----
     this.placeWheels(s);
     this.placeGhost(s);
+    if (s.skid) this.addSkids(s.skid);
 
     // ---- shadow pass ----
     this.drawShadowMap(s, cam);
@@ -1506,6 +1546,9 @@ export class Renderer {
       gl.bindVertexArray(this.ribbon.vao);
       this.drawArrays(gl.TRIANGLE_STRIP, 0, this.ribbon.count);
     }
+
+    // --- rubber on the surface, over the ribbon and the lot ---
+    this.drawSkids(eye);
 
     // --- instanced props ---
     gl.enable(gl.CULL_FACE);
@@ -1581,6 +1624,90 @@ export class Renderer {
    */
   placeWheels(s) {
     this._placeWheelSet(this.axleFrame, s.wheels, s.hubs, this._wheelMats, this._wheelMirrored, this._hubXZ);
+  }
+
+  makeSkidBuffer() {
+    const gl = this.gl;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, SKID_MAX * SKID_FLOATS * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 16, 12);
+    gl.bindVertexArray(null);
+    return {
+      vao, buf, seg: new Float32Array(SKID_FLOATS), n: 0, head: 0,
+      prev: [null, null, null, null],
+    };
+  }
+
+  /** Forget every mark: a new course, a fresh surface. */
+  clearSkids() {
+    this.skid.n = 0;
+    this.skid.head = 0;
+    this.skid.prev = [null, null, null, null];
+  }
+
+  /**
+   * Lay rubber under any wheel that is sliding this frame.
+   *
+   * `intensity` is one number per wheel, 0..1, decided by the game from the
+   * slip the tyre is at; here it only sets how dark the mark is. Each wheel
+   * contributes one quad from where it was last frame to where it is now,
+   * so a mark is continuous at any frame rate. A jump (a respawn, a seek)
+   * breaks the strip rather than drawing a streak across the course.
+   */
+  addSkids(intensity) {
+    const gl = this.gl;
+    const sk = this.skid;
+    for (let i = 0; i < 4; i++) {
+      const x = this._hubXZ[i * 2];
+      const z = this._hubXZ[i * 2 + 1];
+      const prev = sk.prev[i];
+      const a = intensity[i] ?? 0;
+      if (prev && a > 0.04) {
+        const dx = x - prev.x, dz = z - prev.z;
+        const len = Math.hypot(dx, dz);
+        if (len > 0.015 && len < 2.5) {
+          const nx = (-dz / len) * SKID_HALF_W, nz = (dx / len) * SKID_HALF_W;
+          const alpha = Math.min(0.7, 0.15 + a * 0.55);
+          const v = sk.seg;
+          const put = (k, px, pz) => { v[k] = px; v[k + 1] = SKID_Y; v[k + 2] = pz; v[k + 3] = alpha; };
+          put(0, prev.x + nx, prev.z + nz); put(4, prev.x - nx, prev.z - nz); put(8, x - nx, z - nz);
+          put(12, prev.x + nx, prev.z + nz); put(16, x - nx, z - nz); put(20, x + nx, z + nz);
+          gl.bindBuffer(gl.ARRAY_BUFFER, sk.buf);
+          gl.bufferSubData(gl.ARRAY_BUFFER, sk.head * SKID_FLOATS * 4, v);
+          sk.head = (sk.head + 1) % SKID_MAX;
+          sk.n = Math.min(sk.n + 1, SKID_MAX);
+        }
+      }
+      if (prev) { prev.x = x; prev.z = z; } else sk.prev[i] = { x, z };
+    }
+  }
+
+  drawSkids(eye) {
+    const sk = this.skid;
+    if (!sk.n) return;
+    const gl = this.gl;
+    gl.useProgram(this.progSkid);
+    const u = this.u.skid;
+    gl.uniformMatrix4fv(u.uViewProj, false, this.viewProj);
+    gl.uniform3f(u.uEye, eye[0], eye[1], eye[2]);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    // Six millimetres above the ribbon is nothing at 80 m; pull the marks
+    // toward the camera in depth so they win the tie.
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(-1.0, -2.0);
+    gl.bindVertexArray(sk.vao);
+    this.drawArrays(gl.TRIANGLES, 0, sk.n * 6);
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
   }
 
   /**

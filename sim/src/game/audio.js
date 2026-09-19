@@ -127,9 +127,33 @@ export class EngineAudio {
       this.noise.connect(f); f.connect(g); g.connect(this.master);
       return { f, g };
     };
+    // A second noise source, started a second into the same buffer, so the
+    // two are decorrelated: wind from one side of the car does not sound
+    // like a copy of the other.
+    this.noise2 = ctx.createBufferSource();
+    this.noise2.buffer = noiseBuf;
+    this.noise2.loop = true;
+    this.noise2.loopStart = 0;
+    this.noise2.start(0, 1.0);
+    const branchFrom = (src, type, freq, q, gain, pan) => {
+      const f = ctx.createBiquadFilter();
+      f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = ctx.createGain();
+      g.gain.value = gain;
+      const p = ctx.createStereoPanner();
+      p.pan.value = pan;
+      src.connect(f); f.connect(g); g.connect(p); p.connect(this.master);
+      return { f, g, p };
+    };
+
     this.induction = branch("bandpass", 700, 0.8, 0);
     this.squeal = branch("bandpass", 1350, 7.0, 0);
-    this.wind = branch("lowpass", 520, 0.7, 0);
+    // Wind on both sides of the helmet, decorrelated, so speed has width.
+    this.wind = branchFrom(this.noise, "lowpass", 520, 0.7, 0, -0.65);
+    this.wind2 = branchFrom(this.noise2, "lowpass", 560, 0.7, 0, 0.65);
+    // The road through the seat: a low rumble that rises with speed. It is
+    // what makes 60 km/h in a cockpit feel like motion rather than a video.
+    this.road = branch("lowpass", 90, 0.8, 0);
     // A locked wheel is not a scrubbing one: it is a flat spot being dragged,
     // lower and rougher than squeal. Was never voiced, so a braking lock-up
     // sounded exactly like a power slide and ABS was inaudible.
@@ -164,6 +188,36 @@ export class EngineAudio {
       this.modelGain.gain.value = this.mix.engine;
       node.connect(this.modelGain);
       this.modelGain.connect(this.master);
+      // Width. The model is mono, and a mono engine in headphones sits in
+      // the middle of the skull. Two short, unequal delays panned either
+      // way (a Haas pair) spread it without moving its centre or colouring
+      // it much; the direct path stays dominant so nothing smears.
+      this.width = [];
+      for (const [delayS, pan] of [[0.0058, -0.6], [0.0091, 0.6]]) {
+        const d = ctx.createDelay(0.05);
+        d.delayTime.value = delayS;
+        const g = ctx.createGain();
+        g.gain.value = 0.32;
+        const p = ctx.createStereoPanner();
+        p.pan.value = pan;
+        this.modelGain.connect(d); d.connect(g); g.connect(p); p.connect(this.master);
+        this.width.push({ d, g, p });
+      }
+      // Width. The model is mono, and a mono engine in headphones sits in
+      // the middle of the skull. Two short, unequal delays panned either
+      // way (a Haas pair) spread it without moving its centre or colouring
+      // it much; the direct path stays dominant so nothing smears.
+      this.width = [];
+      for (const [delayS, pan] of [[0.0058, -0.6], [0.0091, 0.6]]) {
+        const d = ctx.createDelay(0.05);
+        d.delayTime.value = delayS;
+        const g = ctx.createGain();
+        g.gain.value = 0.32;
+        const p = ctx.createStereoPanner();
+        p.pan.value = pan;
+        this.modelGain.connect(d); d.connect(g); g.connect(p); p.connect(this.master);
+        this.width.push({ d, g, p });
+      }
       this.modelNode = node;
       this.usingModel = true;
 
@@ -295,6 +349,8 @@ export class EngineAudio {
         throttle: s.shifting ? 0 : (s.throttlePlate ?? s.throttle),
         torqueNm: s.shifting ? 0 : (s.torqueNm ?? 0),
         cut: !!s.limiter && !s.shifting,
+        // Closed throttle at speed: the overrun, where a CBR pops.
+        overrun: !s.shifting && (s.throttlePlate ?? s.throttle) < 0.08 && s.rpm > 6000 && s.speed > 6,
       });
     } else {
       for (const { osc, mult } of this.oscs) {
@@ -320,9 +376,16 @@ export class EngineAudio {
     this.squeal.g.gain.setTargetAtTime(0.20 * squealAmt * this.mix.tyres, now, glide);
     this.squeal.f.frequency.setTargetAtTime(1100 + 900 * squealAmt, now, glide);
 
-    this.wind.g.gain.setTargetAtTime(
-      Math.min(0.10, (s.speed / 32) ** 2 * 0.10) * this.mix.wind, now, glide);
+    const cam = this.camera ?? { inside: true, wind: 1 };
+    const windLevel = Math.min(0.10, (s.speed / 32) ** 2 * 0.10) * this.mix.wind * cam.wind;
+    this.wind.g.gain.setTargetAtTime(windLevel, now, glide);
+    this.wind2.g.gain.setTargetAtTime(windLevel * 0.9, now, glide);
     this.wind.f.frequency.setTargetAtTime(320 + s.speed * 22, now, glide);
+    this.wind2.f.frequency.setTargetAtTime(360 + s.speed * 24, now, glide);
+    // The road, felt more than heard: on the car only.
+    const road = Math.min(1, s.speed / 25) * (cam.inside ? 1 : 0.25);
+    this.road.g.gain.setTargetAtTime(0.10 * road * this.mix.wind, now, glide);
+    this.road.f.frequency.setTargetAtTime(70 + s.speed * 1.5, now, glide);
 
     const lock = Math.max(0, Math.min(1, s.lock ?? 0)) * Math.min(1, s.speed / 4);
     this.lockup.g.gain.setTargetAtTime(0.22 * lock * this.mix.tyres, now, glide);
@@ -334,6 +397,36 @@ export class EngineAudio {
     const flutter = 0.7 + 0.3 * Math.sin(now * 41) * Math.sin(now * 7.3);
     this.surface.g.gain.setTargetAtTime(0.16 * off * flutter * this.mix.tyres, now, glide);
     this.surface.f.frequency.setTargetAtTime(200 + s.speed * 9, now, glide);
+  }
+
+  /**
+   * Which camera the sound is heard from.
+   *
+   * The cockpit and nose are on the car: the boxy close reflections of the
+   * roll hoop and the sidepod, the wind on the helmet, the road through the
+   * seat. Chase and walkaround are outside it: a wider, more diffuse space,
+   * little wind, no seat. The engine model already carries both impulse
+   * responses; nothing ever switched them.
+   */
+  setCamera(name) {
+    const inside = name === "Cockpit" || name === "Nose";
+    this.camera = { inside, wind: name === "Nose" ? 1.25 : inside ? 1.0 : name === "Chase" ? 0.5 : 0.25 };
+    this.modelNode?.port.postMessage({ type: "cabin", cabin: inside ? "cockpit" : "trackside" });
+  }
+
+  /**
+   * Which camera the sound is heard from.
+   *
+   * The cockpit and nose are on the car: the boxy close reflections of the
+   * roll hoop and the sidepod, the wind on the helmet, the road through the
+   * seat. Chase and walkaround are outside it: a wider, more diffuse space,
+   * little wind, no seat. The engine model already carries both impulse
+   * responses; nothing ever switched them.
+   */
+  setCamera(name) {
+    const inside = name === "Cockpit" || name === "Nose";
+    this.camera = { inside, wind: name === "Nose" ? 1.25 : inside ? 1.0 : name === "Chase" ? 0.5 : 0.25 };
+    this.modelNode?.port.postMessage({ type: "cabin", cabin: inside ? "cockpit" : "trackside" });
   }
 
   /** Forget the last gear and clear the engine model: the car was respawned. */
