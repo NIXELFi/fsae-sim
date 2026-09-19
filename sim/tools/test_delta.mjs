@@ -7,7 +7,7 @@
 //
 //   node sim/tools/test_delta.mjs
 
-import { DeltaTimer, REF_STEP_M, referenceFromRun } from "../src/game/delta.js";
+import { DeltaTimer, REF_STEP_M, referenceFromRun, referenceLapOf } from "../src/game/delta.js";
 import { Recorder, datumFor } from "../src/game/recorder.js";
 import { parseTelemetry } from "../src/game/runStore.js";
 
@@ -119,6 +119,59 @@ section("A slower lap does NOT replace the reference");
   const took = timer.completeLap(slow.lapTime);
   ok("the slower lap was rejected", !took);
   near("the reference is still the quick one", timer.referenceLapS, fast.lapTime, 1e-9, " s");
+}
+
+section("An off-course lap is never the reference");
+{
+  // THE BUG THIS EXISTS FOR: everything that ranks reads `valid`, but the
+  // delta took any quicker raw time. A lap that cut the course then became
+  // the thing every later lap was measured against, and no clean lap could
+  // reclaim it: 20260919-013449-autocross-vh8q carries its own invalid lap
+  // as `reference` and the next run chased it.
+  const timer = new DeltaTimer(LENGTH);
+  const clean = driveLap(timer, 20);
+  ok("the clean lap is the reference", timer.completeLap(clean.lapTime, { valid: true }));
+
+  // A much quicker lap that left the course.
+  const cut = driveLap(timer, 30);
+  ok("a quicker invalid lap is refused", !timer.completeLap(cut.lapTime, { valid: false }));
+  near("and the reference is still the clean lap", timer.referenceLapS, clean.lapTime, 1e-9, " s");
+
+  // The invalid lap's table must be gone as well as unadopted: a valid lap
+  // driven next has to start from the line, not on top of whatever the cut
+  // lap left in the bins. It is quicker than the clean lap, so it takes over
+  // -- and the times in the table have to be ITS times.
+  const next = driveLap(timer, 22);
+  ok("the next valid lap becomes the reference", timer.completeLap(next.lapTime, { valid: true }));
+  near("with its own lap time", timer.referenceLapS, next.lapTime, 1e-9, " s");
+  for (const s of [100, 300, 500]) {
+    near(`and its own pace at ${s} m`, timer.reference[Math.round(s / REF_STEP_M)], s / 22, 0.05, " s");
+  }
+  // A lap that is invalid AND slower changes nothing either.
+  const slowCut = driveLap(timer, 15);
+  ok("a slower invalid lap is refused too", !timer.completeLap(slowCut.lapTime, { valid: false }));
+  near("and the reference is untouched", timer.referenceLapS, next.lapTime, 1e-9, " s");
+}
+
+section("The lap to chase from a recorded run is the quickest VALID one");
+{
+  // The same hole from the archive side: `--reference <runId>` picked the
+  // quickest raw lap and never read `valid` or `off`.
+  const laps = [
+    { lap: 1, raw: 29.86, off: 0, valid: true },
+    { lap: 2, raw: 19.92, off: 1, valid: false },
+    { lap: 3, raw: 31.10, off: 0, valid: true },
+  ];
+  ok("the cut lap is skipped", referenceLapOf(laps)?.lap === 1, String(referenceLapOf(laps)?.lap));
+  // Before format 3 there is no `valid`; the excursion count is the only sign.
+  const older = [
+    { lap: 1, raw: 30.0, off: 0 },
+    { lap: 2, raw: 20.0, off: 2 },
+  ];
+  ok("an older manifest's off-course lap is skipped by its count", referenceLapOf(older)?.lap === 1);
+  ok("a run of nothing but invalid laps has nothing to chase",
+     referenceLapOf([{ lap: 1, raw: 20, off: 1, valid: false }]) == null);
+  ok("and so does a run with no laps", referenceLapOf([]) == null && referenceLapOf(undefined) == null);
 }
 
 section("Where the time went");

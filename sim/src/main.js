@@ -41,7 +41,7 @@ const DASH_REFRESH_MS = 1000 / 30;
  * and read the time off the dash, short enough that nobody is waiting.
  */
 const FINISH_ROLLOUT_S = 2.0;
-import { DeltaTimer, referenceFromRun } from "./game/delta.js";
+import { DeltaTimer, referenceFromRun, referenceLapOf } from "./game/delta.js";
 import { newRunId, saveRun, runsDirectory, listRuns, loadRun, parseTelemetry } from "./game/runStore.js";
 import { Replay } from "./game/replay.js";
 import { ReplayPanel, ghostGap } from "./game/replayPanel.js";
@@ -501,8 +501,10 @@ class Game {
       this.prevBestSectors = this.bestSectorsBefore ?? [];
       this.bestSectorsBefore = this.timing.bestSectors.slice();
       // RAW, not the scored total: a cone is a penalty, not a slower lap, and
-      // a driver chasing a reference is chasing the driving.
-      const took = this.deltaTimer?.completeLap(entry.raw);
+      // a driver chasing a reference is chasing the driving. And whether the
+      // lap counted, because the delta does not read `Timing.best` and would
+      // otherwise take a cut lap as the thing to beat.
+      const took = this.deltaTimer?.completeLap(entry.raw, { valid: entry.valid !== false });
       if (took) {
         this.timing.say(`REFERENCE  ${fmt(entry.raw)}`, 2);
         // The log has to say what the delta beside it was measured against,
@@ -1244,9 +1246,8 @@ class Game {
       if (manifest.track && this.trackId && manifest.track !== this.trackId) {
         throw new Error(`that run is on ${manifest.trackName ?? manifest.track}, not this course`);
       }
-      const laps = manifest.laps ?? [];
-      const best = laps.reduce((b, l) => (b == null || l.raw < b.raw ? l : b), null);
-      if (!best) throw new Error("that run has no completed lap");
+      const best = referenceLapOf(manifest.laps);
+      if (!best) throw new Error("that run has no valid lap to chase");
       const tel = parseTelemetry(telemetry);
       const table = referenceFromRun(tel, best, this.track.length);
       if (!table) throw new Error("that lap does not cover the course");

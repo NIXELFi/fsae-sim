@@ -208,13 +208,22 @@ export class DeltaTimer {
   }
 
   /**
-   * A lap finished. If it beat the reference it becomes the reference.
+   * A lap finished. If it beat the reference, and it counted, it becomes the
+   * reference.
    *
-   * @param lapS  the lap's RAW time (penalties are not driving)
+   * @param lapS   the lap's RAW time (penalties are not driving)
+   * @param valid  whether the lap scored at all
    * @returns true when the reference was replaced
    */
-  completeLap(lapS) {
-    const table = this.toReference();
+  completeLap(lapS, { valid = true } = {}) {
+    // An off-course lap is quick for the wrong reason, and this was the one
+    // path that let it through: everything else that ranks reads `valid`,
+    // but the reference took any quicker raw time. A cut lap then became the
+    // thing every later lap was measured against, and no clean lap could
+    // reclaim it -- the HUD read "vs your best 19.9" for the rest of a
+    // session whose best scored lap was 29.9, and the archive has runs
+    // chasing their own invalid lap.
+    const table = valid ? this.toReference() : null;
     const better = table != null && (this.referenceLapS == null || lapS < this.referenceLapS);
     if (better) {
       this.reference = table;
@@ -223,9 +232,16 @@ export class DeltaTimer {
       this.referenceSource = "session";
     }
     // The trace belongs to the lap that just ended; hold it so the driver can
-    // still see where the time went while the next lap starts filling.
+    // still see where the time went while the next lap starts filling. An
+    // invalid lap's trace is still worth looking at -- the cut shows up as a
+    // step -- it just cannot be the reference.
     this.lastTrace = this.trace;
     this.lastTraceLapS = lapS;
+    // Reset whether or not the lap was taken. Skipping the whole call for an
+    // invalid lap would leave `current` and the cursor where that lap left
+    // them: the next lap's samples would read as "going backwards" at the
+    // line and never advance the cursor, so at ITS flag `toReference()` would
+    // hand back the invalid lap's table wearing the valid lap's time.
     this.reset();
     return better;
   }
@@ -284,6 +300,30 @@ function sampleAt(table, s, bins) {
   if (!Number.isFinite(a)) return NaN;
   if (!Number.isFinite(b)) return a;
   return a + (b - a) * (x - i);
+}
+
+/**
+ * Which lap of a recorded run is the one to chase: the quickest RAW lap that
+ * counted, or null when none did.
+ *
+ * Raw rather than scored, because a cone is a penalty and not slower driving.
+ * And only a lap that was valid: the quickest lap of a run is quite often the
+ * one that cut the course, and this used to hand it over unread, so Helios
+ * could give the simulator a cut lap to chase from the first corner. That is
+ * `completeLap`'s hole from the other direction, with the added insult that
+ * the lap arrives already labelled as somebody's best.
+ *
+ * `valid` only exists from manifest format 3. Earlier runs carry the
+ * excursion count instead, and a lap that left the course did not count
+ * whichever field says so.
+ */
+export function referenceLapOf(laps) {
+  let best = null;
+  for (const lap of laps ?? []) {
+    if (lap.valid === false || lap.off > 0) continue;
+    if (best == null || lap.raw < best.raw) best = lap;
+  }
+  return best;
 }
 
 /**
