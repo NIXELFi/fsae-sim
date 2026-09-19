@@ -17,7 +17,7 @@ import { Timing, fmt, sectorVerdict, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S }
 import { keyLabel, buttonLabel, buttonSlot, ACTIONS, ACTION_GROUPS } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
-import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen, appVersion } from "./game/desktop.js";
+import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen, restoreFullscreen, appVersion } from "./game/desktop.js";
 import { ForceFeedback } from "./game/forceFeedback.js";
 import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet } from "./game/specSheet.js";
@@ -221,11 +221,24 @@ class Game {
     this.notSavedNote = null;
     /** Which end-of-run card is on screen; see `showFinishMenu`. */
     this._finishToken = 0;
-    this.cameraIndex = 0;
+    // The last camera the driver used, remembered: the one setting that
+    // reset on every launch, along with fullscreen.
+    this.cameraIndex = loadCameraIndex();
     this.assists = { traction: false, abs: false, autoShift: false };
     this.ggTrail = [];
     this.camRoll = 0;
     this.camPitch = 0;
+    /**
+     * The chase camera's heading and its rate: a critically damped follower
+     * on the car's heading, biased toward the velocity vector once moving.
+     * So the car yaws inside the frame under oversteer, and the camera
+     * swings round after it -- what a camera on a boom would do, and the
+     * only way slip angle can be seen from behind.
+     */
+    this.chaseYaw = null;
+    this.chaseYawRate = 0;
+    /** A knock through the camera on a cone strike, decaying. */
+    this.hitKick = 0;
     // The driver's head, relative to the chassis: outboard lean, fore-and-aft
     // slide, and the eyes leading into the corner. See `headLatMPerG`.
     this.headLat = 0;
@@ -712,6 +725,7 @@ class Game {
 
     if (this.input.edges.camera) {
       this.cameraIndex = (this.cameraIndex + 1) % CAMERAS.length;
+      saveCameraIndex(this.cameraIndex);
       this.timing.say(CAMERAS[this.cameraIndex].name.toUpperCase(), 1.2);
     }
     if (this.input.edges.traction) {
@@ -816,6 +830,7 @@ class Game {
 
     if (hits > 0) {
       this.audio.coneHit();
+      this.hitKick = 1;
       this.input.rumble(0.7, 0.4, 130);
       if (this.car.native) this.car.frame.coneHits += hits;
     }
@@ -1087,6 +1102,25 @@ class Game {
       }
     }
 
+    // The chase heading follower. Target: the heading, pulled part way to
+    // the velocity vector once there is one. Critically damped so it never
+    // rings; snapped when the car has been moved rather than driven.
+    {
+      const dt = Math.min(this.lastDt ?? 1 / 60, 0.05);
+      const beta = this.car.speed > 3 ? Math.atan2(this.car.v, this.car.u) : 0;
+      const target = this.car.psi + beta * 0.6;
+      if (this.chaseYaw == null || Math.abs(wrapAngle(target - this.chaseYaw)) > 1.2) {
+        this.chaseYaw = target;
+        this.chaseYawRate = 0;
+      } else {
+        const w = 5.5;   // rad/s: settles in about half a second
+        const err = wrapAngle(target - this.chaseYaw);
+        this.chaseYawRate += (w * w * err - 2 * w * this.chaseYawRate) * dt;
+        this.chaseYaw += this.chaseYawRate * dt;
+      }
+      this.hitKick *= Math.exp(-dt * 11);
+    }
+
     this.renderer.fovDeg = cam.fov;
     this.renderer.draw({
       car: {
@@ -1095,6 +1129,7 @@ class Game {
         psi: this.car.psi,
         rollRad: this.camRoll,
         pitchRad: this.camPitch,
+        cgHeight: SDM26.cgHeightM,
       },
       view: {
         // Head motion rides on the cockpit and nose views, which are bolted to
@@ -1107,6 +1142,7 @@ class Game {
         pitchOffset: cam.pitch,
         rigid: cam.rigid,
         orbit: cam.orbit,
+        yaw: this.chaseYaw ?? this.car.psi,
         // Live, so the walkaround can be moved while looking at the car --
         // which is the entire point of having it.
         radius: this.orbitRadius ?? cam.radius,
@@ -1122,7 +1158,9 @@ class Game {
         rimFade,
       },
       ghost: this.ghost ? this.ghostPose() : null,
-      heaveM: bump - Math.abs(tel.axG) * (SDM26.heaveMmG / 1000) * 0.5 * vib,
+      // A cone through the nose is felt as well as heard: a short drop that
+      // rides on the surface texture.
+      heaveM: bump - Math.abs(tel.axG) * (SDM26.heaveMmG / 1000) * 0.5 * vib - 0.012 * this.hitKick,
       // A little FOV with speed helps the sense of motion; a lot of it is a
       // game trope that undoes the honest framing above, so this is 4 deg at
       // 25 m/s rather than the 10 it used to reach.
@@ -1572,6 +1610,7 @@ class Game {
       x: gs.x, y: gs.y, psi: gs.yawRad,
       rollRad: gs.rollRad, pitchRad: gs.pitchRad,
       steerRad: gs.steerRad, spinFront: gs.spinFront, spinRear: gs.spinRear,
+      cgHeight: SDM26.cgHeightM,
       color: [0.24, 0.62, 0.95], tint: 0.8,
     };
   }
@@ -1936,6 +1975,19 @@ const dom = {
   sRecording: document.getElementById("sRecording"),
 };
 
+// ---- the camera, remembered between launches ----------------------------
+const CAMERA_KEY = "fsae-sim.camera";
+function saveCameraIndex(i) {
+  try { localStorage.setItem(CAMERA_KEY, String(i)); } catch { /* ignore */ }
+}
+function loadCameraIndex() {
+  try {
+    const i = Number(localStorage.getItem(CAMERA_KEY));
+    // The walkaround is not a driving view; it comes back as the cockpit.
+    return Number.isInteger(i) && i >= 0 && i < CAMERAS.length && !CAMERAS[i].orbit ? i : 0;
+  } catch { return 0; }
+}
+
 // ---- who is driving, remembered between launches ------------------------
 const DRIVER_KEY = "fsae-sim.driver";
 const SESSION_KEY = "fsae-sim.session";
@@ -2051,9 +2103,12 @@ function updateSession() {
 
   if (dom.sDriver) {
     const from = game.launchedBy ? `<small class="changed">set by the launcher, this session only</small>` : "";
-    dom.sDriver.innerHTML = game.driverName
-      ? `<b>${esc(game.driverName)}</b>${game.sessionLabel ? `<small>${esc(game.sessionLabel)}</small>` : ""}${from}`
-      : `<span class="off">unnamed</span>`;
+    // The name box lives in this row; only the notes under it are rebuilt.
+    const notes = dom.sDriver.querySelector(".driver-notes");
+    if (notes) {
+      notes.innerHTML = (game.sessionLabel ? `<small>${esc(game.sessionLabel)}</small>` : "") + from +
+        (game.driverName || !game.recording ? "" : `<small class="changed">unnamed: runs file as "Unknown"</small>`);
+    }
   }
   if (dom.sRecording) {
     if (!game.recording) {
@@ -2191,7 +2246,10 @@ let loadCourseFromSelect = async () => false;
 
 async function boot() {
   installDesktopBehaviour();
-  if (isDesktop) document.body.classList.add("desktop");
+  if (isDesktop) {
+    document.body.classList.add("desktop");
+    restoreFullscreen();
+  }
   // Before anything can open a recorder, so no run is stamped with the
   // fallback when the shell could have said.
   await resolveSimVersion();
@@ -2342,10 +2400,15 @@ async function boot() {
   game.driverName = loadDriver();
   game.sessionLabel = loadSessionLabel();
   game.recording = loadRecordPref();
-  if (dom.driverName) {
-    dom.driverName.value = game.driverName;
-    dom.driverName.addEventListener("input", () => {
-      game.driverName = dom.driverName.value.trim().slice(0, 64);
+  // Two boxes for one name: the Runs tab's, and one beside Start, because
+  // the first run of every session was filed as "Unknown" by a driver who
+  // never opened the last tab.
+  const nameBoxes = [dom.driverName, document.getElementById("sDriverInput")].filter(Boolean);
+  for (const box of nameBoxes) {
+    box.value = game.driverName;
+    box.addEventListener("input", () => {
+      game.driverName = box.value.trim().slice(0, 64);
+      for (const other of nameBoxes) if (other !== box) other.value = box.value;
       // Typing here IS the rig's own setting, so this one sticks -- and it
       // takes the run back from the launcher, identity included: a name typed
       // into a box is not the person Helios signed in.
@@ -2552,6 +2615,7 @@ async function boot() {
   game.refreshPauseCard = refreshPauseCard;
   pauseEl("pauseCamera").addEventListener("click", () => {
     game.cameraIndex = (game.cameraIndex + 1) % CAMERAS.length;
+    saveCameraIndex(game.cameraIndex);
     refreshPauseCard();
   });
   pauseEl("pauseDensity").addEventListener("click", () => { game.hud.cycleDensity(); refreshPauseCard(); });
@@ -2923,6 +2987,13 @@ function escHtml(v) {
 
 function round3(v) {
   return Number.isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
+}
+
+/** Into (-pi, pi]. */
+function wrapAngle(a) {
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a <= -Math.PI) a += 2 * Math.PI;
+  return a;
 }
 
 /**

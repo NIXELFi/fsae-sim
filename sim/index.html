@@ -367,6 +367,11 @@
   .session dd .mono { font-family: var(--mono); font-size: 12px; }
   .session dd .changed { color: var(--gold); }
   .session dd .off { color: var(--dim-2); }
+  .session dd input[type="text"] {
+    width: 100%; padding: 4px 8px; font: inherit; font-size: 12.5px; color: var(--text);
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.14); border-radius: 5px;
+  }
+  .session dd input[type="text"]:focus { outline: none; border-color: var(--accent); }
   #padStatus { color: var(--dim); }
   #padStatus.ok { color: var(--ok); }
 
@@ -941,7 +946,7 @@
         <dt>Throttle</dt><dd id="sEtc"><span class="off">-</span></dd>
         <dt>Controls</dt><dd id="sControls"><b>-</b></dd>
         <dt>Pad</dt><dd><span id="padStatus">not detected</span></dd>
-        <dt>Driver</dt><dd id="sDriver"><span class="off">unnamed</span></dd>
+        <dt>Driver</dt><dd id="sDriver"><input id="sDriverInput" type="text" maxlength="64" placeholder="Your name" autocomplete="off" aria-label="Driver name"><span class="driver-notes"></span></dd>
         <dt>Logging</dt><dd id="sRecording"><b>on</b></dd>
       </dl>
       <div class="actions">

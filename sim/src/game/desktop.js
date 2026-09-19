@@ -13,6 +13,8 @@ function currentWindow() {
   return w?.getCurrentWindow?.() ?? w?.getCurrent?.() ?? null;
 }
 
+const FULLSCREEN_KEY = "fsae-sim.fullscreen";
+
 export async function toggleFullscreen() {
   const win = currentWindow();
   if (!win) {
@@ -24,7 +26,22 @@ export async function toggleFullscreen() {
   try {
     const on = await win.isFullscreen();
     await win.setFullscreen(!on);
+    // Remembered: F11 was the one setting that reset on every launch.
+    try { localStorage.setItem(FULLSCREEN_KEY, on ? "0" : "1"); } catch { /* fine */ }
   } catch { /* permission not granted; not worth interrupting the driver */ }
+}
+
+/** Put the window back the way F11 last left it. Desktop only. */
+export async function restoreFullscreen() {
+  const win = currentWindow();
+  if (!win) return;
+  let want = null;
+  try { want = localStorage.getItem(FULLSCREEN_KEY); } catch { /* fine */ }
+  if (want == null) return;
+  try {
+    const on = await win.isFullscreen();
+    if (on !== (want === "1")) await win.setFullscreen(want === "1");
+  } catch { /* as above */ }
 }
 
 /**

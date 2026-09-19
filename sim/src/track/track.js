@@ -202,13 +202,17 @@ export class Track {
       const ex = bx - qx, ey = by - qy;
       if (ex * ex + ey * ey < coneRadius * coneRadius) {
         cone.down = true;
+        // For the renderer's tumble: when, and which way it fell -- away
+        // from the car, along the line from the CG to the cone.
+        cone.downAt = typeof performance !== "undefined" ? performance.now() : 0;
+        cone.downDir = Math.atan2(dy, dx);
         hits++;
       }
     }
     return hits;
   }
 
-  resetCones() { for (const c of this.cones) c.down = false; }
+  resetCones() { for (const c of this.cones) { c.down = false; c.downAt = null; } }
 
   /** Cones within `range` metres of (x, y) -- what the renderer needs to draw. */
   conesNear(x, y, range) {

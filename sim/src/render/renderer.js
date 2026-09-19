@@ -28,7 +28,9 @@ import { buildCarMeshes, GEO, HUBS } from "./carmesh.js";
 import { buildVenueMesh } from "./venuemesh.js";
 import { buildEnvironmentMesh } from "./envmesh.js";
 
-const CONE_DRAW_RANGE = 140; // m
+// Far enough that a cone arrives out of the fog rather than popping in on
+// the endurance straights; the instance buffer holds 4096, plenty.
+const CONE_DRAW_RANGE = 280; // m
 const SHADOW_SIZE = 2048;     // texels, per cascade
 // Two cascades: a tight box for the car's own shadow and a wide one so the
 // cones down the course carry shadows instead of popping into them.
@@ -37,7 +39,11 @@ const SHADOW_DEPTH = 90;      // m, half depth range of each cascade along the s
 
 // Attribute locations are fixed so one VAO can be drawn by the lit program
 // and by the depth-only program alike.
-const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_TINT = 5;
+const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_TINT = 5, I_DIR = 6;
+/** Floats per prop instance: offset(3), down(1), tint(1), dir(1). */
+const INST_FLOATS = 6;
+/** How long a struck cone takes to land, ms. */
+const CONE_TUMBLE_MS = 320;
 
 /** The dash panel's texture, at the DISPLAY's own 108:65 -- not the case's.
  *  Sized so the smallest type is still a couple of pixels tall from the
@@ -535,6 +541,7 @@ layout(location = 2) in vec3 aColor;
 layout(location = 3) in vec3 iOffset;
 layout(location = 4) in float iDown;
 layout(location = 5) in float iTint;
+layout(location = 6) in float iDir;
 uniform mat4 uViewProj;
 out vec3 vColor;
 out vec3 vNormal;
@@ -542,12 +549,20 @@ out vec3 vWorld;
 void main() {
   vec3 p = aPos;
   vec3 n = aNormal;
-  if (iDown > 0.5) {
-    // Knocked over: rotate -90 deg about X so the axis lies horizontal, then
-    // lift by the base radius so it rests on the deck instead of half-sunk.
-    p = vec3(p.x, p.z, -p.y);
-    n = vec3(n.x, n.z, -n.y);
-    p.y += 0.15;
+  if (iDown > 0.001) {
+    // Knocked over: tip about the base edge on the far side from the strike,
+    // by up to 90 degrees, eased so it lands rather than hinges. Used to be
+    // an instant flop about world X whichever way the car hit it, so every
+    // downed cone on the course lay the same way.
+    float a = 1.5707963 * (1.0 - (1.0 - iDown) * (1.0 - iDown));
+    float ca = cos(a), sa = sin(a);
+    // The fall direction in world xz (world z is -y of the course frame).
+    vec3 f = vec3(cos(iDir), 0.0, -sin(iDir));
+    vec3 k = vec3(f.z, 0.0, -f.x);          // horizontal axis, perpendicular
+    vec3 pivot = f * 0.155;                 // the base edge it tips over
+    vec3 q = p - pivot;
+    p = q * ca + cross(k, q) * sa + k * dot(k, q) * (1.0 - ca) + pivot;
+    n = n * ca + cross(k, n) * sa + k * dot(k, n) * (1.0 - ca);
   }
   vec3 world = p + iOffset;
   vWorld = world;
@@ -629,10 +644,26 @@ const DEPTH_PROP_VS = `#version 300 es
 layout(location = 0) in vec3 aPos;
 layout(location = 3) in vec3 iOffset;
 layout(location = 4) in float iDown;
+layout(location = 6) in float iDir;
 uniform mat4 uViewProj;
 void main() {
   vec3 p = aPos;
-  if (iDown > 0.5) { p = vec3(p.x, p.z, -p.y); p.y += 0.15; }
+  vec3 n = vec3(0.0, 1.0, 0.0);
+  if (iDown > 0.001) {
+    // Knocked over: tip about the base edge on the far side from the strike,
+    // by up to 90 degrees, eased so it lands rather than hinges. Used to be
+    // an instant flop about world X whichever way the car hit it, so every
+    // downed cone on the course lay the same way.
+    float a = 1.5707963 * (1.0 - (1.0 - iDown) * (1.0 - iDown));
+    float ca = cos(a), sa = sin(a);
+    // The fall direction in world xz (world z is -y of the course frame).
+    vec3 f = vec3(cos(iDir), 0.0, -sin(iDir));
+    vec3 k = vec3(f.z, 0.0, -f.x);          // horizontal axis, perpendicular
+    vec3 pivot = f * 0.155;                 // the base edge it tips over
+    vec3 q = p - pivot;
+    p = q * ca + cross(k, q) * sa + k * dot(k, q) * (1.0 - ca) + pivot;
+    n = n * ca + cross(k, n) * sa + k * dot(k, n) * (1.0 - ca);
+  }
   gl_Position = uViewProj * vec4(p + iOffset, 1.0);
 }`;
 
@@ -836,6 +867,8 @@ export class Renderer {
     // A second car -- the replay ghost -- gets its own frame and wheel set,
     // because `placeWheels` writes the live car's into shared scratch.
     this._ghostChassis = mat4();
+    this._ghostAxles = mat4();
+    this.axleFrame = mat4();
     this._ghostWheelMats = [mat4(), mat4(), mat4(), mat4()];
     this._ghostMirrored = [false, false, false, false];
     this._ghostOn = false;
@@ -1131,8 +1164,8 @@ export class Renderer {
     attach(mesh.normal, A_NORMAL, 3);
     attach(mesh.color, A_COLOR, 3);
 
-    // Interleaved per-instance data: offset(3), down(1), tint(1)
-    const stride = 5 * 4;
+    // Interleaved per-instance data: offset(3), down(1), tint(1), dir(1)
+    const stride = INST_FLOATS * 4;
     const instBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
     gl.bufferData(gl.ARRAY_BUFFER, maxInstances * stride, gl.DYNAMIC_DRAW);
@@ -1144,11 +1177,12 @@ export class Renderer {
     bindInst(I_OFFSET, 3, 0);
     bindInst(I_DOWN, 1, 12);
     bindInst(I_TINT, 1, 16);
+    bindInst(I_DIR, 1, 20);
 
     gl.bindVertexArray(null);
     return {
       vao, instBuf, count: mesh.count, maxInstances,
-      data: new Float32Array(maxInstances * 5),
+      data: new Float32Array(maxInstances * INST_FLOATS),
       n: 0,
     };
   }
@@ -1315,11 +1349,24 @@ export class Renderer {
     this.time = performance.now() / 1000;
 
     // ---- chassis frame: everything bolted to the car rides on this ----
+    //
+    // Roll and pitch are about the CG, not about a point on the ground: the
+    // body sits on its springs and the wheels stay on the road. Rotating
+    // about the ground origin put the outside tyres into the asphalt and
+    // floated the inside ones at every corner, and hid the one thing a
+    // rolling body shows -- the travel between the wheel and the arch.
+    const h = cam.cgHeight ?? 0;
     this.chain(this.chassis, [
-      translation(T[0], cam.x, 0, -cam.y),
+      translation(T[0], cam.x, h, -cam.y),
       rotY(T[1], cam.psi),
       rotZ(T[2], cam.pitchRad),
       rotX(T[3], cam.rollRad),
+      translation(T[4], 0, -h, 0),
+    ]);
+    // The unsprung frame the wheels hang off: position and heading only.
+    this.chain(this.axleFrame, [
+      translation(T[0], cam.x, 0, -cam.y),
+      rotY(T[1], cam.psi),
     ]);
 
     // The cockpit and nose cameras are RIGIDLY bolted to that frame. That is
@@ -1330,9 +1377,12 @@ export class Renderer {
     if (s.view.rigid) {
       this.camFrame.set(this.chassis);
     } else {
+      // A chase camera has its own heading (`view.yaw`, a damped follower
+      // in main.js), so the car can yaw inside the frame: that is how slip
+      // angle is seen from behind. Welded to `cam.psi` it never could.
       this.chain(this.camFrame, [
         translation(T[0], cam.x, 0, -cam.y),
-        rotY(T[1], cam.psi),
+        rotY(T[1], s.view.yaw ?? cam.psi),
         rotZ(T[2], cam.pitchRad * 0.30),
         rotX(T[3], cam.rollRad * 0.25),
       ]);
@@ -1525,7 +1575,7 @@ export class Renderer {
    * contact darkening on the ground.
    */
   placeWheels(s) {
-    this._placeWheelSet(this.chassis, s.wheels, s.hubs, this._wheelMats, this._wheelMirrored, this._hubXZ);
+    this._placeWheelSet(this.axleFrame, s.wheels, s.hubs, this._wheelMats, this._wheelMirrored, this._hubXZ);
   }
 
   /**
@@ -1571,13 +1621,19 @@ export class Renderer {
     this._ghostOn = !!g;
     if (!g) return;
     const T = this._t;
+    const h = g.cgHeight ?? 0;
     this.chain(this._ghostChassis, [
-      translation(T[0], g.x, 0, -g.y),
+      translation(T[0], g.x, h, -g.y),
       rotY(T[1], g.psi),
       rotZ(T[2], g.pitchRad || 0),
       rotX(T[3], g.rollRad || 0),
+      translation(T[4], 0, -h, 0),
     ]);
-    this._placeWheelSet(this._ghostChassis,
+    this.chain(this._ghostAxles, [
+      translation(T[0], g.x, 0, -g.y),
+      rotY(T[1], g.psi),
+    ]);
+    this._placeWheelSet(this._ghostAxles,
       { steerRad: g.steerRad || 0, spinFront: g.spinFront || 0, spinRear: g.spinRear || 0 },
       s.hubs, this._ghostWheelMats, this._ghostMirrored, null);
     const c = g.color;
@@ -1827,13 +1883,21 @@ export class Renderer {
   fillCones(mesh, list) {
     const n = Math.min(list.length, mesh.maxInstances);
     const d = mesh.data;
+    const now = performance.now();
     for (let i = 0; i < n; i++) {
       const c = list[i];
-      d[i * 5 + 0] = c.x;
-      d[i * 5 + 1] = 0;
-      d[i * 5 + 2] = -c.y;
-      d[i * 5 + 3] = c.down ? 1 : 0;
-      d[i * 5 + 4] = c.down ? 0.72 : 1;
+      // How far through its tumble a struck cone is. A cone with no strike
+      // time (a replay's, or an older record) is simply down.
+      const prog = !c.down ? 0
+        : c.downAt == null ? 1
+        : Math.min(1, (now - c.downAt) / CONE_TUMBLE_MS);
+      const o = i * INST_FLOATS;
+      d[o + 0] = c.x;
+      d[o + 1] = 0;
+      d[o + 2] = -c.y;
+      d[o + 3] = prog;
+      d[o + 4] = 1 - 0.28 * prog;
+      d[o + 5] = c.downDir ?? 0;
     }
     this.uploadInstances(mesh, n);
   }
@@ -1842,11 +1906,13 @@ export class Renderer {
     const n = Math.min(list.length, mesh.maxInstances);
     const d = mesh.data;
     for (let i = 0; i < n; i++) {
-      d[i * 5 + 0] = list[i].x;
-      d[i * 5 + 1] = 0;
-      d[i * 5 + 2] = -list[i].y;
-      d[i * 5 + 3] = 0;
-      d[i * 5 + 4] = 1;
+      const o = i * INST_FLOATS;
+      d[o + 0] = list[i].x;
+      d[o + 1] = 0;
+      d[o + 2] = -list[i].y;
+      d[o + 3] = 0;
+      d[o + 4] = 1;
+      d[o + 5] = 0;
     }
     this.uploadInstances(mesh, n);
   }
@@ -1856,7 +1922,7 @@ export class Renderer {
     mesh.n = n;
     if (n === 0) return;
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.instBuf);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, mesh.data, 0, n * 5);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, mesh.data, 0, n * INST_FLOATS);
   }
 
   drawInstanced(mesh) {
