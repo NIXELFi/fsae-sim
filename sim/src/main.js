@@ -17,7 +17,7 @@ import { Timing, fmt, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/t
 import { keyLabel } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
-import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen } from "./game/desktop.js";
+import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen, appVersion } from "./game/desktop.js";
 import { ForceFeedback } from "./game/forceFeedback.js";
 import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet } from "./game/specSheet.js";
@@ -59,8 +59,21 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * Stamped into every recorded run. A lap time only means something next to the
  * build it was set on -- the differential, the torque curve and the steering
  * rack have all moved under the same courses -- so the log says which one.
+ *
+ * Which is worth nothing if it says the wrong one, and it did: this was a
+ * hardcoded "1.0.0" while the app shipped 0.2.0 and then 0.3.0, so every run
+ * ever recorded claims a version that has never existed. Now it asks the
+ * shell what it actually is at boot, and the literal below is only the
+ * browser fallback -- checked against package.json and tauri.conf.json by
+ * `tools/validate.js`, so it cannot drift again either.
  */
-const SIM_VERSION = "1.0.0";
+export let SIM_VERSION = "0.3.0";
+
+/** Ask the shell what build this is; browsers keep the fallback. */
+async function resolveSimVersion() {
+  const v = await appVersion();
+  if (typeof v === "string" && v) SIM_VERSION = v;
+}
 
 // `rigid` means the camera is bolted to the chassis, so the cockpit stays
 // still relative to the driver's head and the world rolls instead. Chase is
@@ -1861,6 +1874,9 @@ let game;
 async function boot() {
   installDesktopBehaviour();
   if (isDesktop) document.body.classList.add("desktop");
+  // Before anything can open a recorder, so no run is stamped with the
+  // fallback when the shell could have said.
+  await resolveSimVersion();
   wireTabs();
 
   // Restore saved overrides BEFORE the sheet renders, so the sliders come up

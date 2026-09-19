@@ -144,6 +144,18 @@ const NO_RIG = { running: false, ffbSupported: false, wheelPresent: false, wheel
  * for a launcher such as Helios. In a browser the same fields come from the
  * page's query string instead, so `main.js` merges both.
  */
+/**
+ * The version the shell was built as, or null in a browser.
+ *
+ * One source of truth: `tauri.conf.json`. A version stamped into a run
+ * manifest by hand is a version that will be wrong, and was.
+ */
+export async function appVersion() {
+  const app = window.__TAURI__?.app;
+  if (!app?.getVersion) return null;
+  try { return await app.getVersion(); } catch { return null; }
+}
+
 export const launchOptions = () => invoke("launch_options").then((o) => o ?? null).catch(() => null);
 
 /** A second launch while running: the shell forwards its arguments here. */

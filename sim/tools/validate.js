@@ -1304,5 +1304,31 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
   }
   check("a .gltf (JSON) file is refused", refused, 1, 1, "");
 }
+// ---------------------------------------------------------------- version ---
+// One build, one version number.
+//
+// `SIM_VERSION` is stamped into every recorded run, and a lap time only means
+// something next to the build it was set on. It was a hardcoded "1.0.0" while
+// the app shipped 0.2.0 and then 0.3.0, so every run ever recorded claims a
+// version that has never existed -- and nothing noticed, because nothing was
+// comparing them. The desktop build now asks the shell at boot, but the
+// literal is still the browser's answer, so it has to be right.
+//
+// Read as text rather than imported: `main.js` is the whole browser app.
+{
+  const root = join(here, "..");
+  const literal = readFileSync(join(root, "src/main.js"), "utf8")
+    .match(/export let SIM_VERSION = "([^"]+)"/)?.[1] ?? "";
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+  const conf = JSON.parse(readFileSync(join(root, "src-tauri/tauri.conf.json"), "utf8")).version;
+  const cargo = readFileSync(join(root, "src-tauri/Cargo.toml"), "utf8")
+    .match(/^version = "([^"]+)"/m)?.[1] ?? "";
+  console.log(`
+version  main.js ${literal || "?"} | package.json ${pkg} | tauri.conf ${conf} | Cargo ${cargo}`);
+  check("SIM_VERSION matches package.json", literal === pkg ? 1 : 0, 1, 1, "");
+  check("tauri.conf.json matches package.json", conf === pkg ? 1 : 0, 1, 1, "");
+  check("Cargo.toml matches package.json", cargo === pkg ? 1 : 0, 1, 1, "");
+}
+
 console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}\n`);
 process.exit(failures === 0 ? 0 : 1);
