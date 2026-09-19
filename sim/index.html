@@ -8,6 +8,10 @@
   :root {
     --gold: #FFC627;
     --gold-dim: rgba(255, 198, 39, 0.16);
+    /* The highlight colour the run rows and text-input focus use. It was
+       referenced but never defined, so best times were not gold and inputs
+       had no focus ring. */
+    --accent: var(--gold);
     --maroon: #8C1D40;
     --bg: #0f1216;
     --panel: rgba(15, 18, 23, 0.90);
@@ -781,7 +785,7 @@
               <canvas class="plan" id="coursePlan" aria-label="Plan view of the selected course"></canvas>
               <p class="note" style="margin:8px 0 0">
                 Traced 2026 Michigan geometry from the Helios lap sim, resampled to 1 m.
-                Cones score +2 s each; leaving the course is a DOO.
+                Cones score +2 s each; leaving the course voids the run (autocross) or the lap (endurance).
               </p>
             </div>
           </div>

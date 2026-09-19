@@ -670,12 +670,15 @@ function coneMesh() {
       for (const [P, N, C] of quad) { pos.push(...P); nrm.push(...N); col.push(...C); }
     }
   }
-  // Square base plate.
+  // Square base plate. Its top face sits 24 mm up: the course ribbon is at
+  // 12 mm, and a plate at the same height z-fought it at every cone on the
+  // ribbon's edge. A real cone base is about that thick anyway.
   const B = 0.155;
+  const PY = 0.024;
   const plate = [
     // Wound counter-clockwise seen from above, or culling removes it.
-    [-B, 0.012, -B], [B, 0.012, B], [B, 0.012, -B],
-    [-B, 0.012, -B], [-B, 0.012, B], [B, 0.012, B],
+    [-B, PY, -B], [B, PY, B], [B, PY, -B],
+    [-B, PY, -B], [-B, PY, B], [B, PY, B],
   ];
   for (const P of plate) { pos.push(...P); nrm.push(0, 1, 0); col.push(...baseCol); }
 
@@ -830,6 +833,13 @@ export class Renderer {
     this._hubXZ = new Float32Array(8);
     this._wheelMirrored = [false, false, false, false];
     this._wheelMats = [mat4(), mat4(), mat4(), mat4()];
+    // A second car -- the replay ghost -- gets its own frame and wheel set,
+    // because `placeWheels` writes the live car's into shared scratch.
+    this._ghostChassis = mat4();
+    this._ghostWheelMats = [mat4(), mat4(), mat4(), mat4()];
+    this._ghostMirrored = [false, false, false, false];
+    this._ghostOn = false;
+    this._ghostOv = [0.24, 0.62, 0.95, 0.8];
     this.fovDeg = 78;
     this.time = 0;
 
@@ -1290,6 +1300,8 @@ export class Renderer {
    *   car    {x, y, psi, rollRad, pitchRad}   chassis pose
    *   view   {ahead, height, pitchOffset, rigid}  eye point in the chassis frame
    *   wheels {steerRad, spinFront, spinRear, rimFade}
+   *   ghost  {x, y, psi, rollRad, pitchRad, steerRad, spinFront, spinRear,
+   *           color, tint} or null -- a second car, for replays
    *   heaveM, fovBoost
    */
   draw(s) {
@@ -1342,8 +1354,17 @@ export class Renderer {
       const dotUp = forward[1];
       up = normalize([-forward[0] * dotUp, 1 - dotUp * dotUp, -forward[2] * dotUp]);
     } else {
-      eye = transformPoint(this.camFrame, [s.view.ahead, s.view.height + s.heaveM, 0]);
-      const pitched = this.chain(T[4], [this.camFrame, rotZ(T[0], s.view.pitchOffset || 0)]);
+      // The driver's head is not bolted to the chassis: it leans outboard
+      // (`lateral`, +z is the driver's right) and the eyes lead into the
+      // corner (`yawOffset`, positive looks left). Both were computed every
+      // frame and dropped here, so only the fore-aft slide ever showed.
+      eye = transformPoint(this.camFrame,
+        [s.view.ahead, s.view.height + s.heaveM, s.view.lateral || 0]);
+      const pitched = this.chain(T[4], [
+        this.camFrame,
+        rotY(T[0], s.view.yawOffset || 0),
+        rotZ(T[1], s.view.pitchOffset || 0),
+      ]);
       forward = normalize(transformDir(pitched, [1, 0, 0]));
       up = normalize(transformDir(pitched, [0, 1, 0]));
     }
@@ -1358,6 +1379,7 @@ export class Renderer {
 
     // ---- wheel transforms and hub positions, used by both passes ----
     this.placeWheels(s);
+    this.placeGhost(s);
 
     // ---- shadow pass ----
     this.drawShadowMap(s, cam);
@@ -1441,6 +1463,11 @@ export class Renderer {
     this.drawInstanced(this.pole);
     gl.disable(gl.CULL_FACE);
 
+    // The ghost before the live car: `drawCar` ends with the dash screen,
+    // which binds its own texture on unit 0 where the lit programs expect
+    // the near shadow cascade. Anything lit after it samples the dash as a
+    // depth map. The depth test sorts the two cars whichever is drawn first.
+    this.drawGhost(s, eye);
     this.drawCar(s, eye);
 
     // --- sky, last: its quad sits at z = 0.9999, so wherever anything was
@@ -1498,17 +1525,27 @@ export class Renderer {
    * contact darkening on the ground.
    */
   placeWheels(s) {
+    this._placeWheelSet(this.chassis, s.wheels, s.hubs, this._wheelMats, this._wheelMirrored, this._hubXZ);
+  }
+
+  /**
+   * Wheel matrices for one car -- the live one or the ghost -- hung off the
+   * given chassis frame.
+   *
+   * @param hubXZ  where to write the hub contact points, or null for a car
+   *               that does not darken the ground under itself
+   */
+  _placeWheelSet(chassis, w, hubsIn, mats, mirroredOut, hubXZ) {
     const T = this._t;
-    const w = s.wheels;
-    const hubs = this.carModel?.hubs ?? this.bodyHubs ?? s.hubs ?? HUBS;
+    const hubs = this.carModel?.hubs ?? this.bodyHubs ?? hubsIn ?? HUBS;
     for (let i = 0; i < 4; i++) {
       const hub = hubs[i];
       // Steer rotates about the kingpin (local Y); spin is about the hub axis
       // (local Z) AFTER the steer. The left pair is mirrored across the wheel
       // plane so the dished rim faces outboard on both sides (see carmesh).
       const mirrored = hub.z < 0;
-      const m = this._wheelMats[i];
-      multiply(this._a, this.chassis, translation(T[0], hub.x, hub.y, hub.z));
+      const m = mats[i];
+      multiply(this._a, chassis, translation(T[0], hub.x, hub.y, hub.z));
       multiply(this._b, this._a, rotY(T[1], hub.front ? w.steerRad : 0));
       multiply(this._a, this._b, rotZ(T[2], -(hub.front ? w.spinFront : w.spinRear)));
       if (mirrored) multiply(m, this._a, scale(T[3], 1, 1, -1));
@@ -1516,10 +1553,62 @@ export class Renderer {
       // A reflection reverses the winding, so gl_FrontFacing inverts and the
       // two-sided shader would flip these normals inward; drawCar swaps the
       // front-face rule for the mirrored pair.
-      this._wheelMirrored[i] = mirrored;
-      this._hubXZ[i * 2] = m[12];
-      this._hubXZ[i * 2 + 1] = m[14];
+      mirroredOut[i] = mirrored;
+      if (hubXZ) {
+        hubXZ[i * 2] = m[12];
+        hubXZ[i * 2 + 1] = m[14];
+      }
     }
+  }
+
+  /**
+   * The replay ghost's frame and wheels, from the pose `main.js` sampled out
+   * of the other run's log. Nothing else about it is different: same body,
+   * same tyres, tinted so the two cars can be told apart.
+   */
+  placeGhost(s) {
+    const g = s.ghost;
+    this._ghostOn = !!g;
+    if (!g) return;
+    const T = this._t;
+    this.chain(this._ghostChassis, [
+      translation(T[0], g.x, 0, -g.y),
+      rotY(T[1], g.psi),
+      rotZ(T[2], g.pitchRad || 0),
+      rotX(T[3], g.rollRad || 0),
+    ]);
+    this._placeWheelSet(this._ghostChassis,
+      { steerRad: g.steerRad || 0, spinFront: g.spinFront || 0, spinRear: g.spinRear || 0 },
+      s.hubs, this._ghostWheelMats, this._ghostMirrored, null);
+    const c = g.color;
+    if (c) { this._ghostOv[0] = c[0]; this._ghostOv[1] = c[1]; this._ghostOv[2] = c[2]; }
+    this._ghostOv[3] = g.tint ?? 0.8;
+  }
+
+  /** Body and wheels of the ghost, tinted. No dash, no steering wheel. */
+  drawGhost(s, eye) {
+    if (!this._ghostOn) return;
+    const gl = this.gl;
+    const uc = this.u.car;
+    gl.useProgram(this.progCar);
+    this.setCommon(uc, eye);
+    gl.uniformMatrix4fv(uc.uViewProj, false, this.viewProj);
+    const ov = this._ghostOv;
+    gl.uniform4f(uc.uOverride, ov[0], ov[1], ov[2], ov[3]);
+    const part = (mesh, model, mat) => {
+      gl.uniformMatrix4fv(uc.uModel, false, model);
+      gl.uniform3f(uc.uMaterial, mat[0], mat[1], mat[2]);
+      gl.bindVertexArray(mesh.vao);
+      this.drawArrays(gl.TRIANGLES, 0, mesh.count);
+    };
+    part(this.car.body, this._ghostChassis, MAT.paint);
+    for (let i = 0; i < 4; i++) {
+      gl.frontFace(this._ghostMirrored[i] ? gl.CW : gl.CCW);
+      part(this.car.tire, this._ghostWheelMats[i], MAT.tyre);
+      part(this.car.rim, this._ghostWheelMats[i], MAT.rim);
+    }
+    gl.frontFace(gl.CCW);
+    gl.uniform4f(uc.uOverride, 0, 0, 0, 0);
   }
 
   /**
@@ -1580,6 +1669,17 @@ export class Renderer {
         gl.uniformMatrix4fv(ud.uModel, false, this._wheelMats[k]);
         gl.bindVertexArray(this.car.tire.vao);
         this.drawArrays(gl.TRIANGLES, 0, this.car.tire.count);
+      }
+      // The ghost throws a shadow too, or it reads as a hologram.
+      if (this._ghostOn) {
+        gl.uniformMatrix4fv(ud.uModel, false, this._ghostChassis);
+        gl.bindVertexArray(this.car.body.vao);
+        this.drawArrays(gl.TRIANGLES, 0, this.car.body.count);
+        for (let k = 0; k < 4; k++) {
+          gl.uniformMatrix4fv(ud.uModel, false, this._ghostWheelMats[k]);
+          gl.bindVertexArray(this.car.tire.vao);
+          this.drawArrays(gl.TRIANGLES, 0, this.car.tire.count);
+        }
       }
 
       // Cones, posts and poles. The instance buffer holds everything within

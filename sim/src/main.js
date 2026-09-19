@@ -847,9 +847,17 @@ class Game {
       // torque is still burning fuel and still audible. This also carries the
       // idle plate, so the idle note comes from the 14% opening the ETC really
       // holds rather than from a closed throttle.
-      torqueNm: pt.shiftTimer > 0 ? 0 : pt.indicatedTorque(pt.engineRpm, throttle),
+      //
+      // On the rig the Rust model reports its own indicated torque, already
+      // zeroed on the limiter and the shift cut. The JS proxy's
+      // `indicatedTorque` reads `limiterCut` off a JS engine step that never
+      // runs natively, so on a wheel the audio heard full combustion at
+      // 14,500 rpm -- the exact bug the JS path fixed.
+      torqueNm: this.car.native ? pt.indicatedTorqueNm
+        : pt.shiftTimer > 0 ? 0 : pt.indicatedTorque(pt.engineRpm, throttle),
       // Same for the throttle the sound sees.
-      throttlePlate: pt.shiftTimer > 0 ? 0 : pt.platePosition(pt.engineRpm, throttle),
+      throttlePlate: this.car.native ? (pt.shiftTimer > 0 ? 0 : pt.plate)
+        : pt.shiftTimer > 0 ? 0 : pt.platePosition(pt.engineRpm, throttle),
       speed: this.car.speed,
       slip: Math.max(tel.utilF, tel.utilR),
       wheelspin: Math.max(0, tel.kappaR - 0.15),
