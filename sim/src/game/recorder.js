@@ -297,7 +297,15 @@ export function datumFor(trackId) {
  */
 export class Recorder {
   constructor(meta) {
-    this.meta = meta;
+    // What the live delta is being measured against as the run OPENS is part
+    // of the run's metadata, and is taken here rather than waited for. The
+    // game used to tell the recorder about a reference only when one was
+    // adopted mid-run, so a run that loaded its reference before the drive
+    // and never beat it -- most runs -- logged a full `sim.delta_s` trace
+    // with `reference: null` beside it, and the replay's "vs" came up blank.
+    // 17 archived runs are in that state.
+    const { reference = null, ...rest } = meta;
+    this.meta = rest;
     this.project = makeGeoProjection(meta.datum ?? datumFor(meta.track));
     this.columns = COLUMNS.map(() => []);
     this.times = [];
@@ -316,9 +324,11 @@ export class Recorder {
     // `time_s - sim.lap_time_s` by the same amount. A reference lap loaded
     // from the archive was then a frame fast everywhere.
     this.frameDt = 0;
-    /** `{ lapS, label, source }` for whatever the live delta was chasing, set
-     *  by `setReference()` when the game loads or adopts one. */
+    /** `{ lapS, label, source }` for whatever the live delta was chasing:
+     *  what the run opened with, then whatever `setReference()` replaced it
+     *  with when a quicker lap took over. */
     this.reference = null;
+    this.setReference(reference);
     this.acc = 0;       // fixed-rate sampler accumulator
     this.samples = 0;
     this.truncated = false;

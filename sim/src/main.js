@@ -542,6 +542,11 @@ class Game {
       setup: snapshotSetup(),
       etc: this.etc?.points ? JSON.parse(JSON.stringify(this.etc.points)) : null,
       simVersion: SIM_VERSION,
+      // Whatever the delta is already chasing -- a lap Helios loaded, or the
+      // best of the session so far. The lap hook only reports a reference
+      // that CHANGES, so without this a run that never beat its reference
+      // said it had none.
+      reference: this.deltaTimer?.describeReference() ?? null,
     });
   }
 

@@ -119,6 +119,32 @@ section("The finishing step of an autocross reaches the file");
   ok("without `last`, a step short of the interval writes nothing", rec2.samples === 2, `${rec2.samples}`);
 }
 
+section("A run that chased a reference says so, even when it never beat it");
+{
+  // THE BUG THIS EXISTS FOR: `setReference` was only called when the
+  // reference CHANGED, and a fresh recorder starts with none. A run that
+  // loaded a reference before the drive and never beat it -- most runs --
+  // logged a full `sim.delta_s` trace and `reference: null` beside it. 17
+  // archived runs are in that state.
+  const ref = { lapS: 39.565, label: "Nick", source: "loaded" };
+  const rec = openRecorder({ reference: ref });
+  const ctx = makeContext();
+  rec.markLine();
+  for (let i = 0; i < 400; i++) { ctx.lapTime = i * 0.01; rec.tick(0.01, ctx); }
+  rec.recordLap({ lap: 1, raw: 4, cones: 0, off: 0, total: 4, valid: true }, [4]);
+  rec.finish();
+  const m = rec.toManifest();
+  ok("the manifest carries the reference it opened with", JSON.stringify(m.reference) === JSON.stringify(ref),
+     JSON.stringify(m.reference));
+
+  // A quicker lap in the session replacing it is still the last word.
+  rec.setReference({ lapS: 3.9, label: "your best", source: "session" });
+  ok("a reference adopted mid-run replaces it", rec.toManifest().reference.source === "session");
+
+  // No reference at all is still an honest null.
+  ok("no reference is null, not an empty object", openRecorder().toManifest().reference === null);
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
   console.error(`${failures} FAILED`);
