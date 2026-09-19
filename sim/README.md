@@ -236,6 +236,23 @@ is where the car's corners actually are.
   road and the travel between wheel and arch is visible from outside.
 - **A struck cone tumbles away from the car** over a third of a second,
   about the base edge on the far side, and you feel it through the camera.
+- **Tyres leave rubber.** A wheel past about 92% of its grip, locked or
+  spinning lays a mark on the surface that fades with distance; a replay
+  lays them from the log; a new course starts clean.
+- **The replay ghost is translucent** and always drawn, so a lap that runs
+  within a car's length of yours still shows through.
+
+## Sound
+
+The engine is a physical exhaust model (see `NOTICE`), not a sample. What
+sits around it: the cockpit and nose cameras hear the tub's close
+reflections, the wind on the helmet and the road through the seat; the
+chase and walkaround cameras hear a wider space with little wind. The rev
+limiter is an ignition cut that stutters at 24 Hz, a shift is the dogs
+engaging with the blip's chuff on the way down, the overrun pops, and a
+locked wheel and gravel each have a voice. Green, the sectors, a lap and the
+flag beep. Levels, including a channel for the timing cues, are on the Audio
+tab.
 
 There are no hands on the wheel. At 179 deg of lock a glove modelled at 3 o'clock
 swings round to 10 o'clock, high enough to break the horizon in the middle of
