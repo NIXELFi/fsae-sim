@@ -321,6 +321,7 @@ pub struct ParamSet {
     pub idle_throttle_frac: Option<f64>,
     pub launch_rpm: Option<f64>,
     pub shift_time_s: Option<f64>,
+    pub shift_reintro_s: Option<f64>,
     pub engine_inertia_kg_m2: Option<f64>,
     pub gearbox_inertia_kg_m2: Option<f64>,
 }
@@ -933,6 +934,7 @@ impl Loop {
             if let Some(x) = p.idle_throttle_frac { e.idle_throttle_frac = x; }
             if let Some(x) = p.launch_rpm { e.launch_rpm = x; }
             if let Some(x) = p.shift_time_s { e.shift_time_s = x; }
+            if let Some(x) = p.shift_reintro_s { e.shift_reintro_s = x; }
             if let Some(x) = p.engine_inertia_kg_m2 { e.crank_inertia_kg_m2 = x; }
             if let Some(x) = p.gearbox_inertia_kg_m2 { e.gearbox_inertia_kg_m2 = x; }
             if let Some(x) = p.wheel_inertia_rear_kg_m2 { e.wheel_side_inertia_kg_m2 = 2.0 * x; }

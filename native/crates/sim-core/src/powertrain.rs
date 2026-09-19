@@ -280,6 +280,8 @@ pub struct GearedEngine {
     /// Throttle plate position the ETC holds at idle, 0..1.
     pub idle_throttle_frac: f64,
     pub shift_time_s: f64,
+    /// After the cut, how long the torque takes to come back (smoothstep).
+    pub shift_reintro_s: f64,
     pub crank_inertia_kg_m2: f64,
     pub gearbox_inertia_kg_m2: f64,
     pub clutch_capacity_nm: f64,
@@ -291,6 +293,8 @@ pub struct GearedEngine {
     gear: usize,
     engine_rpm: f64,
     shift_timer: f64,
+    /// >0 while the torque is being fed back in after the cut.
+    reintro_timer: f64,
     pending_gear: Option<usize>,
     limiter_cut: bool,
     slipping: bool,
@@ -314,7 +318,11 @@ impl GearedEngine {
             // engine makes far less below 4000 rpm than the CFD sweep said,
             // so the plate sits further open to hold 2000 rpm.
             idle_throttle_frac: 0.22,
-            shift_time_s: 0.1,
+            // The ignition cut: 80-100 ms off the real paddle shift (see
+            // params.js), and the torque comes back over 50 ms on a
+            // smoothstep rather than in a step.
+            shift_time_s: 0.09,
+            shift_reintro_s: 0.05,
             // Split at the primary, because that is where the clutch sits on a
             // CBR600RR: the crank turns primaryxgearxfinal, everything
             // downstream only gearxfinal.
@@ -325,6 +333,7 @@ impl GearedEngine {
             gear: 0,
             engine_rpm: 1600.0,
             shift_timer: 0.0,
+            reintro_timer: 0.0,
             pending_gear: None,
             limiter_cut: false,
             slipping: true,
@@ -477,6 +486,16 @@ impl GearedEngine {
         self.plate_position(rpm, demand) * (self.wot_torque(rpm) + self.motoring_torque(rpm))
     }
 
+    /// How much of the engine's torque is back after a shift, 0..1. See
+    /// `reintroFraction` in powertrain.js -- the two must agree exactly.
+    fn reintro_fraction(&self) -> f64 {
+        if self.shift_reintro_s <= 0.0 || self.reintro_timer <= 0.0 {
+            return 1.0;
+        }
+        let x = (1.0 - self.reintro_timer / self.shift_reintro_s).clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    }
+
     fn engine_torque(&mut self, rpm: f64, throttle: f64) -> f64 {
         if self.shift_timer > 0.0 {
             return -self.motoring_torque(rpm) * 0.5; // ignition cut
@@ -497,6 +516,12 @@ impl GearedEngine {
             t -= soft * (t + drag);
         }
         self.limiter_cut = soft >= 0.5;
+        // Coming back from a shift: blend from the cut's value to the full one.
+        let f = self.reintro_fraction();
+        if f < 1.0 {
+            let cut = -self.motoring_torque(rpm) * 0.5;
+            t = cut + (t - cut) * f;
+        }
         t
     }
 
@@ -640,7 +665,11 @@ impl PowertrainModel for GearedEngine {
                     }
                 }
                 self.shift_timer = 0.0;
+                self.reintro_timer = self.shift_reintro_s;
             }
+        }
+        if self.reintro_timer > 0.0 {
+            self.reintro_timer = (self.reintro_timer - dt).max(0.0);
         }
 
         let n = self.ratio();
@@ -712,6 +741,7 @@ impl PowertrainModel for GearedEngine {
         self.gear = 0;
         self.engine_rpm = self.idle_rpm;
         self.shift_timer = 0.0;
+        self.reintro_timer = 0.0;
         self.pending_gear = None;
         self.limiter_cut = false;
         self.slipping = true;
@@ -734,6 +764,7 @@ impl PowertrainModel for GearedEngine {
         self.gear = gear.min(self.gear_ratios.len().saturating_sub(1));
         self.pending_gear = None;
         self.shift_timer = 0.0;
+        self.reintro_timer = 0.0;
     }
 
     fn shift_up(&mut self) -> bool {

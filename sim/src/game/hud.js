@@ -47,7 +47,9 @@ const SHOWS = {
   clean: {
     dash: true, shiftLights: false, tach: false, timing: false,
     delta: true, penalties: false,
-    minimap: false, gg: false, balance: true, setup: "active", message: true,
+    // The minimap earns its corner now that it shows the cones and sectors:
+    // on an autocross it is the one instrument that says what comes next.
+    minimap: true, gg: false, balance: true, setup: "active", message: true,
   },
   minimal: {
     dash: true, shiftLights: false, tach: false, timing: false,
@@ -162,9 +164,16 @@ export class Hud {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, w, h);
     ctx.save();
-    // Work in CSS pixels regardless of DPR.
-    ctx.scale(this.dpr, this.dpr);
-    const W = w / this.dpr, H = h / this.dpr;
+    // Work in CSS pixels regardless of DPR -- and scale the whole overlay
+    // with the window's height above 900 px. The dash already sized itself
+    // off the width; the setup panel, balance bar, delta and g-g were fixed
+    // CSS pixels with 8-10 px labels, unreadable at arm's length on a 4K or
+    // a 1440p ultrawide. One factor here scales them all the same way.
+    const cssH = h / this.dpr;
+    const ui = Math.min(1.9, Math.max(1, cssH / 900));
+    this.ui = ui;
+    ctx.scale(this.dpr * ui, this.dpr * ui);
+    const W = w / (this.dpr * ui), H = h / (this.dpr * ui);
 
     const show = SHOWS[this.density] ?? SHOWS.clean;
     // The setup adjuster appears when it is being used and fades a few seconds
@@ -864,6 +873,33 @@ export class Hud {
     ctx.lineWidth = 3;
     ctx.stroke();
 
+    // The cones, because on an autocross they ARE the course: the centreline
+    // says where the road goes, the cones say where the gates are. Struck
+    // ones dim. Drawn straight; a few hundred rectangles is nothing.
+    if (t.cones?.length) {
+      for (const c of t.cones) {
+        const [px, py] = toPx(c.x, c.y);
+        ctx.fillStyle = c.down ? "rgba(255,140,60,0.35)" : "rgba(255,140,60,0.9)";
+        ctx.fillRect(px - 1, py - 1, 2, 2);
+      }
+    }
+    // Sector boundaries: a short tick across the line at each one.
+    if (t.sectors?.length && t.s?.length) {
+      ctx.strokeStyle = "rgba(255,255,255,0.55)";
+      ctx.lineWidth = 1.5;
+      for (const sAt of t.sectors) {
+        const i = nearestIndex(t.s, sAt);
+        const h = t.heading?.[i] ?? 0;
+        const [px, py] = toPx(t.center[i][0], t.center[i][1]);
+        // Perpendicular to the heading, in screen space (y is flipped).
+        const nx = -Math.sin(h), ny = Math.cos(h);
+        ctx.beginPath();
+        ctx.moveTo(px - nx * 5, py + ny * 5);
+        ctx.lineTo(px + nx * 5, py - ny * 5);
+        ctx.stroke();
+      }
+    }
+
     // start/finish tick
     const [sx, sy] = toPx(t.center[0][0], t.center[0][1]);
     ctx.fillStyle = GOLD;
@@ -975,6 +1011,16 @@ function panel(ctx, x, y, w, h, r) {
   ctx.strokeStyle = "rgba(255,255,255,0.09)";
   ctx.lineWidth = 1;
   ctx.stroke();
+}
+
+/** Index of the sample whose distance is closest to `sAt`, by bisection. */
+function nearestIndex(sArr, sAt) {
+  let lo = 0, hi = sArr.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (sArr[mid] < sAt) lo = mid; else hi = mid;
+  }
+  return Math.abs(sArr[lo] - sAt) <= Math.abs(sArr[hi] - sAt) ? lo : hi;
 }
 
 function roundRect(ctx, x, y, w, h, r) {

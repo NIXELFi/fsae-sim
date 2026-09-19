@@ -56,6 +56,8 @@ export class Powertrain {
     this.engineRpm = v.idleRpm;
     this.shiftTimer = 0;        // >0 while the driveline is open for a shift
     this.pendingGear = null;
+    /** >0 while the torque is being fed back in after the cut; see `engineTorque`. */
+    this.reintroTimer = 0;
     this.limiterCut = false;
     this.slipping = true;
     this.clutchSlipRpm = 0;
@@ -200,6 +202,22 @@ export class Powertrain {
       : this.v.revLimitRpm;
   }
 
+  /**
+   * How much of the engine's torque is back after a shift, 0..1.
+   *
+   * A smoothstep over `shiftReintroS` from the moment the gear engages. The
+   * cut is a hard zero (that is what an ignition cut is); the return is not,
+   * because a quickshifter feeds the spark back over a few tens of
+   * milliseconds, and a step from the cut straight to full torque was a kick
+   * through the driveline -- and through the pitch camera -- on every shift.
+   */
+  reintroFraction() {
+    const total = this.v.shiftReintroS ?? 0;
+    if (total <= 0 || this.reintroTimer <= 0) return 1;
+    const x = clamp(1 - this.reintroTimer / total, 0, 1);
+    return x * x * (3 - 2 * x);
+  }
+
   engineTorque(rpm, throttle) {
     if (this.shiftTimer > 0) return -this.motoringTorque(rpm) * 0.5; // ignition cut
 
@@ -222,6 +240,12 @@ export class Powertrain {
     if (soft > 0) t -= soft * (t + drag);
     // For the audio: the ignition is being cut once we are deep in the band.
     this.limiterCut = soft >= 0.5;
+    // Coming back from a shift: blend from the cut's value to the full one.
+    const f = this.reintroFraction();
+    if (f < 1) {
+      const cut = -this.motoringTorque(rpm) * 0.5;
+      t = cut + (t - cut) * f;
+    }
     return t;
   }
 
@@ -355,6 +379,7 @@ export class Powertrain {
         this.gear = this.pendingGear;
         this.pendingGear = null;
         this.shiftTimer = 0;
+        this.reintroTimer = this.v.shiftReintroS ?? 0;
         // Auto-blip on a downshift (see powertrain.rs): rev-match before the
         // clutch comes back in, so it never lands by dragging the rear axle
         // down to crank speed.
@@ -364,6 +389,8 @@ export class Powertrain {
         }
       }
     }
+
+    if (this.reintroTimer > 0) this.reintroTimer = Math.max(0, this.reintroTimer - dt);
 
     const v = this.v;
     const n = this.ratio();

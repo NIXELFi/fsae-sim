@@ -141,7 +141,15 @@ export const SDM26 = {
   // below 4000 rpm than the CFD sweep predicted, so the idle plate has to sit
   // further open to hold 2000 rpm. 0.14 was the CFD figure and idled at 1627.
   idleThrottleFrac: 0.22,
-  shiftTimeS: 0.1,
+  // The ignition cut. 80-100 ms is what the driver reports off the real
+  // car's paddle shift; 90 sits in the middle of that band.
+  shiftTimeS: 0.09,
+  // After the cut the torque comes back over this long, on a smoothstep,
+  // rather than in one step: the gear is in and the ignition returns, but a
+  // quickshifter feeds the spark back rather than slamming it. A step here
+  // was a kick through the driveline on every shift, and a spike in the
+  // pitch camera to go with it.
+  shiftReintroS: 0.05,
 
   // ---- roll balance (Helios SDM26_ROLL, from the team's ARB calculator) ----
   roll: {

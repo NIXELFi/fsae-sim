@@ -145,6 +145,7 @@ export class NativeCar {
       gearRatios: p.gearRatios, primaryReduction: p.primaryReduction, finalDrive: p.finalDrive,
       drivetrainEff: p.drivetrainEff, revLimitRpm: p.revLimitRpm, idleRpm: p.idleRpm,
       idleThrottleFrac: p.idleThrottleFrac, launchRpm: p.launchRpm, shiftTimeS: p.shiftTimeS,
+      shiftReintroS: p.shiftReintroS,
       engineInertiaKgM2: p.engineInertiaKgM2, gearboxInertiaKgM2: p.gearboxInertiaKgM2,
     });
     this.refresh();
