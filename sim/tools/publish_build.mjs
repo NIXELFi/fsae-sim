@@ -185,7 +185,12 @@ async function upload(objPath, body, contentType) {
  * then silently delete the macOS and Linux entries. The person publishing sees
  * a successful Windows release; a Mac user sees the simulator cease to exist.
  *
- * A 404 is the one honest empty: the feed has not been written yet.
+ * "The feed has not been written yet" is the one honest empty, and Supabase
+ * does NOT say that with a 404. A missing object in a public bucket comes back
+ * as HTTP 400 carrying `{"statusCode":"404","error":"not_found",...}` in the
+ * body -- so testing the HTTP status alone made the very first publish into a
+ * brand-new bucket look like a read failure, and refuse itself. The body is
+ * where the real answer is; the status is a wrapper.
  */
 async function readFeed() {
   let res;
@@ -194,8 +199,19 @@ async function readFeed() {
   } catch (err) {
     return { error: `could not reach storage: ${err?.message ?? err}` };
   }
-  if (res.status === 404) return { feed: { builds: [] }, fresh: true };
-  if (!res.ok) return { error: `feed.json came back ${res.status} ${res.statusText}` };
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    let inner = null;
+    try { inner = JSON.parse(body); } catch { /* not JSON; fall through */ }
+    const missing = res.status === 404 ||
+      String(inner?.statusCode) === "404" ||
+      inner?.error === "not_found" ||
+      inner?.code === "NoSuchKey";
+    if (missing) return { feed: { builds: [] }, fresh: true };
+    return {
+      error: `feed.json came back ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ""}`,
+    };
+  }
   let json;
   try {
     json = await res.json();
