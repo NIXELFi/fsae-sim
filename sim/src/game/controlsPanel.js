@@ -433,6 +433,34 @@ export class ControlsPanel {
       ),
     );
 
+    // Which device is which, when there is more than one.
+    //
+    // The rig reads a wheel base plus anything else plugged in, and gives each
+    // device its own block of eight axes -- the base is 0-7, the next thing is
+    // 8-15, and so on. Fanatec, Simucube, Heusinkveld and most load-cell sets
+    // put the pedals on their OWN USB, so on those rigs the pedals are not on
+    // the base's axes at all. A preset that guessed base axes then reads a
+    // pedal that never moves, which looks exactly like "the pedals do not
+    // work" and gives the driver nothing to go on.
+    const devices = this.input.nativeDeviceNames ?? [];
+    if (devices.length > 1) {
+      const lines = devices.map((n, i) => `  axes ${i * 8}-${i * 8 + 7}   ${n}`);
+      box.append(el("small", "ctl-hint",
+        `The rig is reading ${devices.length} devices, eight axes each:`));
+      box.append(el("pre", "ctl-axes", lines.join("\n")));
+
+      const onBase = ["throttle", "brake", "clutch"].filter((w) => {
+        const cal = profile.pedals?.[w];
+        return cal && cal.isAxis && typeof cal.source === "number" && cal.source < 8;
+      });
+      if (onBase.length) {
+        box.append(el("small", "ctl-hint ctl-warn",
+          `${onBase.join(", ")} ${onBase.length === 1 ? "is" : "are"} set to an axis on ` +
+          `the base (0-7). If your pedals are the separate device above, that is why ` +
+          `they do nothing -- click Re-detect and sweep each one.`));
+      }
+    }
+
     const monitor = el("pre", "ctl-axes", "(no device)");
     this.monitorEl = monitor;
     box.append(monitor);

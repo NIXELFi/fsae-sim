@@ -77,8 +77,21 @@ export const WHEEL_PRESETS = [
   { match: /t150|tmx/, label: "Thrustmaster T150 / TMX", ratedNm: 2.5, rotationDeg: 1080, steerAxis: 0, throttle: inv(5), brake: inv(1), clutch: null, verify: true, note: "Control Panel: 1080 deg, spring and damper 0%." },
   { match: /thrustmaster/, label: "Thrustmaster (other)", ratedNm: 3.9, rotationDeg: 1080, steerAxis: 0, throttle: inv(5), brake: inv(1), clutch: inv(6), verify: true, note: "Model not recognised; treated as a T300-class belt wheel." },
 
-  // ---- Fanatec. Direct drive; pedals usually on their own USB (axis 8+) unless
-  //      plugged into the base.
+  // ---- Fanatec. Direct drive.
+  //
+  //      The pedal axes below assume the pedals are plugged INTO THE BASE over
+  //      RJ12, which is the usual Fanatec arrangement and puts them on the
+  //      base's own axes. Connected by their own USB instead -- which newer
+  //      CSL pedals can do -- they are a second device and land on axes 8 and
+  //      up, and these numbers then point at axes that never move, which looks
+  //      exactly like "the pedals do not work".
+  //
+  //      Deliberately still guessed rather than left unset when a second
+  //      device is present: a rig can easily have a base WITH pedals attached
+  //      plus a button box, and unassigning working pedals because something
+  //      else is plugged in would be a worse failure than this one. The
+  //      settings panel says which device is on which axes and offers to
+  //      detect them, which is the part that actually fixes it.
   { match: /dd2|podium.*2/, label: "Fanatec Podium DD2", ratedNm: 25, rotationDeg: 1080, steerAxis: 0, throttle: inv(1), brake: inv(5), clutch: inv(2), verify: true, note: "PC mode. Set FF to 100, SPR and DPR to OFF in the tuning menu." },
   { match: /dd1|podium/, label: "Fanatec Podium DD1", ratedNm: 20, rotationDeg: 1080, steerAxis: 0, throttle: inv(1), brake: inv(5), clutch: inv(2), verify: true, note: "PC mode. Set FF to 100, SPR and DPR to OFF in the tuning menu." },
   { match: /csl dd|gt dd|clubsport dd/, label: "Fanatec CSL DD / GT DD", ratedNm: 8, rotationDeg: 1080, steerAxis: 0, throttle: inv(1), brake: inv(5), clutch: inv(2), verify: true, note: "8 N.m with the boost kit, 5 without: set the rated torque to match. SPR and DPR OFF." },

@@ -618,10 +618,7 @@ class Game {
     // the time the frame lands on. Tell the recorder how far ahead the rest of
     // the frame is about to get.
     if (this.recorder) this.recorder.frameDt = dt;
-    if (this.car?.native) {
-      this.input.nativeDevice = this.car.device;
-      if (this.rigState.wheelName) this.input.nativeName = this.rigState.wheelName;
-    }
+    this.syncNativeInput();
     const inp = this.input.poll();
 
     // Hand the control profile's steering dynamics to the vehicle model, and
@@ -1572,9 +1569,39 @@ class Game {
     this.dom.finishMenu.hidden = true;
   }
 
+  /**
+   * Hand the rig's latest reading of the wheel to the input layer.
+   *
+   * This used to live inside `update`, which only runs while somebody is
+   * DRIVING -- and the settings panel is on the home screen, where it does
+   * not. On a desktop rig the wheel is acquired natively, so the Gamepad API
+   * cannot see it at all and `Input.pad()` has nothing but this to go on.
+   * The result was a bindings panel that could not see the wheel: the axis
+   * monitor read "(no device)", sweeping a pedal detected nothing, and
+   * clicking a device cell waited for a button press that could never
+   * arrive. Every control on a wheel was unbindable, which is the one place
+   * rebinding actually matters -- a wheel's mapping is never standard.
+   *
+   * Worse when the driver HAD driven and come back: `nativeDevice` then held
+   * a frozen snapshot from the last frame of the run, so the monitor showed
+   * plausible unchanging numbers rather than an honest "nothing here".
+   */
+  syncNativeInput() {
+    if (!this.car?.native) return;
+    this.input.nativeDevice = this.car.device;
+    if (this.rigState.wheelName) this.input.nativeName = this.rigState.wheelName;
+    // Everything the rig is reading, base first. What the settings panel uses
+    // to tell a driver their pedals are on a device of their own.
+    this.input.nativeDeviceNames = this.rigState.deviceNames ?? [];
+  }
+
   /** Keep the rig informed while nothing is being driven. */
   holdNative() {
-    if (this.car?.native) this.car.hold();
+    if (!this.car?.native) return;
+    this.car.hold();
+    // The panel is live while the game is not, so the device reading has to
+    // keep coming even though nothing is being driven.
+    this.syncNativeInput();
   }
 
   /**

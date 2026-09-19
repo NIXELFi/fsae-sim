@@ -373,6 +373,36 @@ try {
   })()`, 7);
   console.log("bindings:", bindings);
 
+  // The wheel has to be visible to the SETTINGS PANEL, not only to the game.
+  //
+  // `input.nativeDevice` used to be handed over inside `update()`, which only
+  // runs while somebody is driving -- so on the home screen, where the panel
+  // lives, `Input.pad()` had nothing. On a desktop rig the base is acquired
+  // natively and the Gamepad API cannot see it, so that meant no axis
+  // readout, no pedal detection and no way to bind anything on a wheel. Only
+  // meaningful on a machine with a wheel attached; a no-op everywhere else.
+  const wheelSeen = await evaluate(ws, `(async () => {
+    const g = window.__sim;
+    const st = g.rigState || {};
+    if (!st.wheelPresent) return JSON.stringify({ skipped: "no wheel attached" });
+    // Cleared first, deliberately. Something earlier in this file drives a
+    // frame of update() to check a slider reached the car, and that sets the
+    // device -- so simply reading it back would pass whether or not the home
+    // screen keeps it fresh, which is the whole question. Clear it and let
+    // the frame loop's idle branch refill it. (No backticks in here: this is
+    // inside a template literal, and one would end it.)
+    g.input.nativeDevice = null;
+    await new Promise(r => setTimeout(r, 400));
+    const nd = g.input.nativeDevice;
+    return JSON.stringify({
+      onTheHomeScreen: !document.getElementById('menu').hidden,
+      refilledWhileIdle: !!nd?.present,
+      axes: nd?.axes?.length ?? 0,
+      devices: (g.input.nativeDeviceNames || []).length,
+    });
+  })()`, 8);
+  console.log("wheel visible to the panel:", wheelSeen);
+
   // CAD bodywork, if a model is embedded in this build. The desktop asset
   // server behaves differently from the dev server for a MISSING file -- it
   // answers with the index page rather than a 404 -- so this path is worth
@@ -412,6 +442,8 @@ try {
          v.heldByBarrier && v.glError === 0 &&
          a.usingModel && a.tracksFiringFrequency && a.stoppedPeakDb < -60 &&
          c.mounted && c.editReachedTheCar &&
+         // Skipped without a wheel; when there is one it must reach the panel.
+         (JSON.parse(wheelSeen).skipped || JSON.parse(wheelSeen).refilledWhileIdle) &&
          // Bound it, the panel shows it, and the game reads it -- then put back.
          b.found && b.listening && b.after === 'Z' && b.readsIt && b.restored ? 0 : 1;
   ws.close();

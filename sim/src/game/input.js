@@ -131,6 +131,8 @@ export class Input {
      */
     this.nativeDevice = null;
     this.nativeName = "wheel (native)";
+    /** Every device the rig is reading, base first. Set by the game. */
+    this.nativeDeviceNames = [];
 
     // Typing a throttle-map value into a number field must not also stand on
     // the throttle, so keys aimed at a form control never reach the car.
