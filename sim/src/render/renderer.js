@@ -1073,6 +1073,7 @@ export class Renderer {
       tire: this.makeMesh(carMeshes.tire),
       rim: this.makeMesh(carMeshes.rim),
       steeringWheel: this.makeMesh(carMeshes.steeringWheel),
+      gloves: carMeshes.gloves ? this.makeMesh(carMeshes.gloves) : null,
       dashCase: this.makeMesh(carMeshes.dashCase),
       // The driver: helmet, shoulders, belts and upper arms. Always the
       // procedural one, even under a CAD body -- a CAD export has no driver.
@@ -1101,6 +1102,7 @@ export class Renderer {
     // without inverting the chassis every frame. One for the ghost too.
     this.wheelLocal = mat4();
     this._ghostWheelLocal = mat4();
+    this._ghostGloveModel = mat4();
     // Arm model matrices: [upper L, fore L, upper R, fore R].
     this._armMats = [mat4(), mat4(), mat4(), mat4()];
     this._ghostArmMats = [mat4(), mat4(), mat4(), mat4()];
@@ -1178,6 +1180,7 @@ export class Renderer {
         tire: this.makeMesh(car.tire),
         rim: this.makeMesh(car.rim),
         steeringWheel: this.makeMesh(car.steeringWheel),
+        gloves: meshes.gloves ? this.makeMesh(meshes.gloves) : null,
         dashCase: this.makeMesh(meshes.dashCase),
         driver: meshes.driver ? this.makeMesh(meshes.driver) : null,
         helmet: meshes.helmet ? this.makeMesh(meshes.helmet) : null,
@@ -1192,6 +1195,7 @@ export class Renderer {
         tire: this.makeMesh(meshes.tire),
         rim: this.makeMesh(meshes.rim),
         steeringWheel: this.makeMesh(meshes.steeringWheel),
+        gloves: meshes.gloves ? this.makeMesh(meshes.gloves) : null,
         dashCase: this.makeMesh(meshes.dashCase),
         driver: meshes.driver ? this.makeMesh(meshes.driver) : null,
         helmet: meshes.helmet ? this.makeMesh(meshes.helmet) : null,
@@ -1306,6 +1310,7 @@ export class Renderer {
       }
       this.car.body = this.makeMesh(meshes.body);
       this.car.steeringWheel = this.makeMesh(meshes.steeringWheel);
+      this.car.gloves = meshes.gloves ? this.makeMesh(meshes.gloves) : null;
       this.car.driver = meshes.driver ? this.makeMesh(meshes.driver) : null;
       this.car.helmet = meshes.helmet ? this.makeMesh(meshes.helmet) : null;
       this.car.upperArm = meshes.upperArm ? this.makeMesh(meshes.upperArm) : null;
@@ -2116,6 +2121,7 @@ export class Renderer {
     // corner of the lap.
     this.wheelFrame(this._ghostWheelLocal, g.steerRad || 0, s.wheels?.steerRatio);
     this.placeArms(this._ghostWheelLocal, this._ghostChassis, this._ghostArmMats);
+    multiply(this._ghostGloveModel, this._ghostChassis, this._ghostWheelLocal);
     const c = g.color;
     if (c) { this._ghostOv[0] = c[0]; this._ghostOv[1] = c[1]; this._ghostOv[2] = c[2]; }
     this._ghostOv[3] = g.tint ?? 0.8;
@@ -2161,6 +2167,7 @@ export class Renderer {
     part(this.car.body, this._ghostChassis, MAT.paint);
     if (this.car.driver) part(this.car.driver, this._ghostChassis, MAT.suit);
     if (this.car.helmet) part(this.car.helmet, this._ghostChassis, MAT.helmet);
+    if (this.car.gloves) part(this.car.gloves, this._ghostGloveModel, MAT.suit);
     if (this.arms && this.car.upperArm && this.car.forearm) {
       for (let k = 0; k < 4; k++) {
         part(k & 1 ? this.car.forearm : this.car.upperArm, this._ghostArmMats[k], MAT.suit);
@@ -2252,10 +2259,11 @@ export class Renderer {
         cast(this.car.steeringWheel, this.steerModel);
         cast(this.car.dashCase, this.dashModel);
         for (let k = 0; k < 4; k++) cast(this.car.rim, this._wheelMats[k]);
-        // The arms: their shadow on the tub and the wheel is what places
-        // the gloves on the rim rather than in front of it.
-        if (this.arms) {
+        // The arms and gloves, only while the driver is drawn: a shadow of
+        // hands that are not there is worse than no shadow.
+        if (this.arms && !s.hideDriver) {
           for (let k = 0; k < 4; k++) cast(k & 1 ? this.car.forearm : this.car.upperArm, this._armMats[k]);
+          cast(this.car.gloves, this.steerModel);
         }
       }
       // The driver's helmet stands proud of the tub, so its shadow is on the
@@ -2319,13 +2327,15 @@ export class Renderer {
       if (this.car.driver) part(this.car.driver, this.chassis, null, MAT.suit);
       if (this.car.helmet) part(this.car.helmet, this.chassis, null, MAT.helmet);
     }
-    // The arms, from EVERY camera: from the seat they are what you see of
-    // yourself, and they are posed by `placeArms` so the elbows stay in the
-    // tub whatever the wheel is doing.
-    if (this.arms && this.car.upperArm && this.car.forearm) {
+    // The arms and gloves go with the rest of the driver: not from the
+    // seat. The real driver's hands are on the real rim, and a second pair
+    // drawn over the dash read as wrong, not as presence. The arms are
+    // posed by `placeArms` so the elbows stay in the tub at any lock.
+    if (!s.hideDriver && this.arms && this.car.upperArm && this.car.forearm) {
       for (let k = 0; k < 4; k++) {
         part(k & 1 ? this.car.forearm : this.car.upperArm, this._armMats[k], null, MAT.suit);
       }
+      if (this.car.gloves) part(this.car.gloves, this.steerModel, null, MAT.suit);
     }
 
     const w = s.wheels;

@@ -912,16 +912,25 @@ function buildSteeringWheel() {
   b.box(0, 0.005, MZ, 0.027, 0.005, 0.003, EMBLEM);     // crossbar
   b.box(0, -0.008, MZ, 0.0055, 0.022, 0.003, EMBLEM);   // shaft
 
-  // ---- the driver's gloves ----
-  //
-  // Fists at 9 and 3, wrapped round the grips, in the wheel's frame so they
-  // stay on the grips at any lock. The forearms are NOT here: a forearm
-  // rigid with the wheel swings up into the sky at 90 degrees of lock and
-  // fills the cockpit view. They are separate meshes (`buildForearm`,
-  // `buildUpperArm`) that the renderer poses every frame from the glove
-  // positions `handsInWheelFrame` reports and the shoulders in
-  // `driverPose`, so the elbow stays down in the tub whatever the wheel is
-  // doing.
+  return b.mesh();
+}
+
+/**
+ * The driver's gloves: fists at 9 and 3 wrapped round the grips, in the
+ * WHEEL's frame so they stay on the grips at any lock. A mesh of their own,
+ * drawn with the wheel's transform, because the driver is for the outside
+ * cameras only -- from the seat the real driver's own hands are on the real
+ * rim, and a second pair on the screen was worse than none.
+ *
+ * The forearms are NOT here either: a forearm rigid with the wheel swings
+ * up into the sky at 90 degrees of lock. They are separate meshes
+ * (`buildForearm`, `buildUpperArm`) that the renderer poses every frame
+ * from the glove positions `handsInWheelFrame` reports and the shoulders
+ * in `driverPose`, so the elbow stays down in the tub whatever the wheel
+ * is doing.
+ */
+function buildGloves() {
+  const b = new Builder();
   const hands = handsInWheelFrame();
   for (const [gx, gy, gz] of hands) {
     b.smoothLoft([
@@ -1407,6 +1416,7 @@ export function buildCarMeshes(params) {
     tire: buildTire(),
     rim: buildRim(),
     steeringWheel: buildSteeringWheel(),
+    gloves: buildGloves(),
     dashCase: buildDashCase(),
     driver: buildDriver(params),
     helmet: buildHelmet(params),
