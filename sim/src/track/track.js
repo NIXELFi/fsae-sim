@@ -11,9 +11,19 @@ import { bodyBoxFor } from "../render/carmesh.js";
 
 const CELL = 12; // m, spatial hash cell size
 
+// Cell keys are a single number, not a "cx,cy" string. The renderer asks for
+// every cone within 280 m each frame, which is a 49 x 49 block of cells;
+// building 2401 template-literal keys for that was over half of all the
+// garbage the page produced (V8 sampled ~12 MB/s of it). Cell indices are
+// offset into the positive range and packed as cx * STRIDE + cy, which stays
+// an exact integer well inside 2^53 for any course we will ever load.
+const KEY_OFFSET = 32768;
+const KEY_STRIDE = 65536;
+function cellKey(cx, cy) { return (cx + KEY_OFFSET) * KEY_STRIDE + (cy + KEY_OFFSET); }
+
 class Grid {
   constructor(cell) { this.cell = cell; this.map = new Map(); }
-  key(x, y) { return `${Math.floor(x / this.cell)},${Math.floor(y / this.cell)}`; }
+  key(x, y) { return cellKey(Math.floor(x / this.cell), Math.floor(y / this.cell)); }
   add(x, y, item) {
     const k = this.key(x, y);
     let a = this.map.get(k);
@@ -26,7 +36,7 @@ class Grid {
     const out = [];
     for (let i = -1; i <= 1; i++) {
       for (let j = -1; j <= 1; j++) {
-        const a = this.map.get(`${cx + i},${cy + j}`);
+        const a = this.map.get(cellKey(cx + i, cy + j));
         if (a) out.push(...a);
       }
     }
@@ -59,6 +69,7 @@ export class Track {
     this.cones.forEach((c, i) => this.coneGrid.add(c.x, c.y, i));
 
     this.lastIndex = 0;
+    this._nearOut = null; // conesNear cache, see below
   }
 
   /** Pose of the starting grid slot: on the centreline, facing down the course. */
@@ -214,17 +225,31 @@ export class Track {
 
   resetCones() { for (const c of this.cones) { c.down = false; c.downAt = null; } }
 
-  /** Cones within `range` metres of (x, y) -- what the renderer needs to draw. */
+  /**
+   * Cones within `range` metres of (x, y) -- what the renderer needs to draw.
+   *
+   * Returns the SAME array on every call until the query moves to a different
+   * cell or asks for a different range: cones never move (a struck cone only
+   * flips its `down` flags on the object the array already holds), so the
+   * answer for a given cell block is fixed and the renderer, which calls this
+   * every frame, only needs a fresh list when the car crosses a 12 m cell
+   * boundary. Callers must treat the result as read-only.
+   */
   conesNear(x, y, range) {
+    const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+    if (this._nearOut && cx === this._nearCx && cy === this._nearCy && range === this._nearRange) {
+      return this._nearOut;
+    }
     const out = [];
     const cells = Math.ceil(range / CELL);
-    const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
     for (let i = -cells; i <= cells; i++) {
       for (let j = -cells; j <= cells; j++) {
-        const a = this.coneGrid.map.get(`${cx + i},${cy + j}`);
+        const a = this.coneGrid.map.get(cellKey(cx + i, cy + j));
         if (a) for (const idx of a) out.push(this.cones[idx]);
       }
     }
+    this._nearCx = cx; this._nearCy = cy; this._nearRange = range;
+    this._nearOut = out;
     return out;
   }
 }

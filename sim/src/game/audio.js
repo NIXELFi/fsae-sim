@@ -203,21 +203,6 @@ export class EngineAudio {
         this.modelGain.connect(d); d.connect(g); g.connect(p); p.connect(this.master);
         this.width.push({ d, g, p });
       }
-      // Width. The model is mono, and a mono engine in headphones sits in
-      // the middle of the skull. Two short, unequal delays panned either
-      // way (a Haas pair) spread it without moving its centre or colouring
-      // it much; the direct path stays dominant so nothing smears.
-      this.width = [];
-      for (const [delayS, pan] of [[0.0058, -0.6], [0.0091, 0.6]]) {
-        const d = ctx.createDelay(0.05);
-        d.delayTime.value = delayS;
-        const g = ctx.createGain();
-        g.gain.value = 0.32;
-        const p = ctx.createStereoPanner();
-        p.pan.value = pan;
-        this.modelGain.connect(d); d.connect(g); g.connect(p); p.connect(this.master);
-        this.width.push({ d, g, p });
-      }
       this.modelNode = node;
       this.usingModel = true;
 
@@ -320,16 +305,35 @@ export class EngineAudio {
     if (!this.ready || !this.enabled) return;
     const ctx = this.ctx;
     const now = ctx.currentTime;
-    const glide = Math.max(0.012, Math.min(0.05, dt * 2));
 
     // The dogs engaging. Voiced when the gear actually changes -- the end of
     // the 100 ms cut -- which is also the only moment both the JS model, the
     // rig and a replay agree on. A downshift gets the exhaust chuff of the
-    // blip on top.
+    // blip on top. Above the rate cap below: a gear change is an edge and
+    // must never fall in a skipped frame.
     if (s.gear != null) {
       if (this._lastGear != null && s.gear !== this._lastGear) this.shiftClunk(s.gear < this._lastGear);
       this._lastGear = s.gear;
     }
+
+    // Rate cap. Called every rendered frame, this pushed one message to the
+    // worklet and 18 `setTargetAtTime`s into the graph -- ~2600 automation
+    // events a second at 144 Hz -- for glides of 12-50 ms that cannot follow
+    // faster than ~60 Hz anyway; and every message made the worklet re-solve
+    // its heat release on the audio thread. So the continuous part runs at
+    // most every 12 ms: every frame on a 60 Hz display, every other at 144.
+    // The two EDGES the worklet must not learn about late -- the limiter cut
+    // and the shift cut -- force a push the frame they change, either way.
+    const shifting = !!s.shifting;
+    const cut = !!s.limiter && !shifting;
+    const edge = cut !== this._lastCut || shifting !== this._lastShifting;
+    this._lastCut = cut;
+    this._lastShifting = shifting;
+    const since = now - (this._lastPushAt ?? -1);
+    if (!edge && since < 0.012) return;
+    // The glide spans the real interval between pushes, not the frame.
+    const glide = Math.max(0.012, Math.min(0.05, Math.max(dt, since) * 2));
+    this._lastPushAt = now;
 
     const firing = Math.max(20, (s.rpm / 30));
     const rev = Math.min(1, s.rpm / 9000);
@@ -346,11 +350,11 @@ export class EngineAudio {
         // The plate position, not the pedal: at idle the pedal is at rest but
         // the plate is held at 14%, and that is what the engine is breathing
         // through.
-        throttle: s.shifting ? 0 : (s.throttlePlate ?? s.throttle),
-        torqueNm: s.shifting ? 0 : (s.torqueNm ?? 0),
-        cut: !!s.limiter && !s.shifting,
+        throttle: shifting ? 0 : (s.throttlePlate ?? s.throttle),
+        torqueNm: shifting ? 0 : (s.torqueNm ?? 0),
+        cut,
         // Closed throttle at speed: the overrun, where a CBR pops.
-        overrun: !s.shifting && (s.throttlePlate ?? s.throttle) < 0.08 && s.rpm > 6000 && s.speed > 6,
+        overrun: !shifting && (s.throttlePlate ?? s.throttle) < 0.08 && s.rpm > 6000 && s.speed > 6,
       });
     } else {
       for (const { osc, mult } of this.oscs) {
@@ -397,21 +401,6 @@ export class EngineAudio {
     const flutter = 0.7 + 0.3 * Math.sin(now * 41) * Math.sin(now * 7.3);
     this.surface.g.gain.setTargetAtTime(0.16 * off * flutter * this.mix.tyres, now, glide);
     this.surface.f.frequency.setTargetAtTime(200 + s.speed * 9, now, glide);
-  }
-
-  /**
-   * Which camera the sound is heard from.
-   *
-   * The cockpit and nose are on the car: the boxy close reflections of the
-   * roll hoop and the sidepod, the wind on the helmet, the road through the
-   * seat. Chase and walkaround are outside it: a wider, more diffuse space,
-   * little wind, no seat. The engine model already carries both impulse
-   * responses; nothing ever switched them.
-   */
-  setCamera(name) {
-    const inside = name === "Cockpit" || name === "Nose";
-    this.camera = { inside, wind: name === "Nose" ? 1.25 : inside ? 1.0 : name === "Chase" ? 0.5 : 0.25 };
-    this.modelNode?.port.postMessage({ type: "cabin", cabin: inside ? "cockpit" : "trackside" });
   }
 
   /**

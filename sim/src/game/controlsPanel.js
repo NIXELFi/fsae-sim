@@ -61,7 +61,61 @@ export class ControlsPanel {
      * the redraw that the binding itself caused.
      */
     this.pendingMsg = "";
+    /**
+     * Whether the panel is actually on screen.
+     *
+     * The live readouts below (the torque meter, the axis monitor) run on
+     * requestAnimationFrame, and `#controls` lives inside the home menu, so
+     * `root.isConnected` is true for the life of the page: both loops used
+     * to run while DRIVING, writing style and text into a hidden tab every
+     * frame and forcing a style-and-layout pass each time the renderer next
+     * read `clientWidth` (~1100 forced layouts a second in a trace). An
+     * IntersectionObserver reports the panel hidden (display:none through
+     * the menu or the tab) or shown without touching layout ourselves; the
+     * loops park while it is hidden and restart when it comes back.
+     */
+    this._visible = typeof IntersectionObserver === "undefined";
+    this._loops = [];
+    if (!this._visible) {
+      this._io = new IntersectionObserver((entries) => {
+        this._visible = entries[entries.length - 1].isIntersecting;
+        if (this._visible) for (const loop of this._loops.slice()) this._kick(loop);
+      });
+      this._io.observe(root);
+    }
     this.render();
+  }
+
+  /**
+   * Run `fn` once per animation frame while the panel is visible and `gen`
+   * is still the current render. Parks, rather than exits, when the panel
+   * is hidden; the observer above wakes it.
+   */
+  startLoop(gen, fn) {
+    const loop = { gen, fn, scheduled: false };
+    this._loops.push(loop);
+    this._kick(loop);
+  }
+
+  _kick(loop) {
+    if (loop.scheduled) return;
+    if (!this.root.isConnected || loop.gen !== this._gen) {
+      const i = this._loops.indexOf(loop);
+      if (i >= 0) this._loops.splice(i, 1);
+      return;
+    }
+    if (!this._visible) return;
+    loop.scheduled = true;
+    requestAnimationFrame(() => {
+      loop.scheduled = false;
+      if (!this.root.isConnected || loop.gen !== this._gen) {
+        const i = this._loops.indexOf(loop);
+        if (i >= 0) this._loops.splice(i, 1);
+        return;
+      }
+      loop.fn();
+      this._kick(loop);
+    });
   }
 
   settings() {
@@ -336,8 +390,7 @@ export class ControlsPanel {
     const read = el("pre", "ctl-axes", "");
     box.append(meter, read);
 
-    const tick = () => {
-      if (!this.root.isConnected || gen !== this._gen) return;
+    this.startLoop(gen, () => {
       const last = this.game?.ffb?.last;
       if (last) {
         const c = last.command;
@@ -350,9 +403,7 @@ export class ControlsPanel {
           `   stop ${last.softLock.toFixed(2)}   texture ${last.textureNm.toFixed(2)}` +
           (last.clipped ? "   CLIPPING" : "");
       }
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
+    });
     return box;
   }
 
@@ -816,8 +867,7 @@ export class ControlsPanel {
    * reads from the rig rather than from this panel.)
    */
   startPump(gen) {
-    const tick = () => {
-      if (!this.root.isConnected || gen !== this._gen) return;
+    this.startLoop(gen, () => {
       this.capture?.tick();
 
       const monitor = this.monitorEl;
@@ -838,9 +888,7 @@ export class ControlsPanel {
           monitor.textContent = rows.join("\n");
         }
       }
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
+    });
   }
 }
 

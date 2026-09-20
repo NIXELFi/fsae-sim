@@ -35,8 +35,8 @@ const CONE_DRAW_RANGE = 280; // m
 const GHOST_ALPHA = 0.55;
 /** Skid marks kept on the surface: segments in a ring, oldest overwritten. */
 const SKID_MAX = 8000;
-/** Floats per segment: two triangles of (x, y, z, alpha). */
-const SKID_FLOATS = 6 * 4;
+/** Floats per segment: two triangles of (x, y, z, alpha, side). */
+const SKID_FLOATS = 6 * 5;
 /** Half-width of a mark, metres -- a bit under the slick's 7 in, since only
  *  the loaded shoulder really scrubs. */
 const SKID_HALF_W = 0.07;
@@ -50,11 +50,16 @@ const SHADOW_DEPTH = 90;      // m, half depth range of each cascade along the s
 
 // Attribute locations are fixed so one VAO can be drawn by the lit program
 // and by the depth-only program alike.
-const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_TINT = 5, I_DIR = 6;
-/** Floats per prop instance: offset(3), down(1), tint(1), dir(1). */
+const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_CONE = 5, I_DIR = 6;
+/** Floats per prop instance: offset(3), down(1), cone(1), dir(1). The cone
+ *  flag tells PROP_FS which props get the reflective collar; it used to be a
+ *  tint that darkened a knocked cone by 28%, which a falling cone does not do. */
 const INST_FLOATS = 6;
 /** How long a struck cone takes to land, ms. */
 const CONE_TUMBLE_MS = 320;
+/** The cone's white collar, metres up an 18 in (0.46 m) cone: 52-78% of the
+ *  height, drawn by PROP_FS from the vertex height so it is an edge. */
+const CONE_BAND_LO = 0.24, CONE_BAND_HI = 0.36;
 
 /** The dash panel's texture, at the DISPLAY's own 108:65 -- not the case's.
  *  Sized so the smallest type is still a couple of pixels tall from the
@@ -66,8 +71,10 @@ const DASH_TEX_W = 768, DASH_TEX_H = 462;
  *  sky, not so much that it glows. */
 const DASH_NITS = 1.9;
 
-// Sun: mid-afternoon, from the south-west, high enough that a 15 m grandstand
-// throws a shadow without the cones throwing 3 m ones.
+// Sun: mid-afternoon, from the south-EAST (GL +z is world south, so a
+// positive z component is a sun on the south side and positive x is east),
+// high enough that a 15 m grandstand throws a shadow without the cones
+// throwing 3 m ones.
 const SUN = normalize([0.42, 0.74, 0.52]);
 
 /**
@@ -99,11 +106,18 @@ function sunSky(sun) {
   // complement of the beam, so it goes deeper blue as the sun climbs.
   const day = Math.pow(Math.max(sun[1], 0.0), 0.6);
   const zenith = [0.135, 0.285, 0.64].map((c) => c * (0.25 + 0.90 * day));
-  // Horizon: the long path scatters everything, so it is brighter and far
-  // less saturated, tinted by the (already warmed) sun.
-  const horizon = [0, 1, 2].map((i) => zenith[i] * 0.55 + (0.28 + 0.20 * T[i]) * (0.30 + 0.80 * day));
+  // Horizon: the long path scatters everything, so it is brighter and less
+  // saturated than the zenith, tinted by the (already warmed) sun. The haze
+  // term is held down (0.55) and the zenith's share up (0.70): with the haze
+  // at full strength the horizon came out nearly neutral grey, and since it
+  // is also the fog colour and a third of the frame, the whole image went
+  // milky. A clear sky at this elevation is bluer than that.
+  const horizon = [0, 1, 2].map((i) => zenith[i] * 0.70 + (0.28 + 0.20 * T[i]) * 0.55 * (0.30 + 0.80 * day));
   const skyAvg = [0, 1, 2].map((i) => zenith[i] * 0.45 + horizon[i] * 0.55);
-  const groundAlbedo = [0.085, 0.087, 0.090]; // linear, the lot
+  // Linear, the lot: exactly `toLinear` of the asphalt albedo GROUND_FS
+  // authors (0.27, 0.275, 0.285 in display space), so the bounce that lights
+  // the underside of the car is the lot it is sitting on and not a lighter one.
+  const groundAlbedo = [0.056, 0.058, 0.063];
   const ground = [0, 1, 2].map((i) => groundAlbedo[i] * (sunCol[i] * Math.max(sun[1], 0) + skyAvg[i]));
   return { sunCol, zenith, horizon, ground };
 }
@@ -122,12 +136,18 @@ const MAT = {
   dash: [0.88, 0.0, 0.0],
 };
 
-/** Linear radiance -> display encoding, for the clear colour only. */
+/** How hard the display-space S-curve in `finish` pulls at contrast.
+ *  Shared with the JS clear-colour encode below so the two agree. */
+const GRADE_CONTRAST = 0.25;
+
+/** Linear radiance -> display encoding, for the clear colour only. Mirrors
+ *  `finish` in the shaders: exposure, ACES, sRGB, then the same S-curve. */
 function displayEncode(c, exposure) {
   return c.map((v) => {
     const x = v * exposure;
     const t = Math.min(1, Math.max(0, (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)));
-    return Math.pow(t, 1 / 2.2);
+    const g = Math.pow(t, 1 / 2.2);
+    return g + GRADE_CONTRAST * (g * g * (3 - 2 * g) - g);
   });
 }
 
@@ -144,8 +164,12 @@ function displayEncode(c, exposure) {
  * exposure, an ACES-style filmic curve and the sRGB transfer.
  */
 const COMMON_FS = `
+// The fragment default for integers is mediump; the lattice hash below mixes
+// 32-bit words and needs all of them.
+precision highp int;
 uniform vec3 uSun;
 uniform vec3 uCam;
+uniform float uTime;      // seconds; drifts the cloud layer
 uniform vec3 uSunCol;     // linear, diffuse-normalised
 uniform vec3 uZenith;     // linear sky radiance overhead
 uniform vec3 uHorizon;    // linear sky radiance at the horizon
@@ -162,7 +186,19 @@ const float PI = 3.14159265;
 
 vec3 toLinear(vec3 c) { return pow(max(c, 0.0), vec3(2.2)); }
 
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// Lattice hash by integer bit mixing (pcg2d). The usual fract(sin(dot()))
+// hash feeds sin() an argument of ~1e7 once the lattice coordinate is a
+// world position at the far end of the MIS lot (p * 64 at 1300 m), where a
+// float32 has no fractional bits left, and the noise there collapsed into
+// axis-aligned streaks. Integers do not lose precision with distance.
+float hash(vec2 p) {
+  uvec2 v = uvec2(ivec2(p)) * uvec2(1664525u, 1013904223u);
+  v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+  v ^= v >> 16u;
+  return float(v.x ^ v.y) * (1.0 / 4294967296.0);
+}
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   f = f * f * (3.0 - 2.0 * f);
@@ -173,10 +209,54 @@ float fbm(vec2 p) {
   return noise(p) * 0.5 + noise(p * 2.03) * 0.25 + noise(p * 4.11) * 0.125 + noise(p * 8.3) * 0.0625;
 }
 
+// ---- footprint-faded noise, for surfaces --------------------------------
+// \`px\` is how many metres of surface one pixel covers (fwidth of the
+// world coordinate, taken ONCE per fragment outside any branch, since
+// derivatives are undefined inside non-uniform control flow) and \`freq\` is
+// the octave's cells per metre, so px * freq is cells per pixel. Past about
+// half a cell the octave is above Nyquist and the only thing it can add is
+// sparkle, so it is faded to its mean instead of sampled. The old fade was
+// by distance, which cannot work: the footprint depends on the grazing
+// angle, and from a seat 0.7 m off the deck the 16 mm and 45 mm octaves
+// were past Nyquist from 4 m out while the fade still had them at 90%.
+// That was the shimmer over most of the lot.
+float octaveFade(float px, float freq) { return 1.0 - smoothstep(0.3, 0.8, px * freq); }
+float anoise(vec2 p, float freq, float px) {
+  float k = octaveFade(px, freq);
+  // Skipping the lattice lookups once an octave is faded out is what keeps
+  // the far half of the ground cheaper than it was.
+  return k > 0.0 ? mix(0.5, noise(p * freq), k) : 0.5;
+}
+float afbm(vec2 p, float freq, float px) {
+  return anoise(p, freq, px) * 0.5 + anoise(p, freq * 2.03, px) * 0.25
+       + anoise(p, freq * 4.11, px) * 0.125 + anoise(p, freq * 8.3, px) * 0.0625;
+}
+
+// ---- lot relief --------------------------------------------------------
+// The seal-coat patching of the lot as a height field, and its normal by
+// finite difference. Asphalt is not a plane: it settles and is patched at
+// the metre scale, and that gentle undulation is what breaks the sun's glare
+// into the mottled sheen a real lot has. On a perfectly flat plane the GGX
+// lobe is one uniform smear, which is what read as a plastic sheet. Two
+// octaves and a few centimetres of relief, so it stays subtle; the octaves
+// fade with footprint like everything else, so far away it is flat again.
+float lotHeight(vec2 p, float px) {
+  return anoise(p, 0.7, px) * 0.6 + anoise(p, 1.9, px) * 0.4;
+}
+vec3 lotNormal(vec2 p, float px, float h0) {
+  float e = max(0.12, px);         // never step less than a pixel: that aliases too
+  float hx = lotHeight(p + vec2(e, 0.0), px);
+  float hz = lotHeight(p + vec2(0.0, e), px);
+  const float AMP = 0.035;         // metres of relief per unit of the field
+  return normalize(vec3((h0 - hx) * AMP / e, 1.0, (h0 - hz) * AMP / e));
+}
+
 // ---- sky ---------------------------------------------------------------
-// The one gradient the sky quad, the ambient term, the fog and the paint's
-// reflection all read, so they cannot disagree with each other.
-vec3 skyRadiance(vec3 d) {
+// The one sky the sky quad, the ambient term, the fog and the paint's
+// reflection all read, so they cannot disagree with each other. The
+// gradient alone is what a rough surface sees; \`skyRadiance\` adds the
+// cloud layer on top for everything glossy enough to resolve it.
+vec3 skyGradient(vec3 d) {
   float t = clamp(d.y, 0.0, 1.0);
   vec3 c = mix(uHorizon, uZenith, sqrt(t));
   // Aureole: forward-scattered haze around the sun.
@@ -185,6 +265,30 @@ vec3 skyRadiance(vec3 d) {
   c += uSunCol * (0.018 * cs4 * cs4 + 0.006 * cs2);
   // Below the horizon the reflection sees the lot.
   if (d.y < 0.0) c = mix(uHorizon, uGround, clamp(-d.y * 3.0, 0.0, 1.0));
+  return c;
+}
+
+// Thin high cloud: noise on the sky projected to a plane, drifting slowly,
+// lit by the sun so it is brighter than the blue behind it -- about 1.7x the
+// horizon, which is where sunlit cloud sits against a clear sky; at the
+// horizon's own radiance it was grey. It lives HERE and not in the sky
+// shader so that the clearcoat reflection and the fog see the same sky as
+// the backdrop: a paint reflecting a featureless gradient has nothing to
+// slide across a curved panel, and read as matte however glossy it was.
+vec3 skyRadiance(vec3 d) {
+  vec3 c = skyGradient(d);
+  if (d.y > 0.02) {
+    vec2 uv = d.xz / (d.y + 0.15) * 1.6 + vec2(uTime * 0.004, uTime * 0.0015);
+    float n = noise(uv) * 0.5 + noise(uv * 2.1 + 3.7) * 0.3 + noise(uv * 4.3 + 9.1) * 0.2;
+    float cloud = smoothstep(0.52, 0.78, n) * smoothstep(0.02, 0.22, d.y) * 0.6;
+    float cs = max(dot(d, uSun), 0.0);
+    // Paler than the sky behind it (mostly neutral at the horizon's
+    // luminance, a touch warm) and brighter, more so toward the sun.
+    float hl = dot(uHorizon, vec3(0.30, 0.59, 0.11));
+    vec3 cloudCol = mix(uHorizon, vec3(hl) * vec3(1.03, 1.0, 0.95), 0.7)
+                  * 1.7 * (0.85 + 0.25 * cs * cs * cs);
+    c = mix(c, cloudCol, cloud);
+  }
   return c;
 }
 
@@ -214,7 +318,13 @@ float cascade(highp sampler2DShadow tex, mat4 m, vec3 world, vec3 n, float texel
   inside = smoothstep(0.0, 0.08, min(e.x, e.y));
   if (inside <= 0.0 || p.z > 1.0) return 1.0;
   float r = 1.4 / ${SHADOW_SIZE}.0;
-  float z = p.z - 0.00025;
+  // Constant bias: 0.00004 of the 180 m depth range is 7 mm along the sun.
+  // It was 0.00025, which is 45 mm -- enough to lift every cone's shadow
+  // clear of its 24 mm base plate and float the car's off its tyres. The
+  // normal offset above (1.2-3.2 texels, 16-44 mm in the near cascade) is
+  // what actually holds off acne on the casters, and the ground cannot acne
+  // at all: it is never drawn into the map, only shadowed by it.
+  float z = p.z - 0.00004;
   float s = 0.0;
   for (int i = 0; i < 4; i++) s += texture(tex, vec3(p.xy + POISSON[i] * r, z));
   return s * 0.25;
@@ -270,7 +380,9 @@ vec3 shade(vec3 albedo, vec3 n, vec3 world, float shadow,
   // wide, and most of it lands below the horizon of the surface.
   float gl = (1.0 - rough) * (1.0 - rough);
   vec3 Fenv = F0 + (max(vec3(gl), F0) - F0) * fv;
-  vec3 sky = skyRadiance(r);
+  // A rough surface's lobe is wider than a cloud, so it sees the gradient
+  // and skips the three noise lookups; anything glossy reflects the clouds.
+  vec3 sky = rough < 0.5 ? skyRadiance(r) : skyGradient(r);
   vec3 env = mix(sky, amb, rough * rough);
   c += env * Fenv * (1.0 - 0.5 * rough);
 
@@ -307,7 +419,14 @@ vec4 finish(vec3 lin) {
   vec2 q = gl_FragCoord.xy * uInvRes - 0.5;
   float vig = 1.0 - 0.32 * pow(dot(q, q) * 2.6, 1.3);
   vec3 c = aces(lin * uExposure * vig);
-  return vec4(pow(c, vec3(1.0 / 2.2)), 1.0);
+  // A mild S-curve in DISPLAY space, pivoting at display 0.5 (linear 0.22,
+  // near mid-grey): a little more contrast through the mid-tones with the
+  // ends untouched. ACES on its own left the frame grey-on-grey. Applied
+  // after the transfer so the pivot is perceptual mid-grey; in linear it
+  // would sit at display 0.73 and darken everything below.
+  vec3 g = pow(c, vec3(1.0 / 2.2));
+  g = mix(g, g * g * (3.0 - 2.0 * g), ${GRADE_CONTRAST});
+  return vec4(g, 1.0);
 }
 `;
 
@@ -351,7 +470,11 @@ void main() {
   vec3 lin = pow(texture(uPanel, vUv).rgb, vec3(2.2)) * uNits;
   vec2 q = gl_FragCoord.xy * uInvRes - 0.5;
   float vig = 1.0 - 0.32 * pow(dot(q, q) * 2.6, 1.3);
-  frag = vec4(pow(aces(lin * uExposure * vig), vec3(1.0 / 2.2)), 1.0);
+  vec3 g = pow(aces(lin * uExposure * vig), vec3(1.0 / 2.2));
+  // The same display-space S-curve as \`finish\`, for the same reason the
+  // exposure and vignette are here: the panel must sit IN the image.
+  g = mix(g, g * g * (3.0 - 2.0 * g), ${GRADE_CONTRAST});
+  frag = vec4(g, 1.0);
 }`;
 
 const SKY_VS = `#version 300 es
@@ -364,29 +487,21 @@ precision highp float;
 in vec2 vNdc;
 uniform vec3 uRight, uUp, uFwd;   // camera basis
 uniform vec2 uTan;                // tan(fov/2) * aspect, tan(fov/2)
-uniform float uTime;
 ${COMMON_FS}
 out vec4 frag;
 
 void main() {
   vec3 dir = normalize(uFwd + uRight * (vNdc.x * uTan.x) + uUp * (vNdc.y * uTan.y));
   float y = dir.y;
+  // Gradient, aureole and the cloud layer, all from the shared sky so the
+  // backdrop is the same sky the paint reflects and the fog fades to.
   vec3 c = skyRadiance(vec3(dir.x, max(y, 0.0), dir.z));
 
   // Sun: a hot disc and a tight glow. The filmic curve does the bloom-free
-  // glare; the disc is simply far above white.
+  // glare; the disc is simply far above white. Added over the cloud, which
+  // is thin enough that the sun shows through it.
   float cosSun = dot(dir, uSun);
   c += uSunCol * (pow(max(cosSun, 0.0), 1600.0) * 12.0 + pow(max(cosSun, 0.0), 60.0) * 0.12);
-
-  // Thin high cloud: noise on the sky projected to a plane, drifting slowly.
-  // Lit by the sun, so it is brighter than the blue behind it.
-  if (y > 0.02) {
-    vec2 uv = dir.xz / (y + 0.15) * 1.6 + vec2(uTime * 0.004, uTime * 0.0015);
-    float n = noise(uv) * 0.5 + noise(uv * 2.1 + 3.7) * 0.3 + noise(uv * 4.3 + 9.1) * 0.2;
-    float cloud = smoothstep(0.52, 0.78, n) * smoothstep(0.02, 0.22, y) * 0.6;
-    vec3 cloudCol = mix(uHorizon, uSunCol * 0.42, 0.55) * (0.85 + 0.25 * pow(max(cosSun, 0.0), 3.0));
-    c = mix(c, cloudCol, cloud);
-  }
 
   // Below the horizon there is nothing but the ground plane, which is fogged
   // to the same colour; a slightly darker band there hides any seam.
@@ -438,24 +553,43 @@ out vec4 frag;
 
 void main() {
   vec2 p = vWorld.xz;
-  float dist = length(vWorld - uCam);
-  float detail = clamp(1.0 - dist / 55.0, 0.0, 1.0);
+  // Surface metres per pixel, per axis and overall, for the footprint fades
+  // and the stripe filters. Once, here, outside every branch: derivatives
+  // are undefined inside non-uniform control flow (the grass block below).
+  // Floored so the smoothstep edges below can never coincide.
+  vec2 dp = max(fwidth(p), vec2(1e-4));
+  float px = max(dp.x, dp.y);
 
   // ---- asphalt: aggregate speckle, coarse patching, a few seal-coat seams --
-  float fine = noise(p * 22.0) * 0.55 + noise(p * 64.0) * 0.45;
-  float wear = fbm(p * 0.09);
-  float seam = noise(p * 0.7) * 0.6 + noise(p * 1.9) * 0.4;
+  // Every octave is faded by its own footprint (see anoise), to its mean, so
+  // the average albedo -- and therefore the exposure -- is the same near and
+  // far; only the sparkle goes.
+  float fine = anoise(p, 22.0, px) * 0.55 + anoise(p, 64.0, px) * 0.45;
+  float wear = afbm(p, 0.09, px);
+  float seam = lotHeight(p, px);
   vec3 asphalt = vec3(0.27, 0.275, 0.285);
-  asphalt *= 0.86 + 0.24 * wear;
-  asphalt *= 0.95 + 0.10 * smoothstep(0.55, 0.62, seam);
-  asphalt += (fine - 0.5) * 0.14 * detail;
+  // Kept gentle: a lot is one pour, and the coarse patching read as tiles.
+  asphalt *= 0.92 + 0.13 * wear;
+  asphalt *= 0.97 + 0.06 * smoothstep(0.55, 0.62, seam);
+  asphalt += (fine - 0.5) * 0.14;
 
-  // Faded parking-stall lines: 2.75 m bays, 5.5 m deep. Real lot markings, and
-  // the main optical-flow cue at speed.
-  vec2 g = abs(fract(p / vec2(2.75, 5.5)) - 0.5) * vec2(2.75, 5.5);
-  float line = min(g.x, g.y);
-  float paint = (1.0 - smoothstep(0.04, 0.10, line)) * 0.42 * clamp(1.0 - dist / 130.0, 0.0, 1.0);
-  paint *= 0.35 + 0.65 * noise(p * 3.0);   // worn and patchy
+  // Faded parking-stall lines. Real lot markings, and the main optical-flow
+  // cue at speed: 2.75 m bays, 5.5 m deep, in double rows (two bays nose to
+  // nose) with a 7 m drive aisle between the rows -- an 18 m module. The
+  // stripes run ONE way, across the row, and stop at the aisle. Drawing the
+  // 2.75 x 5.5 grid on both axes made the whole lot read as a tiled floor.
+  //
+  // Antialiased as coverage: each stripe edge is box-filtered over the
+  // pixel's footprint along the stripe's own axis, so a 100 mm stripe that
+  // is a tenth of a pixel wide draws as a tenth of its paint rather than
+  // sparkling in and out. Beyond the point where the 2.75 m pitch itself
+  // is a pixel or two the rows moire, so the paint fades out there.
+  float ax = abs(fract(p.x / 2.75) - 0.5) * 2.75;            // distance across to the nearest stripe
+  float stripe = clamp((0.05 - ax) / dp.x + 0.5, 0.0, 1.0) - clamp((-0.05 - ax) / dp.x + 0.5, 0.0, 1.0);
+  float m = mod(p.y, 18.0);                                   // position along the row's depth
+  float aisle = smoothstep(5.5 - dp.y, 5.5 + dp.y, m) - smoothstep(12.5 - dp.y, 12.5 + dp.y, m);
+  float paint = stripe * (1.0 - aisle) * 0.42 * (1.0 - smoothstep(0.9, 2.0, dp.x));
+  paint *= 0.35 + 0.65 * anoise(p, 3.0, px);   // worn and patchy
   asphalt = mix(asphalt, vec3(0.66, 0.65, 0.62), paint);
 
   // ---- grass beyond the lot, with a concrete kerb along the edge ----------
@@ -464,40 +598,53 @@ void main() {
   vec3 albedo = asphalt;
   float rough = 0.78;
   if (edge > -0.5) {
-    float grassN = fbm(p * 0.35) * 0.6 + noise(p * 6.0) * 0.4;
+    float grassN = afbm(p, 0.35, px) * 0.6 + anoise(p, 6.0, px) * 0.4;
     vec3 grass = mix(vec3(0.27, 0.36, 0.17), vec3(0.42, 0.50, 0.22), grassN);
-    grass *= 0.9 + 0.2 * noise(p * 0.05);
-    vec3 kerb = vec3(0.60, 0.60, 0.57) * (0.9 + 0.2 * noise(p * 9.0));
+    grass *= 0.9 + 0.2 * anoise(p, 0.05, px);
+    vec3 kerb = vec3(0.60, 0.60, 0.57) * (0.9 + 0.2 * anoise(p, 9.0, px));
     albedo = mix(asphalt, kerb, smoothstep(-0.05, 0.12, edge));
     float grassAmt = smoothstep(0.45, 0.9, edge + 0.4 * (grassN - 0.5));
     albedo = mix(albedo, grass, grassAmt);
     rough = mix(rough, 0.95, grassAmt);
   }
 
-  // ---- lighting: flat plane, so the normal is up ----
+  // ---- lighting ----
   // Worn asphalt goes glossier where the aggregate is polished, which is why
   // a lot glares when you look toward the sun and not otherwise; GGX at this
-  // roughness does exactly that at grazing angles.
+  // roughness does exactly that at grazing angles. The shading normal
+  // carries the lot's relief (lotNormal) so that glare is mottled rather
+  // than one sheet; the shadow lookup keeps the true plane, since the
+  // normal offset there is about the receiver's geometry, not its finish.
   rough -= 0.10 * smoothstep(0.55, 0.62, seam) + 0.06 * wear;
-  vec3 n = vec3(0.0, 1.0, 0.0);
-  float sh = shadowAt(vWorld, n);
+  vec3 up = vec3(0.0, 1.0, 0.0);
+  vec3 n = lotNormal(p, px, seam);
+  float sh = shadowAt(vWorld, up);
+  // Contact darkening once, on the whole result: the sun under the car is
+  // already the shadow map's job, and applying the AO to the direct term as
+  // well as the total squared it under the tyres.
   float ao = contactAO(p);
-  vec3 c = shade(toLinear(albedo), n, vWorld, sh * ao, rough, 0.0, 0.0);
-  c *= ao;
+  vec3 c = shade(toLinear(albedo), n, vWorld, sh, rough, 0.0, 0.0) * ao;
   frag = finish(applyFog(c, vWorld));
 }`;
 
-// Rubber on the road. A strip of dark quads laid where a tyre was sliding,
-// blended over whatever surface is there, fading with distance so the far
-// end of a long lap does not turn into a black smear.
+// Rubber on the road. A mitred strip laid where a tyre was sliding, drawn
+// AFTER the lit ground with a multiplicative blend (dst *= 1 - alpha): the
+// mark darkens whatever the surface already is, so it is lit, shadowed and
+// fogged exactly as the asphalt under it. Blending a flat grey over the top
+// put a display-space swatch on the road that ignored the car's shadow and
+// stayed the same grey into the fog. Fades with distance so the far end of
+// a long lap does not turn into a black smear.
 const SKID_VS = `#version 300 es
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in float aAlpha;
+layout(location = 2) in float aSide;   // -1 at one edge of the mark, +1 at the other
 uniform mat4 uViewProj;
 out float vA;
+out float vSide;
 out vec3 vWorld;
 void main() {
   vA = aAlpha;
+  vSide = aSide;
   vWorld = aPos;
   gl_Position = uViewProj * vec4(aPos, 1.0);
 }`;
@@ -505,13 +652,20 @@ void main() {
 const SKID_FS = `#version 300 es
 precision highp float;
 in float vA;
+in float vSide;
 in vec3 vWorld;
 uniform vec3 uEye;
 out vec4 frag;
 void main() {
   float d = length(vWorld - uEye);
   float fade = 1.0 - smoothstep(50.0, 140.0, d);
-  frag = vec4(0.03, 0.03, 0.035, vA * fade);
+  // Soft across the width: the loaded shoulder scrubs hardest at the middle
+  // of the contact patch and barely at its edges. Widened by the pixel
+  // footprint so a mark a few pixels wide still has an edge, not a stair.
+  float w = fwidth(vSide);
+  float edge = 1.0 - smoothstep(0.45 - w, 1.0, abs(vSide));
+  // Only alpha matters under (ZERO, ONE_MINUS_SRC_ALPHA).
+  frag = vec4(0.0, 0.0, 0.0, vA * fade * edge);
 }`;
 
 const RIBBON_VS = `#version 300 es
@@ -540,16 +694,19 @@ out vec4 frag;
 
 void main() {
   vec2 p = vWorld.xz;
-  float dist = length(vWorld - uCam);
-  float detail = clamp(1.0 - dist / 70.0, 0.0, 1.0);
+  // Surface metres per pixel, for the footprint fades (see GROUND_FS).
+  vec2 dp = fwidth(p);
+  float px = max(dp.x, dp.y);
 
   // Rubbered-in racing surface: darker than the surrounding lot, darkest in
-  // the middle where the cars actually run, with marbles at the edges.
+  // the middle where the cars actually run, with marbles at the edges. The
+  // speckle fades to its mean by footprint; the marbles fade out entirely,
+  // since they are a near-field detail with no mean worth keeping.
   float mid = 1.0 - abs(vSide);
   vec3 c = vec3(0.245, 0.248, 0.256) - 0.05 * smoothstep(0.1, 0.9, mid);
-  c *= 0.86 + 0.28 * fbm(p * 0.12);
-  c += (noise(p * 18.0) - 0.5) * 0.06 * detail;
-  float marbles = smoothstep(0.86, 1.0, abs(vSide)) * noise(p * 30.0) * detail;
+  c *= 0.86 + 0.28 * afbm(p, 0.12, px);
+  c += (anoise(p, 18.0, px) - 0.5) * 0.06;
+  float marbles = smoothstep(0.86, 1.0, abs(vSide)) * anoise(p, 30.0, px) * octaveFade(px, 30.0);
   c = mix(c, vec3(0.14, 0.14, 0.15), marbles * 0.5);
   // Laid rubber is smoother than the lot around it.
   float rough = 0.70 - 0.08 * smoothstep(0.1, 0.9, mid);
@@ -564,11 +721,14 @@ void main() {
     rough = mix(rough, 0.45, band);
   }
 
-  vec3 n = vec3(0.0, 1.0, 0.0);
-  float sh = shadowAt(vWorld, n);
+  // The same relief as the lot around it, so the glare is continuous across
+  // the ribbon's edge; the shadow lookup keeps the true plane.
+  vec3 up = vec3(0.0, 1.0, 0.0);
+  vec3 n = lotNormal(p, px, lotHeight(p, px));
+  float sh = shadowAt(vWorld, up);
+  // Contact darkening once, on the whole result (see GROUND_FS).
   float ao = contactAO(p);
-  vec3 lit = shade(toLinear(c), n, vWorld, sh * ao, rough, 0.0, 0.0);
-  lit *= ao;
+  vec3 lit = shade(toLinear(c), n, vWorld, sh, rough, 0.0, 0.0) * ao;
   frag = finish(applyFog(lit, vWorld));
 }`;
 
@@ -578,15 +738,19 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec3 aColor;
 layout(location = 3) in vec3 iOffset;
 layout(location = 4) in float iDown;
-layout(location = 5) in float iTint;
+layout(location = 5) in float iCone;   // 1 for a cone (gets the reflective collar), 0 for other props
 layout(location = 6) in float iDir;
 uniform mat4 uViewProj;
 out vec3 vColor;
 out vec3 vNormal;
 out vec3 vWorld;
+out float vLocalY;   // height up the prop BEFORE any tumble, metres
+out float vCone;
 void main() {
   vec3 p = aPos;
   vec3 n = aNormal;
+  vLocalY = aPos.y;
+  vCone = iCone;
   if (iDown > 0.001) {
     // Knocked over: tip about the base edge on the far side from the strike,
     // by up to 90 degrees, eased so it lands rather than hinges. Used to be
@@ -605,7 +769,7 @@ void main() {
   vec3 world = p + iOffset;
   vWorld = world;
   vNormal = n;
-  vColor = aColor * iTint;
+  vColor = aColor;
   gl_Position = uViewProj * vec4(world, 1.0);
 }`;
 
@@ -614,6 +778,8 @@ precision highp float;
 in vec3 vColor;
 in vec3 vNormal;
 in vec3 vWorld;
+in float vLocalY;
+in float vCone;
 ${COMMON_FS}
 out vec4 frag;
 void main() {
@@ -621,11 +787,33 @@ void main() {
   // normalize(0) is NaN: a black or undefined pixel. Fall back to up.
   float nl = length(vNormal);
   vec3 n = nl > 1e-6 ? vNormal / nl : vec3(0.0, 1.0, 0.0);
+
+  // The retro-reflective collar: a crisp band on the pre-tumble height,
+  // antialiased over one pixel of it. It used to be vertex colour on a
+  // six-ring mesh, which interpolated it into a 150 mm blur -- and the band
+  // is the thing you aim at, so it has to be an edge.
+  // Floored: on a face of constant height (the base plate, a post's top)
+  // the derivative is zero, and smoothstep with equal edges is undefined.
+  float e = max(fwidth(vLocalY), 1e-4);
+  float band = vCone * (smoothstep(${CONE_BAND_LO} - e, ${CONE_BAND_LO} + e, vLocalY)
+                      - smoothstep(${CONE_BAND_HI} - e, ${CONE_BAND_HI} + e, vLocalY));
+  vec3 albedo = mix(vColor, vec3(0.93, 0.93, 0.91), band);
+
   float sh = shadowAt(vWorld, n);
   // The base of a cone sits in its own contact shadow.
   float ao = 0.72 + 0.28 * clamp(vWorld.y / 0.35, 0.0, 1.0);
-  // Satin PVC: a broad soft highlight, no mirror.
-  vec3 c = shade(toLinear(vColor), n, vWorld, sh, 0.55, 0.0, 0.0) * ao;
+  // Satin PVC: a broad soft highlight, no mirror. The sheeting is glossier.
+  vec3 c = shade(toLinear(albedo), n, vWorld, sh, mix(0.55, 0.32, band), 0.0, 0.0) * ao;
+
+  // Retro-reflective sheeting sends light back where it came from, so the
+  // band flares when the sun is behind the camera -- the same reason a road
+  // sign lights up in headlights. A hint of it, on the sunlit side only.
+  if (band > 0.0) {
+    vec3 v = normalize(uCam - vWorld);
+    float ndl = max(dot(n, uSun), 0.0);
+    float retro = pow(max(dot(v, uSun), 0.0), 8.0) * smoothstep(0.0, 0.25, ndl) * sh;
+    c += band * uSunCol * retro * 0.30;
+  }
   frag = finish(applyFog(c, vWorld));
 }`;
 
@@ -714,32 +902,28 @@ void main() { frag = vec4(1.0); }`;
 
 // ------------------------------------------------------------------ meshes ---
 
-/** An FSAE course cone: 18 in tall, orange, with the white reflective band. */
+/** An FSAE course cone: 18 in tall, orange; PROP_FS paints the white
+ *  reflective collar from the height (CONE_BAND_LO..HI). */
 function coneMesh() {
   const pos = [], nrm = [], col = [];
-  const H = 0.46, R = 0.145, SEG = 12;
+  // Twenty-four segments: at twelve the silhouette at gate distance was a
+  // visible dodecagon. One ring of quads -- a frustum is linear, and the
+  // collar no longer needs rings of its own -- so this is still fewer
+  // vertices than the old six-ring, twelve-segment body.
+  const H = 0.46, R = 0.145, SEG = 24;
   const orange = [0.96, 0.34, 0.06];
-  const white = [0.93, 0.93, 0.91];
   const baseCol = [0.16, 0.16, 0.17];
 
-  // Body: stacked rings so the white band gets its own colour.
-  const rings = 6;
-  for (let r = 0; r < rings; r++) {
-    const t0 = r / rings, t1 = (r + 1) / rings;
-    const y0 = t0 * H, y1 = t1 * H;
-    const r0 = R * (1 - t0 * 0.88), r1 = R * (1 - t1 * 0.88);
-    const c0 = t0 > 0.52 && t0 < 0.78 ? white : orange;
-    const c1 = t1 > 0.52 && t1 < 0.78 ? white : orange;
-    for (let s = 0; s < SEG; s++) {
-      const a0 = (s / SEG) * Math.PI * 2, a1 = ((s + 1) / SEG) * Math.PI * 2;
-      const p = (rr, y, a) => [Math.cos(a) * rr, y, Math.sin(a) * rr];
-      const n = (a) => [Math.cos(a) * 0.9, 0.34, Math.sin(a) * 0.9];
-      const quad = [
-        [p(r0, y0, a0), n(a0), c0], [p(r1, y1, a0), n(a0), c1], [p(r1, y1, a1), n(a1), c1],
-        [p(r0, y0, a0), n(a0), c0], [p(r1, y1, a1), n(a1), c1], [p(r0, y0, a1), n(a1), c0],
-      ];
-      for (const [P, N, C] of quad) { pos.push(...P); nrm.push(...N); col.push(...C); }
-    }
+  const r0 = R, r1 = R * 0.12;
+  for (let s = 0; s < SEG; s++) {
+    const a0 = (s / SEG) * Math.PI * 2, a1 = ((s + 1) / SEG) * Math.PI * 2;
+    const p = (rr, y, a) => [Math.cos(a) * rr, y, Math.sin(a) * rr];
+    const n = (a) => [Math.cos(a) * 0.9, 0.34, Math.sin(a) * 0.9];
+    const quad = [
+      [p(r0, 0, a0), n(a0)], [p(r1, H, a0), n(a0)], [p(r1, H, a1), n(a1)],
+      [p(r0, 0, a0), n(a0)], [p(r1, H, a1), n(a1)], [p(r0, 0, a1), n(a1)],
+    ];
+    for (const [P, N] of quad) { pos.push(...P); nrm.push(...N); col.push(...orange); }
   }
   // Square base plate. Its top face sits 24 mm up: the course ribbon is at
   // 12 mm, and a plate at the same height z-fought it at every cone on the
@@ -866,8 +1050,10 @@ export class Renderer {
     this.pole = this.makeInstanced(poleMesh(), 64);
 
     this.shadow = [this.makeShadowMap(SHADOW_SIZE), this.makeShadowMap(SHADOW_SIZE)];
-    /** Scene exposure: linear radiance is scaled by this before the filmic curve. */
-    this.exposure = 0.45;
+    /** Scene exposure: linear radiance is scaled by this before the filmic
+     *  curve. 0.55: at 0.45 the sunlit lot sat at display 0.45 and the whole
+     *  frame read as overcast under a clear sky. */
+    this.exposure = 0.55;
 
     /**
      * A CAD model, once one is loaded. Held separately from the procedural
@@ -888,7 +1074,11 @@ export class Renderer {
     // The dash screen: a textured quad, and the canvas the HUD draws into.
     this.dashScreen = this.makeScreenQuad(GEO.dashHalfWidth, GEO.dashHalfHeight);
     this.dashPanel = this.makePanelTexture(DASH_TEX_W, DASH_TEX_H);
+    // The dash and steering wheel frames, placed once per frame BEFORE the
+    // shadow pass (`placeCockpit`), because both are drawn into the near
+    // cascade as well as the main pass.
     this.dashModel = mat4();
+    this.steerModel = mat4();
 
     this.viewProj = mat4();
     this.proj = mat4();
@@ -950,21 +1140,27 @@ export class Renderer {
       if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
       for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
     }
+    // The dash case is not part of any import: it is the same AiM unit on
+    // every car, so it always comes from the procedural builder. Dropping it
+    // here left `drawCar` binding an undefined mesh the first time a CAD
+    // model was loaded.
+    const meshes = buildCarMeshes(this.carParams ?? null);
     if (car) {
       this.car = {
         body: this.makeMesh(car.body),
         tire: this.makeMesh(car.tire),
         rim: this.makeMesh(car.rim),
         steeringWheel: this.makeMesh(car.steeringWheel),
+        dashCase: this.makeMesh(meshes.dashCase),
       };
       this.carModel = { hubs: car.hubs, steerCentre: car.steerCentre };
     } else {
-      const meshes = buildCarMeshes(this.carParams ?? null);
       this.car = {
         body: this.makeMesh(meshes.body),
         tire: this.makeMesh(meshes.tire),
         rim: this.makeMesh(meshes.rim),
         steeringWheel: this.makeMesh(meshes.steeringWheel),
+        dashCase: this.makeMesh(meshes.dashCase),
       };
       this.carModel = null;
     }
@@ -1144,7 +1340,7 @@ export class Renderer {
     return { vao, count: 6, buffers };
   }
 
-  /** An offscreen canvas and the texture it is uploaded to each frame. */
+  /** An offscreen canvas and the texture it is uploaded to when it changes. */
   makePanelTexture(w, h) {
     const gl = this.gl;
     const canvas = document.createElement("canvas");
@@ -1153,12 +1349,29 @@ export class Renderer {
     const ctx = canvas.getContext("2d");
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    // No mips: the panel is redrawn every frame and regenerating a chain each
-    // time costs more than the aliasing it would save at this size.
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    // Immutable storage with a full mip chain, allocated once. Uploads go
+    // through texSubImage2D into it rather than a texImage2D that reallocates
+    // the texture every time the panel changes.
+    //
+    // Mips, because the panel is MINIFIED: from the seat the 768 x 462 canvas
+    // lands on about 320 x 150 pixels of screen, 2.4x under, and from the
+    // chase camera 30x under. With a plain LINEAR filter every 1 px tick and
+    // peak marker sparkled and the small type was noise. Regenerating the
+    // chain (1.4 MB) is ~0.1 ms at the rate the panel actually redraws.
+    const levels = Math.floor(Math.log2(Math.max(w, h))) + 1;
+    gl.texStorage2D(gl.TEXTURE_2D, levels, gl.RGBA8, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // The panel is viewed at ~40 degrees from the seat, where a trilinear
+    // lookup blurs along the foreshortened axis; anisotropic filtering keeps
+    // the type sharp there. Optional: absent, the mips alone still help.
+    const aniso = gl.getExtension("EXT_texture_filter_anisotropic");
+    if (aniso) {
+      const max = gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) || 1;
+      gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, max));
+    }
     gl.bindTexture(gl.TEXTURE_2D, null);
     return { canvas, ctx, tex, w, h, dirty: true };
   }
@@ -1219,7 +1432,7 @@ export class Renderer {
     };
     bindInst(I_OFFSET, 3, 0);
     bindInst(I_DOWN, 1, 12);
-    bindInst(I_TINT, 1, 16);
+    bindInst(I_CONE, 1, 16);
     bindInst(I_DIR, 1, 20);
 
     gl.bindVertexArray(null);
@@ -1464,16 +1677,24 @@ export class Renderer {
     }
 
     const fovRad = ((this.fovDeg + (s.fovBoost || 0)) * Math.PI) / 180;
-    // Near 0.06 m: the steering wheel is 0.28 m ahead of the eye, and the
-    // walkaround floors its radius at 1.2 m. Far 1100 m clears the tree line
-    // on the far side of the endurance course with the sky quad behind it.
-    perspective(this.proj, fovRad, aspect, 0.06, 1100);
+    // Near 0.12 m. Nothing is closer to any eye than that: from the seat
+    // (0.70 m up, 0.15 m behind the CG) the nearest thing is the top of the
+    // steering wheel, 0.43 m ahead and 0.2 m down, ~0.4 m away even with
+    // the grips standing proud and the head leaning in; the nose camera has
+    // the nose tip behind and below it; the walkaround floors its radius at
+    // 1.2 m. It was 0.06, and a 24-bit depth buffer's resolution goes as
+    // the near plane, so halving it doubled the z-fighting between the
+    // ribbon, the cone plates and the venue's 2-4 mm layers at range. Far
+    // 1100 m clears the tree line on the far side of the endurance course
+    // with the sky quad behind it.
+    perspective(this.proj, fovRad, aspect, 0.12, 1100);
     lookAlong(this.view, eye, forward, up);
     multiply(this.viewProj, this.proj, this.view);
 
-    // ---- wheel transforms and hub positions, used by both passes ----
+    // ---- wheel and cockpit transforms, used by both passes ----
     this.placeWheels(s);
     this.placeGhost(s);
+    this.placeCockpit(s);
     if (s.skid) this.addSkids(s.skid);
 
     // ---- shadow pass ----
@@ -1491,6 +1712,20 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.shadow[1].tex);
 
+    // --- course ribbon, FIRST of the surfaces: it lies on top of the lot,
+    // so with its depth already written the early-Z test throws away every
+    // ground fragment under it before the (expensive) ground shader runs. ---
+    if (this.ribbon) {
+      gl.useProgram(this.progRibbon);
+      const ur = this.u.ribbon;
+      this.setCommon(ur, eye);
+      this.setContact(ur, cam);
+      gl.uniformMatrix4fv(ur.uViewProj, false, this.viewProj);
+      gl.uniform1f(ur.uLength, this.track.length);
+      gl.uniform1f(ur.uClosed, this.track.closed ? 1 : 0);
+      gl.bindVertexArray(this.ribbon.vao);
+      this.drawArrays(gl.TRIANGLE_STRIP, 0, this.ribbon.count);
+    }
 
     // --- ground ---
     gl.useProgram(this.progGround);
@@ -1535,20 +1770,7 @@ export class Renderer {
       }
     }
 
-    // --- course ribbon ---
-    if (this.ribbon) {
-      gl.useProgram(this.progRibbon);
-      const ur = this.u.ribbon;
-      this.setCommon(ur, eye);
-      this.setContact(ur, cam);
-      gl.uniformMatrix4fv(ur.uViewProj, false, this.viewProj);
-      gl.uniform1f(ur.uLength, this.track.length);
-      gl.uniform1f(ur.uClosed, this.track.closed ? 1 : 0);
-      gl.bindVertexArray(this.ribbon.vao);
-      this.drawArrays(gl.TRIANGLE_STRIP, 0, this.ribbon.count);
-    }
-
-    // --- rubber on the surface, over the ribbon and the lot ---
+    // --- rubber on the surface: darkens the lit ribbon and lot ---
     this.drawSkids(eye);
 
     // --- instanced props ---
@@ -1562,16 +1784,15 @@ export class Renderer {
     this.drawInstanced(this.pole);
     gl.disable(gl.CULL_FACE);
 
-    // The ghost AFTER the live car, because it is translucent and has to
-    // blend over whatever is behind it. `drawCar` ends with the dash screen,
-    // which leaves its texture on unit 0 where the lit programs expect the
-    // near shadow cascade, so `drawGhost` rebinds the cascades first.
     this.drawCar(s, eye);
-    this.drawGhost(s, eye);
 
-    // --- sky, last: its quad sits at z = 0.9999, so wherever anything was
-    // drawn the depth test rejects it before the (expensive) sky shader runs.
-    // Drawn first it ran on every pixel the ground and car then covered. ---
+    // --- sky, after every OPAQUE pass: its quad sits at z = 0.9999, so
+    // wherever anything was drawn the depth test rejects it before the
+    // (expensive) sky shader runs. Drawn first it ran on every pixel the
+    // ground and car then covered. But it must come BEFORE the translucent
+    // ghost: the ghost writes no depth, so a sky drawn after it passed the
+    // depth test wherever the ghost stood against the sky and painted over
+    // it -- from the seat, everything on the ghost above eye height. ---
     gl.depthMask(false);
     gl.useProgram(this.progSky);
     const us = this.u.sky;
@@ -1581,11 +1802,14 @@ export class Renderer {
     gl.uniform3f(us.uUp, up[0], up[1], up[2]);
     gl.uniform3f(us.uFwd, forward[0], forward[1], forward[2]);
     gl.uniform2f(us.uTan, tanH * aspect, tanH);
-    gl.uniform1f(us.uTime, this.time);
     this.setCommon(us, eye);
     gl.bindVertexArray(this.quad);
     this.drawArrays(gl.TRIANGLES, 0, 6);
     gl.depthMask(true);
+
+    // The ghost last, because it is translucent and has to blend over
+    // whatever is behind it -- the sky included.
+    this.drawGhost(s, eye);
 
     gl.bindVertexArray(null);
   }
@@ -1600,6 +1824,10 @@ export class Renderer {
     gl.uniform3fv(u.uHorizon, SKY.horizon);
     gl.uniform3fv(u.uGround, SKY.ground);
     gl.uniform1f(u.uExposure, this.exposure);
+    // The cloud drift, for every program that reads the sky. A program the
+    // compiler pruned it from has no location, and a null location is a
+    // no-op by spec, not an error.
+    gl.uniform1f(u.uTime, this.time);
     gl.uniform2f(u.uInvRes, 1 / this.canvas.width, 1 / this.canvas.height);
     gl.uniform1i(u.uShadow0, 0);
     gl.uniform1i(u.uShadow1, 1);
@@ -1634,22 +1862,37 @@ export class Renderer {
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, SKID_MAX * SKID_FLOATS * 4, gl.DYNAMIC_DRAW);
+    const stride = 5 * 4;   // x, y, z, alpha, side
     gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 16, 12);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 1, gl.FLOAT, false, stride, 16);
     gl.bindVertexArray(null);
     return {
       vao, buf, seg: new Float32Array(SKID_FLOATS), n: 0, head: 0,
-      prev: [null, null, null, null],
+      strip: [this._newStrip(), this._newStrip(), this._newStrip(), this._newStrip()],
     };
+  }
+
+  /**
+   * One wheel's strip state. `pts` is how many points are held: the latest
+   * sample (l*) and, once there are two, the one before it (p*) with the
+   * joint offset (pox, poz) already decided and the unit direction (ux, uz)
+   * from p to l. A segment is emitted one sample LATE -- when the sample
+   * after its far end arrives -- because that is when the far end's mitre
+   * is known. At any driving frame rate the lag is under the tyre.
+   */
+  _newStrip() {
+    return { pts: 0, lx: 0, lz: 0, la: 0, px: 0, pz: 0, pox: 0, poz: 0, pa: 0, ux: 0, uz: 0 };
   }
 
   /** Forget every mark: a new course, a fresh surface. */
   clearSkids() {
     this.skid.n = 0;
     this.skid.head = 0;
-    this.skid.prev = [null, null, null, null];
+    for (const st of this.skid.strip) st.pts = 0;
   }
 
   /**
@@ -1657,38 +1900,85 @@ export class Renderer {
    *
    * `intensity` is one number per wheel, 0..1, decided by the game from the
    * slip the tyre is at; here it only sets how dark the mark is. Each wheel
-   * contributes one quad from where it was last frame to where it is now,
-   * so a mark is continuous at any frame rate. A jump (a respawn, a seek)
-   * breaks the strip rather than drawing a streak across the course.
+   * lays a continuous MITRED strip through its samples: consecutive segments
+   * share the joint's bisector edge, so a curve neither gaps on the outside
+   * nor overlaps (and double-darkens) on the inside the way independent
+   * quads did. The intensity is per point, so it ramps along the strip
+   * rather than stepping per frame, and a wheel that starts or stops
+   * sliding gets a segment fading from or to nothing. A jump (a respawn, a
+   * seek) breaks the strip rather than drawing a streak across the course.
    */
   addSkids(intensity) {
-    const gl = this.gl;
     const sk = this.skid;
     for (let i = 0; i < 4; i++) {
       const x = this._hubXZ[i * 2];
       const z = this._hubXZ[i * 2 + 1];
-      const prev = sk.prev[i];
+      const st = sk.strip[i];
       const a = intensity[i] ?? 0;
-      if (prev && a > 0.15) {
-        const dx = x - prev.x, dz = z - prev.z;
-        const len = Math.hypot(dx, dz);
-        if (len > 0.015 && len < 2.5) {
-          const nx = (-dz / len) * SKID_HALF_W, nz = (dx / len) * SKID_HALF_W;
-          // Faint at the onset, never black: rubber on asphalt is a shade
-          // darker, not paint.
-          const alpha = Math.min(0.38, 0.04 + a * 0.34);
-          const v = sk.seg;
-          const put = (k, px, pz) => { v[k] = px; v[k + 1] = SKID_Y; v[k + 2] = pz; v[k + 3] = alpha; };
-          put(0, prev.x + nx, prev.z + nz); put(4, prev.x - nx, prev.z - nz); put(8, x - nx, z - nz);
-          put(12, prev.x + nx, prev.z + nz); put(16, x - nx, z - nz); put(20, x + nx, z + nz);
-          gl.bindBuffer(gl.ARRAY_BUFFER, sk.buf);
-          gl.bufferSubData(gl.ARRAY_BUFFER, sk.head * SKID_FLOATS * 4, v);
-          sk.head = (sk.head + 1) % SKID_MAX;
-          sk.n = Math.min(sk.n + 1, SKID_MAX);
-        }
+      const sliding = a > 0.15;
+      // Faint at the onset, never black: rubber on asphalt is a shade
+      // darker, not paint.
+      const alpha = sliding ? Math.min(0.38, 0.04 + a * 0.34) : 0;
+      if (st.pts === 0) { st.lx = x; st.lz = z; st.la = alpha; st.pts = 1; continue; }
+      const dx = x - st.lx, dz = z - st.lz;
+      const len = Math.hypot(dx, dz);
+      if (len < 0.015) continue;                      // not moved: wait
+      if (len > 2.5) {                                // a jump: break the strip
+        this._capSkid(st);
+        st.lx = x; st.lz = z; st.la = alpha; st.pts = 1;
+        continue;
       }
-      if (prev) { prev.x = x; prev.z = z; } else sk.prev[i] = { x, z };
+      if (!sliding && st.la <= 0) {                   // rolling: just follow
+        this._capSkid(st);
+        st.lx = x; st.lz = z; st.pts = 1;
+        continue;
+      }
+      // A new point. Decide the joint offset at the previous point: the
+      // plain normal if it starts the strip, otherwise the mitre between the
+      // incoming and outgoing directions, capped at twice the half-width so
+      // a sharp kink cannot spike.
+      const ux = dx / len, uz = dz / len;
+      let lox = -uz * SKID_HALF_W, loz = ux * SKID_HALF_W;
+      if (st.pts === 2) {
+        const bx = st.ux + ux, bz = st.uz + uz;
+        const bl = Math.hypot(bx, bz);
+        if (bl > 1e-3) {
+          const cosHalf = (bx * ux + bz * uz) / bl;
+          const s = SKID_HALF_W / Math.max(cosHalf, 0.5);
+          lox = (-bz / bl) * s; loz = (bx / bl) * s;
+        }
+        this._emitSkid(st.px, st.pz, st.pox, st.poz, st.pa, st.lx, st.lz, lox, loz, st.la);
+      }
+      st.px = st.lx; st.pz = st.lz; st.pox = lox; st.poz = loz; st.pa = st.la;
+      st.lx = x; st.lz = z; st.la = alpha; st.ux = ux; st.uz = uz; st.pts = 2;
+      // Rolled off: this point is the fade-out, so close the strip on it.
+      if (!sliding) this._capSkid(st);
     }
+  }
+
+  /** Emit the pending segment with a plain end, and drop back to one point. */
+  _capSkid(st) {
+    if (st.pts === 2) {
+      this._emitSkid(st.px, st.pz, st.pox, st.poz, st.pa,
+                     st.lx, st.lz, -st.uz * SKID_HALF_W, st.ux * SKID_HALF_W, st.la);
+      st.pts = 1;
+    }
+  }
+
+  /** One quad of the strip into the ring buffer: from a (offset ao) to b (offset bo). */
+  _emitSkid(ax, az, aox, aoz, aa, bx, bz, box, boz, ba) {
+    const gl = this.gl;
+    const sk = this.skid;
+    const v = sk.seg;
+    const put = (k, x, z, alpha, side) => {
+      v[k] = x; v[k + 1] = SKID_Y; v[k + 2] = z; v[k + 3] = alpha; v[k + 4] = side;
+    };
+    put(0, ax + aox, az + aoz, aa, 1); put(5, ax - aox, az - aoz, aa, -1); put(10, bx - box, bz - boz, ba, -1);
+    put(15, ax + aox, az + aoz, aa, 1); put(20, bx - box, bz - boz, ba, -1); put(25, bx + box, bz + boz, ba, 1);
+    gl.bindBuffer(gl.ARRAY_BUFFER, sk.buf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, sk.head * SKID_FLOATS * 4, v);
+    sk.head = (sk.head + 1) % SKID_MAX;
+    sk.n = Math.min(sk.n + 1, SKID_MAX);
   }
 
   drawSkids(eye) {
@@ -1700,7 +1990,10 @@ export class Renderer {
     gl.uniformMatrix4fv(u.uViewProj, false, this.viewProj);
     gl.uniform3f(u.uEye, eye[0], eye[1], eye[2]);
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // Multiplicative: dst *= (1 - alpha). The mark is a darkening of the
+    // surface it is on, which has already been lit, shadowed and fogged, so
+    // it inherits all three. The fragment's colour is irrelevant.
+    gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);
     // Six millimetres above the ribbon is nothing at 80 m; pull the marks
     // toward the camera in depth so they win the tie.
@@ -1793,11 +2086,8 @@ export class Renderer {
     const gl = this.gl;
     const uc = this.u.car;
     gl.useProgram(this.progCar);
-    // The dash screen left its texture on unit 0; the cascades go back.
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.shadow[0].tex);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.shadow[1].tex);
+    // Units 0 and 1 hold the cascades here: `drawDashScreen` puts the near
+    // one back the moment it is done with the panel.
     this.setCommon(uc, eye);
     gl.uniformMatrix4fv(uc.uViewProj, false, this.viewProj);
     gl.uniform1f(uc.uAlpha, GHOST_ALPHA);
@@ -1875,8 +2165,7 @@ export class Renderer {
       gl.viewport(0, 0, sm.size, sm.size);
       gl.clear(gl.DEPTH_BUFFER_BIT);
 
-      // Car: body and tyres. Rims sit inside the tyre silhouette and the
-      // steering wheel is inside the body, so neither adds anything here.
+      // Car: body and tyres in both cascades.
       gl.useProgram(this.progDepthCar);
       const ud = this.u.depthCar;
       gl.uniformMatrix4fv(ud.uViewProj, false, this.lightViewProj[i]);
@@ -1887,6 +2176,23 @@ export class Renderer {
         gl.uniformMatrix4fv(ud.uModel, false, this._wheelMats[k]);
         gl.bindVertexArray(this.car.tire.vao);
         this.drawArrays(gl.TRIANGLES, 0, this.car.tire.count);
+      }
+      // The cockpit's own casters -- steering wheel, dash case, rims -- in
+      // the NEAR cascade only. From the far cascade's 62 mm texels they are
+      // inside the body's and tyres' silhouettes anyway; from the driver's
+      // seat, the wheel's shadow on the tub and the spokes' on the inner
+      // sidewall are what give the interior any depth at all. Without them
+      // the cockpit was lit flat, every surface the same sunlit value.
+      if (i === 0) {
+        const cast = (mesh, model) => {
+          if (!mesh) return;
+          gl.uniformMatrix4fv(ud.uModel, false, model);
+          gl.bindVertexArray(mesh.vao);
+          this.drawArrays(gl.TRIANGLES, 0, mesh.count);
+        };
+        cast(this.car.steeringWheel, this.steerModel);
+        cast(this.car.dashCase, this.dashModel);
+        for (let k = 0; k < 4; k++) cast(this.car.rim, this._wheelMats[k]);
       }
       // The ghost throws a shadow too, or it reads as a hologram.
       if (this._ghostOn) {
@@ -1915,7 +2221,6 @@ export class Renderer {
   /** The car itself: body, four wheels that steer and spin, steering wheel. */
   drawCar(s, eye) {
     const gl = this.gl;
-    const T = this._t;
     const prog = this.progCar;
     const uc = this.u.car;
 
@@ -1947,8 +2252,35 @@ export class Renderer {
     }
     gl.frontFace(gl.CCW);
 
-    // Steering wheel: its own frame has the rotation axis on +Z, so tilt that
-    // frame onto the column before spinning it.
+    // The dash FIRST, then the wheel, both on the frames `placeCockpit` set
+    // up before the shadow pass. Drawn in that order so the depth buffer
+    // does the occluding; nothing here needs to know where the grips are.
+    if (this.car.dashCase) part(this.car.dashCase, this.dashModel, null, MAT.dash);
+    part(this.car.steeringWheel, this.steerModel, null, MAT.wheel);
+
+    // The screen last of the car's parts: it is the only thing drawn with a
+    // different program, and switching back and forth per object costs more
+    // than doing it once.
+    this.drawDashScreen();
+  }
+
+  /**
+   * The steering wheel's and the dash's model matrices for this frame.
+   *
+   * Once per frame, BEFORE the shadow pass, because both are drawn into the
+   * near cascade and then again in the main pass, and the two must agree or
+   * the wheel's shadow would lag its spin by a frame.
+   *
+   * The wheel's own frame has the rotation axis on +Z, so the column basis
+   * tilts that frame onto the column before the spin is applied. The dash
+   * is bolted to the column shroud, not to the wheel, so it shares the
+   * column's frame and its tilt but NOT its spin -- which is the whole
+   * reason a grip sweeps across it at 90 degrees of lock instead of the
+   * dash swinging with the driver's hands.
+   */
+  placeCockpit(s) {
+    const T = this._t;
+    const w = s.wheels;
     const tilt = GEO.steerTiltRad;
     const basis = T[3];
     basis.set([
@@ -1958,38 +2290,20 @@ export class Renderer {
       0, 0, 0, 1,
     ]);
     const sc = this.carModel?.steerCentre ?? GEO.steerCentre;
-
-    // The dash, FIRST, and without the wheel's rotation.
-    //
-    // It is bolted to the column shroud, not to the wheel, so it shares the
-    // column's frame and its tilt but not its spin -- which is the whole
-    // reason a grip sweeps across it at 90 degrees of lock instead of the
-    // dash swinging with the driver's hands. Drawn before the wheel so the
-    // depth buffer does the occluding; nothing here needs to know where the
-    // grips are.
     const dc = GEO.dashCentre;
-    this.chain(this.model, [
+    this.chain(this.dashModel, [
       this.chassis,
       translation(T[0], sc[0], sc[1], sc[2]),
       basis,
       translation(T[1], dc[0], dc[1], dc[2]),
       rotX(T[2], GEO.dashTiltRad),
     ]);
-    this.dashModel.set(this.model);
-    part(this.car.dashCase, this.model, null, MAT.dash);
-
-    this.chain(this.model, [
+    this.chain(this.steerModel, [
       this.chassis,
       translation(T[0], sc[0], sc[1], sc[2]),
       basis,
       rotZ(T[1], -w.steerRad * (w.steerRatio ?? GEO.steeringRatio)),
     ]);
-    part(this.car.steeringWheel, this.model, null, MAT.wheel);
-
-    // The screen last of the car's parts: it is the only thing drawn with a
-    // different program, and switching back and forth per object costs more
-    // than doing it once.
-    this.drawDashScreen();
   }
 
   /**
@@ -1997,9 +2311,9 @@ export class Renderer {
    *
    * Its own program and its own VAO, so it is one state change and six
    * vertices. The texture is only uploaded when the panel has actually been
-   * redrawn -- `updateDashPanel` sets the flag -- because `texImage2D` from a
-   * canvas is a GPU copy of a megabyte and doing it on a frame where nothing
-   * changed is pure waste.
+   * redrawn -- `updateDashPanel` sets the flag -- because an upload from a
+   * canvas is a GPU copy of a megabyte (plus its mip chain) and doing it on
+   * a frame where nothing changed is pure waste.
    */
   drawDashScreen() {
     const gl = this.gl;
@@ -2021,7 +2335,11 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, p.tex);
     if (p.dirty) {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, p.canvas);
+      // Into the storage `makePanelTexture` allocated, not a texImage2D that
+      // would reallocate it; then the mip chain, which the minified panel
+      // is sampled from far more than level 0.
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, p.w, p.h, gl.RGBA, gl.UNSIGNED_BYTE, p.canvas);
+      gl.generateMipmap(gl.TEXTURE_2D);
       p.dirty = false;
     }
     gl.uniform1i(u.uPanel, 0);
@@ -2034,6 +2352,11 @@ export class Renderer {
     gl.bindVertexArray(q.vao);
     gl.drawArrays(gl.TRIANGLES, 0, q.count);
     gl.bindVertexArray(null);
+
+    // Unit 0 belongs to the near shadow cascade for every lit program; put
+    // it back here, where the panel was borrowed, so no later pass (the sky,
+    // the ghost, whatever is added next) has to remember to.
+    gl.bindTexture(gl.TEXTURE_2D, this.shadow[0].tex);
   }
 
   _rimOverride(fade) {
@@ -2059,7 +2382,7 @@ export class Renderer {
       d[o + 1] = 0;
       d[o + 2] = -c.y;
       d[o + 3] = prog;
-      d[o + 4] = 1 - 0.28 * prog;
+      d[o + 4] = 1;   // a cone: gets the reflective collar
       d[o + 5] = c.downDir ?? 0;
     }
     this.uploadInstances(mesh, n);
@@ -2074,7 +2397,7 @@ export class Renderer {
       d[o + 1] = 0;
       d[o + 2] = -list[i].y;
       d[o + 3] = 0;
-      d[o + 4] = 1;
+      d[o + 4] = 0;   // not a cone: no collar
       d[o + 5] = 0;
     }
     this.uploadInstances(mesh, n);

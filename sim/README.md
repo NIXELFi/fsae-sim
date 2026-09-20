@@ -240,7 +240,55 @@ is where the car's corners actually are.
   spinning lays a mark on the surface that fades with distance; a replay
   lays them from the log; a new course starts clean.
 - **The replay ghost is translucent** and always drawn, so a lap that runs
-  within a car's length of yours still shows through.
+  within a car's length of yours still shows through. The sky is drawn before
+  it, so a ghost against the sky is no longer erased by it.
+- **Colours are authored in display space** (`carmesh.js` says so at the top):
+  the shaders decode them to linear before lighting. A slick is 0.175 on that
+  scale, not the 0.105 it was, which had been decoding to a black hole; carbon,
+  grips and the dash case were lifted the same way.
+- **Curved surfaces are smooth-shaded.** Tyres, rims, hoops, grips and the tub
+  carry analytic normals; boxes, plates and wings keep their hard edges.
+- **The wheel, dash and rims cast shadows** into the cockpit from the near
+  shadow cascade; the shadow bias was 45 mm along the sun, which floated every
+  cone, and is now 7 mm.
+- **The asphalt does not sparkle.** Every noise octave fades by its own
+  screen footprint rather than by distance, so nothing is sampled past
+  Nyquist; the hash is an integer mix that stays stable a kilometre out at
+  MIS; the stall lines are one-way bays with drive aisles; and the surface
+  has a gentle relief normal so it reads as a pour, not a plastic sheet.
+
+### Frame pacing
+
+The renderer takes about 1.5 ms of GPU time and under 1.5 ms of JavaScript
+per 144 Hz frame on an RTX 4070 laptop, which turned out to be the cause of
+the stutter rather than the cure for it. A GeForce that is 15-20 % busy
+drops to its lowest clocks (P4, 800-1000 MHz on that machine) and has to
+ramp for every frame; about one frame in forty then arrives 7-25 ms late.
+A page that only clears its canvas, loaded into the simulator's own window,
+hitched at exactly the same rate, so it is not something in the renderer.
+
+**GPU clock hold** (`render/gpuHold.js`, on the pause card, on by default on
+the desktop build) pads each frame with a fragment-heavy pass into a small
+offscreen target so that the whole frame lands on about 3 ms of GPU time,
+measured with a timer query and adjusted every dozen frames. As the real
+rendering gets heavier the padding shrinks to nothing on its own. Measured
+on the same machine it holds the card at 2300 MHz in P0 and cuts the late
+frames by two thirds; the rest are the compositor's. The same effect is
+available from the NVIDIA control panel by setting *Power management mode*
+to *Prefer maximum performance* for `msedgewebview2.exe`, and a driver newer
+than the 2023 one that machine was running is worth having either way.
+
+The other per-frame costs that were found and removed in the same pass: the
+shadow pass looked up the cones near the car through 2401 string keys every
+frame (55 % of all allocation), the minimap redrew the whole course and every
+cone every frame (25 %), the controls panel ran two animation loops into
+hidden DOM while driving (a forced layout per frame), the dash texture was
+reallocated at 30 Hz with no mipmaps, and the rig thread re-enumerated
+DirectInput on its own 1 kHz loop every two seconds whenever no wheel was
+attached (a 600 ms stall). Allocation while driving is down from 22 MB/s to
+3.5 MB/s. The drawn pose of the native car is also dead-reckoned forward by
+the snapshot's age using its own body velocities, so a 1 kHz snapshot taken
+at an arbitrary phase no longer judders at 144 Hz.
 
 ## Sound
 

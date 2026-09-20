@@ -84,6 +84,30 @@ export class NativeCar {
     this._shiftDown = false;
     this._inflight = false;
     this._servo = null;
+    /**
+     * When the pose currently in X/Y/psi arrived, `performance.now()` ms,
+     * and whether the rig was being HELD when the last frame went out.
+     *
+     * The rig copies its snapshot out at whatever phase of the 1 kHz loop
+     * the IPC lands on, and the page draws it a frame later: a +-0.5 ms tick
+     * quantisation plus 0.2-2 ms of scheduling jitter on top of a 7 ms frame,
+     * which at 25 m/s is a 30% frame-to-frame irregularity in the apparent
+     * motion -- visible micro-stutter on close cones. `Game.render` uses
+     * this stamp to dead-reckon the DRAWN pose forward by the snapshot's
+     * age; the raw state stays what the rig said, for the timing, the log
+     * and the telemetry. Zero until a snapshot has been adopted, and reset
+     * to zero by `respawn` so nothing extrapolates a pose the rig has not
+     * confirmed yet.
+     */
+    this.appliedAt = 0;
+    this.held = false;
+    /** The frame message, reused: one IPC send a frame, same shape every time. */
+    this._msg = {
+      steer: 0, throttle: 0, brake: 0, rimDeg: 0, halfLockDeg: 179,
+      traction: false, abs: false, autoShift: false, ffbEnabled: true,
+      paused: false, offTrack: false, coneHits: 0,
+      shiftUp: false, shiftDown: false, launch: false,
+    };
     this.refresh();
   }
 
@@ -209,33 +233,18 @@ export class NativeCar {
    * the rig keeps its own clock -- and kept for interface parity.
    */
   step(_dt, input) {
-    this.exchange({ ...input, paused: false });
+    this.held = false;
+    this.exchange(input, false);
   }
 
   /** While the menu, pause or an editor is up: keep the rig informed and still. */
   hold() {
-    this.exchange({ steer: 0, throttle: 0, brake: 0, paused: true });
+    this.held = true;
+    this.exchange(HOLD_INPUT, true);
   }
 
-  exchange(input) {
+  exchange(input, paused) {
     const f = this.frame;
-    const msg = {
-      steer: input.steer ?? 0,
-      throttle: input.throttle ?? 0,
-      brake: input.brake ?? 0,
-      rimDeg: f.rimDeg,
-      halfLockDeg: f.halfLockDeg,
-      traction: !!f.traction,
-      abs: !!f.abs,
-      autoShift: !!f.autoShift,
-      ffbEnabled: f.ffbEnabled !== false,
-      paused: !!input.paused,
-      offTrack: !!f.offTrack,
-      coneHits: f.coneHits | 0,
-      shiftUp: this._shiftUp,
-      shiftDown: this._shiftDown,
-      launch: !!f.launch,
-    };
     // One exchange in flight at a time. If the previous one has not come
     // back yet, this frame's continuous inputs are simply superseded by the
     // next frame's -- but the EVENTS (a shift, a cone) must not be: they
@@ -243,6 +252,24 @@ export class NativeCar {
     // before this check silently ate most gear changes, because a 60 Hz
     // frame and an IPC round trip are about the same length.
     if (this._inflight) return;
+    // The one message object, filled in place: `invoke` serialises it
+    // synchronously, so nothing holds on to it after this call.
+    const msg = this._msg;
+    msg.steer = input.steer ?? 0;
+    msg.throttle = input.throttle ?? 0;
+    msg.brake = input.brake ?? 0;
+    msg.rimDeg = f.rimDeg;
+    msg.halfLockDeg = f.halfLockDeg;
+    msg.traction = !!f.traction;
+    msg.abs = !!f.abs;
+    msg.autoShift = !!f.autoShift;
+    msg.ffbEnabled = f.ffbEnabled !== false;
+    msg.paused = !!paused;
+    msg.offTrack = !!f.offTrack;
+    msg.coneHits = f.coneHits | 0;
+    msg.shiftUp = this._shiftUp;
+    msg.shiftDown = this._shiftDown;
+    msg.launch = !!f.launch;
     this._shiftUp = false;
     this._shiftDown = false;
     f.coneHits = 0;
@@ -272,6 +299,7 @@ export class NativeCar {
     const st = s.state, t = s.tel;
     this.X = st.x; this.Y = st.y; this.psi = st.psi;
     this.u = st.u; this.v = st.v; this.r = st.r;
+    this.appliedAt = performance.now();
     this.wF = st.wF; this.wR = st.wR;
     this.delta = st.delta;
     this.ax = t.axG * 9.81; this.ay = t.ayG * 9.81;
@@ -280,7 +308,10 @@ export class NativeCar {
     tel.rollDeg = t.ayG * this.p.rollGradientDegG;
     tel.pitchDeg = t.axG * this.p.pitchGradientDegG;
     this.applied = s.applied;
-    this.ffb = { ...s.ffb, kickNm: 0 };
+    // Into the one ffb record rather than a fresh spread a frame; the
+    // settings panel reads it live. The native mix has no cone kick.
+    Object.assign(this.ffb, s.ffb);
+    this.ffb.kickNm = 0;
     this.boundaryHit = s.boundaryHit;
     this.moneyShiftBlocked = s.moneyShiftBlocked;
     this.pt.adopt(s.pt);
@@ -294,6 +325,7 @@ export class NativeCar {
     this.wF = this.wR = speed / this.p.tireRadiusM;
     this.delta = 0;
     this.telemetry = blankTelemetry();
+    this.appliedAt = 0;
     // Everything the rig sends back until it has applied this is from the
     // drive we just ended. 400 ms is many round trips at any frame rate.
     this._respawnSeq = (this._respawnSeq + 1) >>> 0;
@@ -301,6 +333,9 @@ export class NativeCar {
     rigNative.command({ kind: "respawn", x, y, psi, speed, seq: this._respawnSeq });
   }
 }
+
+/** What `hold` sends: no driver input, and the rig told to stand still. */
+const HOLD_INPUT = Object.freeze({ steer: 0, throttle: 0, brake: 0 });
 
 /**
  * The `Powertrain` surface the game uses, backed by the rig's state and the

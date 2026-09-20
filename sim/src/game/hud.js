@@ -97,11 +97,58 @@ function savedDensity() {
   }
 }
 
+/**
+ * Font shorthand for a size, cached.
+ *
+ * The dash sets `ctx.font` ~30 times a frame and every one of those used to
+ * be a fresh template literal that the canvas then re-parsed. The sizes are
+ * fixed fractions of a dash that only changes size on a window resize, so the
+ * strings repeat exactly; keyed on the size to a tenth of a pixel (which is
+ * what `toFixed(1)` printed anyway) and the weight, the same string comes
+ * back and the canvas's own font cache hits too.
+ */
+const FONT_CACHE = new Map();
+function font(px, bold = false) {
+  const key = Math.round(px * 10) * 2 + (bold ? 1 : 0);
+  let f = FONT_CACHE.get(key);
+  if (!f) {
+    f = `${bold ? "600 " : ""}${(Math.round(px * 10) / 10).toFixed(1)}px ui-monospace, monospace`;
+    FONT_CACHE.set(key, f);
+  }
+  return f;
+}
+
+/**
+ * Per-context caches for things a 2D canvas is slow to make every frame: the
+ * rpm-bar gradient (one per bar width) and the lit-LED glow sprites. Keyed on
+ * the context because the same `drawDash` paints the screen overlay AND the
+ * texture on the car's own panel, at different sizes and transforms, and a
+ * gradient or a bitmap made for one must not be reused for the other.
+ */
+const CTX_CACHE = new WeakMap();
+function ctxCache(ctx) {
+  let c = CTX_CACHE.get(ctx);
+  if (!c) CTX_CACHE.set(ctx, (c = { grad: null, leds: null }));
+  return c;
+}
+
+/** The three LED colours as shipped: four green, three amber, three red. */
+const LED_COLOURS = ["#31d158", "#ffd60a", "#ff453a"];
+
+/** How far (user units) the glow sprite pads around the LED body. The blur
+ *  is `h` device pixels, i.e. at most `h` user units at any scale >= 1. */
+const LED_GLOW_PAD = 2;
+
 export class Hud {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
     this.minimapCache = null;
+    /** User-unit -> device-pixel scale of whatever context `drawDash` is
+     *  painting into: the overlay's dpr x ui factor inside `draw`, 1 for the
+     *  car's panel texture (an untransformed context). The glow sprites are
+     *  rasterised at this scale so they stay as crisp as a direct fill. */
+    this._ctxScale = 1;
     this.density = savedDensity();
     /** Set by the game each frame from the camera; see `draw`. */
     this.overlayDash = true;
@@ -137,23 +184,46 @@ export class Hud {
 
   resize() {
     const dpr = Math.min(devicePixelRatio || 1, 2);
-    const cw = this.canvas.clientWidth > 0 ? this.canvas.clientWidth : 1280;
-    const ch = this.canvas.clientHeight > 0 ? this.canvas.clientHeight : 720;
+    // The CSS size comes from a ResizeObserver where there is one, so that
+    // this -- called every frame -- never reads `clientWidth`, which forces a
+    // synchronous style-and-layout pass whenever anything has dirtied the
+    // document since the last frame.
+    const css = this._cssSize ?? this.measure();
+    const cw = css.w > 0 ? css.w : 1280;
+    const ch = css.h > 0 ? css.h : 720;
     const w = Math.max(1, Math.floor(cw * dpr));
     const h = Math.max(1, Math.floor(ch * dpr));
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;
       this.canvas.height = h;
       this.minimapCache = null;
+      this._cleared = false;
     }
     this.dpr = dpr;
     return { w, h };
   }
 
+  /** The canvas's CSS box, read from layout. Once per resize, not per frame. */
+  measure() {
+    const size = { w: this.canvas.clientWidth, h: this.canvas.clientHeight };
+    if (typeof ResizeObserver !== "undefined" && !this._ro) {
+      this._ro = new ResizeObserver(() => {
+        this._cssSize = { w: this.canvas.clientWidth, h: this.canvas.clientHeight };
+      });
+      this._ro.observe(this.canvas);
+      this._cssSize = size;
+    }
+    return size;
+  }
+
   /** Blank the overlay (the launch screen shows the scene without a HUD). */
   clear() {
     const { w, h } = this.resize();
+    // Every menu and replay frame calls this; clearing a canvas that is
+    // already clear is still a full-screen fill, so do it once.
+    if (this._cleared) return;
     this.ctx.clearRect(0, 0, w, h);
+    this._cleared = true;
   }
 
   draw(s) {
@@ -163,6 +233,7 @@ export class Hud {
     const { w, h } = this.resize();
     const ctx = this.ctx;
     ctx.clearRect(0, 0, w, h);
+    this._cleared = false;
     ctx.save();
     // Work in CSS pixels regardless of DPR -- and scale the whole overlay
     // with the window's height above 900 px. The dash already sized itself
@@ -173,6 +244,7 @@ export class Hud {
     const ui = Math.min(1.9, Math.max(1, cssH / 900));
     this.ui = ui;
     ctx.scale(this.dpr * ui, this.dpr * ui);
+    this._ctxScale = this.dpr * ui;
     const W = w / (this.dpr * ui), H = h / (this.dpr * ui);
 
     const show = SHOWS[this.density] ?? SHOWS.clean;
@@ -212,6 +284,8 @@ export class Hud {
     if (s.paused) this.paused(ctx, W, H);
 
     ctx.restore();
+    // Back to "untransformed" for the panel-texture call that follows.
+    this._ctxScale = 1;
   }
 
   // ------------------------------------------------------------ components ---
@@ -234,7 +308,11 @@ export class Hud {
   dash(ctx, W, H, s) {
     const w = Math.min(W * 0.30, 400);
     const h = w / DASH_UNIT_ASPECT;
-    this.drawDash(ctx, W / 2 - w / 2, H - h - 14, w, h, s);
+    // Centred where the car's own dash sits when the driver is in the
+    // cockpit; from an outside camera the centre of the bottom edge is
+    // exactly where the car is, so the unit moves to the corner there.
+    const x = this.overlayDash ? W - w - 14 : W / 2 - w / 2;
+    this.drawDash(ctx, x, H - h - 14, w, h, s);
   }
 
   /**
@@ -317,7 +395,7 @@ export class Hud {
       ctx.fill();
     }
     ctx.fillStyle = "rgba(255,255,255,0.42)";
-    ctx.font = `${(h * 0.055).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.055);
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     const cx = x + w / 2;
@@ -340,22 +418,57 @@ export class Hud {
     const frac = clamp((s.rpm - from) / Math.max(1, s.revLimit - from), 0, 1);
     const lit = Math.floor(frac * n + 1e-6);
     const flash = s.rpm >= s.revLimit - 120 && Math.floor(performance.now() / 70) % 2 === 0;
+    // A lit LED is a pre-rendered sprite: its body plus the glow. The glow
+    // used to be `ctx.shadowBlur` on a live fill, which is a separate Gaussian
+    // pass per LED per frame -- up to ten of them at 144 Hz, and again for the
+    // panel texture. Rasterised once per size, it is one `drawImage` each.
+    const sprites = this.ledSprites(ctx, bw, h);
+    const pad = h * LED_GLOW_PAD;
     for (let i = 0; i < n; i++) {
       const on = flash || i < lit;
-      const colour = i < 4 ? "#31d158" : i < 7 ? "#ffd60a" : "#ff453a";
-      ctx.fillStyle = on ? colour : "rgba(255,255,255,0.08)";
-      roundRect(ctx, x + i * (bw + gap), y, bw, h, h * 0.32);
-      ctx.fill();
+      const lx = x + i * (bw + gap);
       if (on) {
-        ctx.save();
-        ctx.globalAlpha = 0.45;
-        ctx.shadowColor = colour;
-        ctx.shadowBlur = h;
+        ctx.drawImage(sprites[i < 4 ? 0 : i < 7 ? 1 : 2], lx - pad, y - pad, bw + pad * 2, h + pad * 2);
+      } else {
+        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        roundRect(ctx, lx, y, bw, h, h * 0.32);
         ctx.fill();
-        ctx.restore();
       }
     }
     return h;
+  }
+
+  /**
+   * The three lit-LED sprites (green, amber, red) for a body of `bw` x `h`
+   * user units on this context, drawn exactly the way the live version was:
+   * the body, then the body again at 0.45 alpha with an `h`-pixel shadow of
+   * its own colour. The sprite is rasterised at the context's own scale so
+   * that -- shadow blur being in device pixels, not user units -- the glow is
+   * the same size it was.
+   */
+  ledSprites(ctx, bw, h) {
+    const cache = ctxCache(ctx);
+    const k = this._ctxScale;
+    const c = cache.leds;
+    if (c && c.bw === bw && c.h === h && c.k === k) return c.sprites;
+    const pad = h * LED_GLOW_PAD;
+    const sprites = LED_COLOURS.map((colour) => {
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1, Math.ceil((bw + pad * 2) * k));
+      cv.height = Math.max(1, Math.ceil((h + pad * 2) * k));
+      const g = cv.getContext("2d");
+      g.scale(k, k);
+      g.fillStyle = colour;
+      roundRect(g, pad, pad, bw, h, h * 0.32);
+      g.fill();
+      g.globalAlpha = 0.45;
+      g.shadowColor = colour;
+      g.shadowBlur = h;
+      g.fill();
+      return cv;
+    });
+    cache.leds = { bw, h, k, sprites };
+    return sprites;
   }
 
   /**
@@ -368,13 +481,22 @@ export class Hud {
    * backlight leaves it, so you can see where the next colour begins.
    */
   dashRpmBar(ctx, x, y, w, h, s) {
-    const grad = ctx.createLinearGradient(x, 0, x + w, 0);
-    grad.addColorStop(0.00, "#1f6fff");
-    grad.addColorStop(0.20, "#00c8ff");
-    grad.addColorStop(0.42, "#31d158");
-    grad.addColorStop(0.64, "#ffd60a");
-    grad.addColorStop(0.84, "#ff7a1a");
-    grad.addColorStop(1.00, "#ff2fd0");
+    // The gradient is fixed for a given bar position and width, which only
+    // change with the window, so it is made once per context rather than
+    // per frame (a CanvasGradient plus six stops is a handful of allocations
+    // and a paint-shader rebuild every time).
+    const cache = ctxCache(ctx);
+    let grad = cache.grad;
+    if (!grad || cache.gradX !== x || cache.gradW !== w) {
+      grad = ctx.createLinearGradient(x, 0, x + w, 0);
+      grad.addColorStop(0.00, "#1f6fff");
+      grad.addColorStop(0.20, "#00c8ff");
+      grad.addColorStop(0.42, "#31d158");
+      grad.addColorStop(0.64, "#ffd60a");
+      grad.addColorStop(0.84, "#ff7a1a");
+      grad.addColorStop(1.00, "#ff2fd0");
+      cache.grad = grad; cache.gradX = x; cache.gradW = w;
+    }
     ctx.save();
     roundRect(ctx, x, y, w, h, h * 0.16);
     ctx.clip();
@@ -393,7 +515,7 @@ export class Hud {
     const limit = Math.max(1, s.revLimit);
     ctx.textBaseline = "top";
     ctx.textAlign = "center";
-    ctx.font = `${(h * 0.80).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.80);
     const step = limit > 16000 ? 4000 : 2000;
     for (let rpm = 0; rpm <= limit + 1; rpm += step) {
       ctx.fillStyle = "rgba(255,255,255,0.45)";
@@ -445,30 +567,30 @@ export class Hud {
     // readouts on the real screen, sitting either side of the gear's shoulder.
     const shoulder = w * 0.155;
     ctx.fillStyle = "#31d158";
-    ctx.font = `600 ${(h * 0.20).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.20, true);
     ctx.fillText(String(s.lap ?? 0), cx - shoulder, y + h * 0.20);
     ctx.fillStyle = "#ff2fd0";
-    ctx.font = `600 ${(h * 0.175).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.175, true);
     ctx.fillText(s.lapTimeText, cx + shoulder, y + h * 0.20);
 
     ctx.fillStyle = "rgba(255,255,255,0.34)";
-    ctx.font = `${(h * 0.070).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.070);
     ctx.fillText("LAP", cx - shoulder, y + h * 0.285);
     ctx.fillText("LAP TIME", cx + shoulder, y + h * 0.285);
 
     // The gear, big enough to be read without looking straight at it.
     ctx.fillStyle = s.shifting ? "rgba(255,255,255,0.30)" : "#ffffff";
-    ctx.font = `600 ${(h * 0.60).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.60, true);
     ctx.fillText(gearText(s), cx, y + h * 0.83);
 
     // rpm under it, small: the bar is the primary read.
     ctx.fillStyle = "rgba(255,255,255,0.55)";
-    ctx.font = `${(h * 0.095).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.095);
     ctx.fillText(String(Math.round(s.rpm)), cx, y + h * 0.975);
 
     if (s.tractionControl) {
       ctx.fillStyle = "#31d158";
-      ctx.font = `600 ${(h * 0.075).toFixed(1)}px ui-monospace, monospace`;
+      ctx.font = font(h * 0.075, true);
       ctx.fillText("TC", cx + w * 0.30, y + h * 0.975);
     }
   }
@@ -513,10 +635,10 @@ export class Hud {
       ctx.fill();
       ctx.fillStyle = colour;
       ctx.textAlign = "left";
-      ctx.font = `600 ${(h * 0.42).toFixed(1)}px ui-monospace, monospace`;
+      ctx.font = font(h * 0.42, true);
       ctx.fillText(`S${i + 1}`, cx + h * 0.28, y + h * 0.52);
       ctx.textAlign = "right";
-      ctx.font = `600 ${(h * 0.50).toFixed(1)}px ui-monospace, monospace`;
+      ctx.font = font(h * 0.50, true);
       ctx.fillText(text, cx + cw - h * 0.28, y + h * 0.54);
     }
     return h;
@@ -528,31 +650,36 @@ export class Hud {
     ctx.textAlign = align === "left" ? "left" : "right";
     ctx.textBaseline = "alphabetic";
     ctx.fillStyle = colour;
-    ctx.font = `600 ${(h * 0.52).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.52, true);
     ctx.fillText(value, edge, y + h * 0.54);
     ctx.fillStyle = "rgba(255,255,255,0.34)";
-    ctx.font = `${(h * 0.185).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.185);
     ctx.fillText(unit ? `${label}  ${unit}` : label, edge, y + h * 0.80);
   }
 
   /** Penalties, the course, and the clock -- the real unit's status strip. */
   dashFooter(ctx, x, y, w, h, s) {
-    ctx.font = `${(h * 0.52).toFixed(1)}px ui-monospace, monospace`;
+    ctx.font = font(h * 0.52);
     ctx.textBaseline = "middle";
     const cy = y + h * 0.55;
     const pen = (s.cones ?? 0) + (s.offCourse ?? 0);
 
     ctx.textAlign = "left";
     ctx.fillStyle = pen > 0 ? "#ff453a" : "#31d158";
-    ctx.fillText(
-      s.offCourse > 0
-        ? `OFF COURSE - NO TIME  (${s.cones}C ${s.offCourse}OFF)`
-        : pen > 0 ? `${s.cones}C +${(s.penaltyS ?? 0).toFixed(0)}s` : "CLEAN",
-      x, cy,
-    );
-    ctx.textAlign = "center";
+    const status = s.offCourse > 0
+      ? `OFF COURSE - NO TIME  (${s.cones}C ${s.offCourse}OFF)`
+      : pen > 0 ? `${s.cones}C +${(s.penaltyS ?? 0).toFixed(0)}s` : "CLEAN";
+    ctx.fillText(status, x, cy);
+    // The course name sits in the middle only while the status is short
+    // enough to leave it room; the off-course line used to be printed
+    // straight through it.
+    const name = String(s.trackName ?? "").toUpperCase();
+    if (ctx.measureText(status).width + ctx.measureText(name).width / 2 < w / 2 - h * 0.4) {
+      ctx.textAlign = "center";
+      ctx.fillStyle = "rgba(255,255,255,0.42)";
+      ctx.fillText(name, x + w / 2, cy);
+    }
     ctx.fillStyle = "rgba(255,255,255,0.42)";
-    ctx.fillText(String(s.trackName ?? "").toUpperCase(), x + w / 2, cy);
     ctx.textAlign = "right";
     ctx.fillText(clockText(), x + w, cy);
   }
@@ -892,30 +1019,87 @@ export class Hud {
     ctx.fillText(`+${s.penaltyS.toFixed(1)}s`, x + w - 12, y + 18);
   }
 
+  /**
+   * The course in the corner.
+   *
+   * Everything but the car is static -- the panel, the centreline (1062
+   * `lineTo`s on the endurance course), the cones (586 `fillRect`s, each
+   * with its own `fillStyle` string), the sector ticks -- and it was all
+   * redrawn every frame; a quarter of the page's garbage and a good slice of
+   * its canvas time. It is now painted once into an offscreen layer and
+   * blitted, and only the car triangle is drawn live. The layer is remade
+   * when the track, the box size, the device scale, or the set of struck
+   * cones changes: a struck cone dims, and strikes are a few per run, so
+   * repainting the layer on each one is the cheap way to keep them dimmed.
+   */
   minimap(ctx, H, s) {
     const size = 178, x = 18, y = H - size - 18;
-    panel(ctx, x, y, size, size, 10);
-
     const t = s.track;
-    if (!this.minimapCache || this.minimapCache.track !== t) {
-      // Fit the course into the box once; only the car dot moves per frame.
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const [px, py] of t.center) {
-        minX = Math.min(minX, px); maxX = Math.max(maxX, px);
-        minY = Math.min(minY, py); maxY = Math.max(maxY, py);
-      }
-      const pad = 16;
-      const scale = Math.min((size - pad * 2) / (maxX - minX), (size - pad * 2) / (maxY - minY));
-      this.minimapCache = {
-        track: t, scale,
-        cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
-      };
+    const k = this._ctxScale;
+
+    // How many cones are down right now: the layer is keyed on it. A plain
+    // loop over the cones is a microsecond and allocates nothing; the track
+    // resets them all to up on a restart, which this catches the same way.
+    let downCount = 0;
+    const cones = t.cones;
+    if (cones) for (let i = 0; i < cones.length; i++) if (cones[i].down) downCount++;
+
+    let m = this.minimapCache;
+    if (!m || m.track !== t || m.size !== size || m.k !== k || m.downCount !== downCount) {
+      m = this.minimapCache = this.minimapLayer(t, size, k, downCount);
     }
-    const m = this.minimapCache;
+    // The layer carries a margin so the panel's hairline border (half a
+    // pixel outside the box) survives the crop.
+    const mg = m.margin;
+    ctx.drawImage(m.canvas, x - mg, y - mg, size + mg * 2, size + mg * 2);
+
+    // car
+    const cx = x + size / 2 + (s.carX - m.cx) * m.scale;
+    const cy = y + size / 2 - (s.carY - m.cy) * m.scale;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-s.carPsi + Math.PI / 2);
+    ctx.fillStyle = MAROON;
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0, -6); ctx.lineTo(4, 5); ctx.lineTo(-4, 5);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * The static minimap layer: panel, course, cones, sector ticks and the
+   * start/finish mark, for a `size` px box at device scale `k`. Drawn in the
+   * layer's own coordinates with the box at (margin, margin), exactly as the
+   * live version drew it at (x, y).
+   */
+  minimapLayer(t, size, k, downCount) {
+    // Fit the course into the box.
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const [px, py] of t.center) {
+      minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+      minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+    }
+    const pad = 16;
+    const scale = Math.min((size - pad * 2) / (maxX - minX), (size - pad * 2) / (maxY - minY));
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+
+    const margin = 2;
+    const full = size + margin * 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.ceil(full * k));
+    canvas.height = Math.max(1, Math.ceil(full * k));
+    const ctx = canvas.getContext("2d");
+    ctx.scale(k, k);
+    const x = margin, y = margin;
     const toPx = (px, py) => [
-      x + size / 2 + (px - m.cx) * m.scale,
-      y + size / 2 - (py - m.cy) * m.scale,
+      x + size / 2 + (px - cx) * scale,
+      y + size / 2 - (py - cy) * scale,
     ];
+
+    panel(ctx, x, y, size, size, 10);
 
     ctx.beginPath();
     for (let i = 0; i < t.center.length; i += 2) {
@@ -929,7 +1113,7 @@ export class Hud {
 
     // The cones, because on an autocross they ARE the course: the centreline
     // says where the road goes, the cones say where the gates are. Struck
-    // ones dim. Drawn straight; a few hundred rectangles is nothing.
+    // ones dim.
     if (t.cones?.length) {
       for (const c of t.cones) {
         const [px, py] = toPx(c.x, c.y);
@@ -959,19 +1143,7 @@ export class Hud {
     ctx.fillStyle = GOLD;
     ctx.fillRect(sx - 3, sy - 3, 6, 6);
 
-    // car
-    const [cx, cy] = toPx(s.carX, s.carY);
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(-s.carPsi + Math.PI / 2);
-    ctx.fillStyle = MAROON;
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.moveTo(0, -6); ctx.lineTo(4, 5); ctx.lineTo(-4, 5);
-    ctx.closePath();
-    ctx.fill(); ctx.stroke();
-    ctx.restore();
+    return { track: t, size, k, downCount, margin, scale, cx, cy, canvas };
   }
 
   gg(ctx, W, H, s) {
@@ -1015,7 +1187,10 @@ export class Hud {
   balance(ctx, W, H, s) {
     // Which axle is closer to its limit. This is the bicycle model's own
     // utilisation, not a guess, so it reads like a real balance trace.
-    const w = 132, x = W - w - 18, y = H - 132 - 18 - 34;
+    // Above the overlay dash when that sits in the corner (outside cameras),
+    // else at its old height beside the minimap's line.
+    const dashH = this.overlayDash ? Math.min(W * 0.30, 400) / DASH_UNIT_ASPECT + 14 : 0;
+    const w = 132, x = W - w - 18, y = this.overlayDash ? H - dashH - 26 - 12 : H - 132 - 18 - 34;
     panel(ctx, x, y, w, 26, 8);
     const cx = x + w / 2;
     ctx.fillStyle = "rgba(255,255,255,0.18)";

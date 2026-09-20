@@ -10,6 +10,7 @@ import { BicycleModel } from "./vehicle/bicycle.js";
 import { loadTrack, TRACKS } from "./track/track.js";
 import { loadVenue } from "./track/venue.js";
 import { Renderer } from "./render/renderer.js";
+import { GpuHold } from "./render/gpuHold.js";
 import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
@@ -33,6 +34,16 @@ const SAMPLE_HZ_FLOOR = 100;
 /** How often the car's dash panel is repainted. 30 Hz: a real dash updates
  *  about this fast and nobody can read one that changes quicker. */
 const DASH_REFRESH_MS = 1000 / 30;
+/**
+ * How far ahead of the native snapshot the car is DRAWN, seconds, on top of
+ * the snapshot's measured age: about one frame, which is when the frame
+ * being built now actually reaches the screen. See `drawnPose`.
+ */
+const DRAW_LEAD_S = 0.007;
+/** ...and the most the drawn pose is ever extrapolated by. Past this the
+ *  snapshot is simply stale (an IPC stall) and guessing further would only
+ *  overshoot. */
+const DRAW_AGE_MAX_S = 0.020;
 
 /**
  * Seconds between the autocross finish line and the end-of-run card.
@@ -103,9 +114,14 @@ const GEO_FOR_BODY = {
 const CAMERAS = [
   // `live` means the eye point is read from the parameters every frame rather
   // than captured here, so the eye-height slider actually moves the camera.
-  { name: "Cockpit", live: true, pitch: 0, fov: 50, rigid: true },
+  // A shade of down-pitch: a driver sits low and looks at the road, and the
+  // horizon on real onboards sits above centre frame, not on it.
+  { name: "Cockpit", live: true, pitch: -0.04, fov: 50, rigid: true },
   { name: "Nose", ahead: 1.35, height: 0.46, pitch: -0.03, fov: 55, rigid: true },
-  { name: "Chase", ahead: -4.6, height: 1.85, pitch: -0.14, fov: 58, rigid: false },
+  // Closer, lower and narrower than it was: at 58 deg from 4.6 m the car was
+  // a toy in the middle of the frame. This fills it the way a broadcast
+  // chase does and still keeps the next two gates in view.
+  { name: "Chase", ahead: -4.2, height: 1.35, pitch: -0.10, fov: 42, rigid: false },
   // Circles the car rather than following it. The only view that shows the car
   // from anywhere but directly behind, which is what you need to judge the
   // bodywork -- or to check that an imported CAD model is the right shape and
@@ -119,6 +135,11 @@ class Game {
   constructor(dom) {
     this.dom = dom;
     this.renderer = new Renderer(dom.gl);
+    // Pads the GPU frame out so a laptop card holds its clocks; see gpuHold.js.
+    // Desktop only by default: in a browser tab the page shares the GPU with
+    // everything else and should not be the one keeping it awake.
+    this.gpuHold = new GpuHold(this.renderer.gl);
+    this.gpuHold.enabled = this.gpuHold.supported && loadGpuHold();
     this.hud = new Hud(dom.hud);
     this.input = new Input();
     this.audio = new EngineAudio();
@@ -650,6 +671,65 @@ class Game {
     return { x: this.car.X, y: this.car.Y, psi: this.car.psi };
   }
 
+  /**
+   * The car's hub layout and chassis footprint from the live parameters,
+   * recomputed only when one of the five numbers they depend on changes:
+   * both used to be rebuilt every frame (`hubsFor` is five objects) for a
+   * geometry that only moves when the driver edits the spec sheet or nudges
+   * the track width in the setup adjuster.
+   */
+  carGeometry() {
+    const p = SDM26;
+    const g = this._geom;
+    if (g && g.wheelbaseM === p.wheelbaseM && g.weightDistFront === p.weightDistFront &&
+        g.tireRadiusM === p.tireRadiusM && g.trackFrontM === p.trackFrontM &&
+        g.trackRearM === p.trackRearM) {
+      return g;
+    }
+    return (this._geom = {
+      wheelbaseM: p.wheelbaseM, weightDistFront: p.weightDistFront, tireRadiusM: p.tireRadiusM,
+      trackFrontM: p.trackFrontM, trackRearM: p.trackRearM,
+      hubs: hubsFor(p), box: bodyBoxFor(p),
+    });
+  }
+
+  /**
+   * Where to DRAW the car this frame.
+   *
+   * The JS model is stepped to the frame's own timestamp, so its pose is the
+   * one to draw. The native car is different: its snapshot was copied out of
+   * the rig at an arbitrary phase of the 1 kHz loop and reached the page a
+   * frame ago, so drawing it as-is puts a random 0.5-2 ms of sample-time
+   * jitter into every frame -- 30% of a frame's motion at 25 m/s, and the
+   * visible micro-stutter on close cones and the stall lines at 144 Hz.
+   * Here the pose is dead-reckoned forward by the snapshot's measured age
+   * plus one frame, with the body velocities and yaw rate it carries. Over
+   * ~10 ms at 1.5 g the extrapolation error is well under a millimetre; the
+   * jitter it removes is centimetres. Clamped, so a stalled IPC (a save on
+   * the main thread, say) just holds the last pose rather than sailing on.
+   *
+   * ONLY the drawn pose. Timing, cones, the recorder and the telemetry all
+   * read the raw snapshot, which is what the rig actually computed. Nothing
+   * is extrapolated while paused, replaying, on the menu, while the rig is
+   * being held, or before a fresh snapshot has arrived after a respawn.
+   */
+  drawnPose() {
+    const c = this.car;
+    const d = this._drawn ??= { x: 0, y: 0, psi: 0 };
+    d.x = c.X; d.y = c.Y; d.psi = c.psi;
+    if (!c.native || this.paused || this.replay || c.held || !(c.appliedAt > 0) ||
+        !this.dom.menu.hidden) {
+      return d;
+    }
+    const age = Math.min(DRAW_AGE_MAX_S,
+      Math.max(0, (performance.now() - c.appliedAt) / 1000) + DRAW_LEAD_S);
+    const cs = Math.cos(c.psi), sn = Math.sin(c.psi);
+    d.x += (c.u * cs - c.v * sn) * age;
+    d.y += (c.u * sn + c.v * cs) * age;
+    d.psi += c.r * age;
+    return d;
+  }
+
   update(dt) {
     this.lastDt = dt;
     // The sampler is ticked at the END of this frame, but the timing, the cone
@@ -807,7 +887,7 @@ class Game {
 
     // ---- course state ----
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
-    const hits = this.track.strikeCones(this.pose(), bodyBoxFor(SDM26));
+    const hits = this.track.strikeCones(this.pose(), this.carGeometry().box);
     const wasStaged = this.timing.state === "staged";
     const wasRunning = this.timing.state === "running";
     this.timing.update(dt, loc, this.car.speed, hits);
@@ -1123,51 +1203,67 @@ class Game {
     }
 
     this.renderer.fovDeg = cam.fov;
-    this.renderer.draw({
-      car: {
-        x: this.car.X,
-        y: this.car.Y,
-        psi: this.car.psi,
-        rollRad: this.camRoll,
-        pitchRad: this.camPitch,
-        cgHeight: SDM26.cgHeightM,
-      },
+    // One scene-state object, filled in place each frame: the renderer only
+    // reads it during `draw`, and the nested literals were a few dozen
+    // allocations a frame for nothing.
+    const drawn = this.drawnPose();
+    const scene = this._scene ??= {
+      car: { x: 0, y: 0, psi: 0, rollRad: 0, pitchRad: 0, cgHeight: 0 },
       view: {
-        // Head motion rides on the cockpit and nose views, which are bolted to
-        // the chassis. The chase and walkaround cameras are not in the car.
-        ahead: (cam.live ? SDM26.eyeAheadOfCgM : cam.ahead) + (cam.rigid ? this.headLong : 0),
-        height: cam.orbit ? (this.orbitHeight ?? cam.height)
-              : cam.live ? SDM26.eyeHeightM : cam.height,
-        lateral: cam.rigid ? this.headLat : 0,
-        yawOffset: cam.rigid ? this.headYaw : 0,
-        pitchOffset: cam.pitch,
-        rigid: cam.rigid,
-        orbit: cam.orbit,
-        yaw: this.chaseYaw ?? this.car.psi,
-        // Live, so the walkaround can be moved while looking at the car --
-        // which is the entire point of having it.
-        radius: this.orbitRadius ?? cam.radius,
-        focusHeight: this.orbitFocus ?? cam.focusHeight,
-        orbitAngle: this.orbitAngle,
+        ahead: 0, height: 0, lateral: 0, yawOffset: 0, pitchOffset: 0, rigid: false, orbit: false,
+        yaw: 0, radius: 0, focusHeight: 0, orbitAngle: 0,
       },
-      hubs: hubsFor(SDM26),
-      wheels: {
-        steerRad: this.car.delta,
-        steerRatio: SDM26.steeringRatio,
-        spinFront: this.spinFront,
-        spinRear: this.spinRear,
-        rimFade,
-      },
-      ghost: this.ghost ? this.ghostPose() : null,
-      skid: this.skidIntensity(tel),
-      // A cone through the nose is felt as well as heard: a short drop that
-      // rides on the surface texture.
-      heaveM: bump - Math.abs(tel.axG) * (SDM26.heaveMmG / 1000) * 0.5 * vib - 0.012 * this.hitKick,
-      // A little FOV with speed helps the sense of motion; a lot of it is a
-      // game trope that undoes the honest framing above, so this is 4 deg at
-      // 25 m/s rather than the 10 it used to reach.
-      fovBoost: cam.orbit ? 0 : Math.min(4, this.car.speed * 0.16),
-    });
+      hubs: null,
+      wheels: { steerRad: 0, steerRatio: 0, spinFront: 0, spinRear: 0, rimFade: 0 },
+      ghost: null, skid: null, heaveM: 0, fovBoost: 0,
+    };
+    const sc = scene.car;
+    sc.x = drawn.x;
+    sc.y = drawn.y;
+    sc.psi = drawn.psi;
+    sc.rollRad = this.camRoll;
+    sc.pitchRad = this.camPitch;
+    sc.cgHeight = SDM26.cgHeightM;
+    const sv = scene.view;
+    // Head motion rides on the cockpit and nose views, which are bolted to
+    // the chassis. The chase and walkaround cameras are not in the car.
+    sv.ahead = (cam.live ? SDM26.eyeAheadOfCgM : cam.ahead) + (cam.rigid ? this.headLong : 0);
+    sv.height = cam.orbit ? (this.orbitHeight ?? cam.height)
+      : cam.live ? SDM26.eyeHeightM : cam.height;
+    sv.lateral = cam.rigid ? this.headLat : 0;
+    sv.yawOffset = cam.rigid ? this.headYaw : 0;
+    sv.pitchOffset = cam.pitch;
+    sv.rigid = cam.rigid;
+    sv.orbit = cam.orbit;
+    sv.yaw = this.chaseYaw ?? drawn.psi;
+    // Live, so the walkaround can be moved while looking at the car --
+    // which is the entire point of having it.
+    sv.radius = this.orbitRadius ?? cam.radius;
+    sv.focusHeight = this.orbitFocus ?? cam.focusHeight;
+    sv.orbitAngle = this.orbitAngle;
+    scene.hubs = this.carGeometry().hubs;
+    const sw = scene.wheels;
+    sw.steerRad = this.car.delta;
+    sw.steerRatio = SDM26.steeringRatio;
+    sw.spinFront = this.spinFront;
+    sw.spinRear = this.spinRear;
+    sw.rimFade = rimFade;
+    scene.ghost = this.ghost ? this.ghostPose() : null;
+    scene.skid = this.skidIntensity(tel);
+    // A cone through the nose is felt as well as heard: a short drop that
+    // rides on the surface texture.
+    scene.heaveM = bump - Math.abs(tel.axG) * (SDM26.heaveMmG / 1000) * 0.5 * vib - 0.012 * this.hitKick;
+    // A little FOV with speed helps the sense of motion; a lot of it is a
+    // game trope that undoes the honest framing above, so this is 4 deg at
+    // 25 m/s rather than the 10 it used to reach.
+    scene.fovBoost = cam.orbit ? 0 : Math.min(4, this.car.speed * 0.16);
+    // The clock hold spans the whole frame so it can measure what the frame
+    // already costs and pad only the rest. Off behind the launch screen: the
+    // walkaround does not need 144 Hz and the fans do not need to know.
+    const hold = this.gpuHold.enabled && this.dom.menu.hidden;
+    if (hold) this.gpuHold.begin();
+    this.renderer.draw(scene);
+    if (hold) this.gpuHold.end();
 
     // No HUD over the launch screen: the scene is the backdrop there. Nor
     // over a replay -- the replay overlay is a better instrument panel than
@@ -1211,9 +1307,9 @@ class Game {
       cones: t.cones,
       offCourse: t.offCourse,
       penaltyS: t.penaltyS,
-      carX: this.car.X,
-      carY: this.car.Y,
-      carPsi: this.car.psi,
+      carX: drawn.x,
+      carY: drawn.y,
+      carPsi: drawn.psi,
       axG: tel.axG,
       ayG: tel.ayG,
       ggTrail: this.ggTrail,
@@ -2059,6 +2155,17 @@ function loadCameraIndex() {
 const DRIVER_KEY = "fsae-sim.driver";
 const SESSION_KEY = "fsae-sim.session";
 const RECORD_KEY = "fsae-sim.record";
+const GPU_HOLD_KEY = "fsae-sim.gpuHold";
+/** GPU clock hold: on by default on the desktop build, off in a browser. */
+function saveGpuHold(on) {
+  try { localStorage.setItem(GPU_HOLD_KEY, on ? "1" : "0"); } catch { /* ignore */ }
+}
+function loadGpuHold() {
+  try {
+    const v = localStorage.getItem(GPU_HOLD_KEY);
+    return v == null ? isDesktop : v !== "0";
+  } catch { return isDesktop; }
+}
 
 export function saveDriver(name) {
   try { localStorage.setItem(DRIVER_KEY, name); } catch { /* ignore */ }
@@ -2673,6 +2780,7 @@ async function boot() {
     set("pauseDensity", game.hud.density);
     set("pauseDash", DASH_LABELS[game.hud.dashMode] ?? game.hud.dashMode);
     set("pauseTc", game.assists.traction ? "on" : "off");
+    set("pauseGpuHold", !game.gpuHold.supported ? "n/a" : game.gpuHold.enabled ? "on" : "off");
     const vol = pauseEl("pauseVolume");
     if (vol) {
       vol.value = String(game.audio.mix.master);
@@ -2697,6 +2805,12 @@ async function boot() {
   pauseEl("pauseTc").addEventListener("click", () => {
     dom.tcToggle.checked = !dom.tcToggle.checked;
     sync();
+    refreshPauseCard();
+  });
+  pauseEl("pauseGpuHold")?.addEventListener("click", () => {
+    if (!game.gpuHold.supported) return;
+    game.gpuHold.enabled = !game.gpuHold.enabled;
+    saveGpuHold(game.gpuHold.enabled);
     refreshPauseCard();
   });
   pauseEl("pauseVolume").addEventListener("input", () => {

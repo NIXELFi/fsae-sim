@@ -65,6 +65,8 @@ const SOURCE_THRESHOLD = 0.02;
 
 /** First virtual button index for a native base's hat switch: above 4 devices x 32 real buttons. */
 export const HAT_BASE = 128;
+/** Hat direction (0 up, 1 right, 2 down, 3 left) for each virtual hat button (up, down, left, right). */
+const HAT_DIRS = [0, 2, 3, 1];
 
 // Only used to decide whether the pad is being touched at all; the real
 // deadzone comes from the active profile.
@@ -107,6 +109,8 @@ export class Input {
     this.setupHoldScale = 1;
     this._prevButtons = [];
     this._prevKeys = new Set();
+    /** Walkaround camera nudges from the keyboard; see `poll`. */
+    this.walkaround = { turn: 0, rise: 0, zoom: 0 };
 
     this.state = { steer: 0, throttle: 0, brake: 0, launch: false };
     /**
@@ -341,16 +345,47 @@ export class Input {
     // real one (HAT_BASE..HAT_BASE+3: up, down, left, right) -- it used to
     // overwrite indices 12-15, which on a MOZA base are the shift paddles,
     // so a paddle pull stepped the setup menu instead of shifting.
+    //
+    // The pad object and its 132 button objects are persistent and updated
+    // in place: this runs every frame on the rig, and building them fresh
+    // was ~140 allocations a frame for a state that changes a bit at a time.
+    // The profiles only ever read `.pressed` / `.value` off them.
     const words = Array.isArray(nd.buttons) ? nd.buttons : [nd.buttons | 0];
-    const buttons = [];
-    for (const w of words) {
-      for (let i = 0; i < 32; i++) buttons.push({ pressed: !!(w & (1 << i)), value: w & (1 << i) ? 1 : 0 });
+    const syn = this._syn ??= {
+      id: "", index: -1, connected: true, mapping: "", axes: [], buttons: [],
+    };
+    const buttons = syn.buttons;
+    const real = Math.max(words.length * 32, HAT_BASE);
+    const total = HAT_BASE + 4;
+    // A device came or went: resize once, filling with fresh button records.
+    if (buttons.length !== total || real !== syn.real) {
+      buttons.length = 0;
+      for (let i = 0; i < total; i++) buttons.push({ pressed: false, value: 0 });
+      syn.real = real;
     }
-    while (buttons.length < HAT_BASE) buttons.push({ pressed: false, value: 0 });
+    for (let d = 0; d < words.length; d++) {
+      const w = words[d];
+      for (let i = 0; i < 32; i++) {
+        const b = buttons[d * 32 + i];
+        const on = (w & (1 << i)) !== 0;
+        b.pressed = on; b.value = on ? 1 : 0;
+      }
+    }
+    // Slots above the last real device, below the hat: always off.
+    for (let i = words.length * 32; i < HAT_BASE; i++) {
+      const b = buttons[i];
+      b.pressed = false; b.value = 0;
+    }
     const dir = nd.pov >= 0 ? Math.round(nd.pov / 9000) % 4 : -1; // 0 up, 1 right, 2 down, 3 left
-    for (const [k, d] of [[0, 0], [1, 2], [2, 3], [3, 1]]) {
-      buttons[HAT_BASE + k] = { pressed: dir === d, value: dir === d ? 1 : 0 };
+    for (let k = 0; k < 4; k++) {
+      const on = dir === HAT_DIRS[k];
+      const b = buttons[HAT_BASE + k];
+      b.pressed = on; b.value = on ? 1 : 0;
     }
+    // The rig's axes arrive as a fresh JSON array each frame; hand it over
+    // rather than copying it.
+    syn.axes = nd.axes;
+    syn.id = this.nativeName;
     if (this._nativeAnnounced !== this.nativeName) {
       this._nativeAnnounced = this.nativeName;
       this.padName = this.nativeName;
@@ -362,7 +397,7 @@ export class Input {
       this.onProfileChange?.(this.settings.activeId, this.nativeName);
       this.onPadChange?.(true, this.nativeName);
     }
-    return { id: this.nativeName, index: -1, connected: true, mapping: "", axes: Array.from(nd.axes), buttons };
+    return syn;
   }
 
   /**
@@ -486,8 +521,8 @@ export class Input {
 
   /** Read the pad and keyboard into `state` and `edges`. Call once per frame. */
   poll() {
-    for (const k of Object.keys(this.edges)) this.edges[k] = false;
-    for (const k of Object.keys(this.menu)) this.menu[k] = false;
+    for (const k in this.edges) this.edges[k] = false;
+    for (const k in this.menu) this.menu[k] = false;
 
     const p = this.pad();
     const prof = this.profile;
@@ -513,7 +548,11 @@ export class Input {
     });
 
     if (p) {
-      this.rawAxes = Array.from(p.axes);
+      // Copied into the persistent array rather than `Array.from` each
+      // frame; the calibration UI reads it live.
+      const ra = this.rawAxes;
+      ra.length = p.axes.length;
+      for (let i = 0; i < ra.length; i++) ra[i] = p.axes[i];
       const axes = prof.axes || { steer: 0 };
       const raw = p.axes[axes.steer] ?? 0;
 
@@ -574,9 +613,18 @@ export class Input {
       this.applyRepeat("setupUp", pressed(B.dpadUp), edge(B.dpadUp));
       this.applyRepeat("setupDown", pressed(B.dpadDown), edge(B.dpadDown));
 
-      this._prevButtons = p.buttons.map((b) => b.pressed);
-      if (throttle > 0.02 || brake > 0.02 || Math.abs(raw) > ACTIVITY_THRESHOLD ||
-          p.buttons.some((b) => b.pressed)) {
+      // Last frame's buttons for the edge detection, kept in one array
+      // rather than `map`ped fresh; and whether anything at all is pressed.
+      const pb = this._prevButtons;
+      const nb = p.buttons.length;
+      pb.length = nb;
+      let anyPressed = false;
+      for (let i = 0; i < nb; i++) {
+        const on = !!p.buttons[i].pressed;
+        pb[i] = on;
+        if (on) anyPressed = true;
+      }
+      if (throttle > 0.02 || brake > 0.02 || Math.abs(raw) > ACTIVITY_THRESHOLD || anyPressed) {
         this.usingPad = true;
       }
     }
@@ -704,12 +752,14 @@ export class Input {
     // the car onto the centreline, and `[` / `]` also stepped the live setup
     // menu while you zoomed. These keys are now in `RESERVED_KEYS` and the
     // test suite checks no shipped binding lands on one.
-    this.walkaround = {
-      turn: (k.has("Comma") ? 1 : 0) - (k.has("Period") ? 1 : 0),
-      rise: (k.has("KeyG") ? 1 : 0) - (k.has("KeyF") ? 1 : 0),
-      zoom: (k.has("Quote") ? 1 : 0) - (k.has("Semicolon") ? 1 : 0),
-    };
-    this._prevKeys = new Set(k);
+    const wa = this.walkaround;
+    wa.turn = (k.has("Comma") ? 1 : 0) - (k.has("Period") ? 1 : 0);
+    wa.rise = (k.has("KeyG") ? 1 : 0) - (k.has("KeyF") ? 1 : 0);
+    wa.zoom = (k.has("Quote") ? 1 : 0) - (k.has("Semicolon") ? 1 : 0);
+    // The same Set, refilled, rather than a new one a frame.
+    const pk = this._prevKeys;
+    pk.clear();
+    for (const c of k) pk.add(c);
 
     this.steerSource = source;
     this.state.steer = clamp(steer, -1, 1);

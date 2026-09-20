@@ -15,29 +15,55 @@
 
 import { lengthToFrontAxle, lengthToRearAxle } from "../vehicle/params.js";
 
-const MAROON = [0.549, 0.114, 0.251];
-const MAROON_DK = [0.38, 0.08, 0.175];
+// ---- palette ----
+//
+// Every colour here is in DISPLAY (sRGB-ish, gamma 2.2) space, the same
+// convention as the asphalt and the venue: the renderer's `toLinear` decodes
+// it before lighting. That is the number you would read off a swatch or a
+// photograph, NOT a physical albedo. The two differ by the gamma curve, and
+// at the dark end the difference is huge: a real slick has a linear albedo of
+// about 0.02-0.03, which is 0.16-0.19 in display space. Author 0.03 here and
+// the shader decodes it to 0.0005 -- a black hole with no readable shape,
+// which is exactly what the tyres, dash and grips were until 2026-09-20.
+//
+// So the rule for the dark materials is: nothing below ~0.16 display. Rubber
+// sits at 0.17-0.20, carbon and black mouldings at 0.19-0.24, and the tonal
+// separation between a tread and its sidewall, or a plate and its recess, is
+// carried by a difference of 0.03-0.05 in display space (30-40% in linear),
+// not by pushing one of them toward zero.
+//
+// ASU maroon is #8C1D40 = [0.55, 0.11, 0.25] as a swatch, but paint under a
+// clearcoat has to be able to carry the sky in its shading, and a green
+// channel of 0.114 decodes to 0.0085 linear -- effectively zero, so the paint
+// could take no blue-sky tint and read as a dead brown-red. The green is
+// lifted to 0.12 (0.0095 linear) and the blue trimmed a touch so the swatch
+// still reads as ASU maroon rather than magenta.
+const MAROON = [0.55, 0.12, 0.20];
+const MAROON_DK = [0.40, 0.085, 0.145];
 const GOLD = [1.0, 0.776, 0.153];
-const CARBON = [0.105, 0.11, 0.12];
-const CARBON_LT = [0.17, 0.175, 0.19];
-// A slick's real albedo is about 0.05, which renders as a black hole with no
-// readable shape. Lifted just enough that the carcass and shoulder show.
-const TIRE = [0.105, 0.108, 0.115];
-const TIRE_WALL = [0.145, 0.148, 0.156];
+/** Bare carbon-fibre laminate: ~0.02 linear under its gloss. */
+const CARBON = [0.20, 0.205, 0.215];
+const CARBON_LT = [0.25, 0.255, 0.27];
+/** The tread: a slick's 0.02-0.03 linear albedo, in display space. */
+const TIRE = [0.175, 0.178, 0.185];
+/** Sidewall, a touch lighter so the shoulder line is visible at all. */
+const TIRE_WALL = [0.215, 0.218, 0.226];
 const RIM = [0.60, 0.61, 0.64];
 const RIM_FACE = [0.46, 0.47, 0.51];
 const METAL = [0.42, 0.44, 0.48];
-const DASH_LCD = [0.055, 0.085, 0.075];
-// Steering wheel, matched to the team's wheel asset.
-// Carbon reads far darker in the cockpit's shadow than it does in a studio
-// render, and at 0.135 the plate was a black void with some gold on it.
-const CARBON_PLATE = [0.175, 0.180, 0.190];
+const DASH_LCD = [0.16, 0.20, 0.185];
+// Steering wheel, matched to the team's wheel asset. Carbon reads darker in
+// the cockpit's shadow than in a studio render, so the plate sits at the
+// light end of the carbon range.
+const CARBON_PLATE = [0.235, 0.24, 0.25];
 /** Recesses and the lightening slot -- the same material, in shadow. */
-const CARBON_DARK = [0.085, 0.088, 0.095];
-const DASH_CASE = [0.055, 0.056, 0.060];
-const DASH_BEZEL = [0.030, 0.031, 0.034];
+const CARBON_DARK = [0.175, 0.178, 0.188];
+/** The AiM case: a matte black moulding, ~0.025 linear. */
+const DASH_CASE = [0.19, 0.192, 0.20];
+const DASH_BEZEL = [0.16, 0.162, 0.17];
 const DASH_BUTTON = [0.30, 0.31, 0.33];
-const GRIP = [0.072, 0.074, 0.080];
+/** Suede grip: the darkest thing on the wheel, but still not a void. */
+const GRIP = [0.165, 0.168, 0.176];
 const AMBER = [0.95, 0.62, 0.12];
 const AMBER_LIT = [1.0, 0.80, 0.34];
 /** The domed face of a button, which catches the light the barrel does not. */
@@ -106,6 +132,13 @@ export const GEO = {
   dashTiltRad: 0,
 };
 
+// Shading: `tri`/`quad` give every face one flat normal, which is right for
+// boxes, plates and wing planes -- their edges are real. The curved
+// primitives (`loft` with a normal grid, `cylZ` smooth, `tube`, `sweep`) put
+// an analytic normal on each vertex instead, from the parametric angle the
+// builder already knows, so a 40-facet tyre shades as a cylinder and not as
+// forty flat strips. The normals are per-vertex-per-triangle (the buffers are
+// unindexed), so a smooth patch and a flat one can share one mesh.
 class Builder {
   constructor() { this.p = []; this.n = []; this.c = []; }
 
@@ -118,10 +151,43 @@ class Builder {
     }
   }
 
+  /**
+   * Triangle with a normal per vertex.
+   *
+   * Each vertex normal is turned to lie on the same side as the triangle's
+   * own winding normal. The car is lit two-sided: `CAR_FS` negates the normal
+   * on back faces, and "back" is decided by winding, so a smooth normal that
+   * disagrees with the winding would be flipped exactly when it should not
+   * be and the surface would light from the wrong side. The primitives wind
+   * whichever way their authors found natural, and their vertex normals are
+   * computed "outward" -- this reconciles the two without every caller
+   * having to reason about it. A zero normal (degenerate patch) falls back
+   * to the flat one.
+   */
+  triN(a, b, c, na, nb, nc, color) {
+    const fn = faceNormal(a, b, c);
+    const pts = [a, b, c], nrm = [na, nb, nc];
+    for (let k = 0; k < 3; k++) {
+      const v = pts[k];
+      let n = nrm[k];
+      const d = n[0] * fn[0] + n[1] * fn[1] + n[2] * fn[2];
+      if (d < 0) n = [-n[0], -n[1], -n[2]];
+      else if (n[0] === 0 && n[1] === 0 && n[2] === 0) n = fn;
+      this.p.push(v[0], v[1], v[2]);
+      this.n.push(n[0], n[1], n[2]);
+      this.c.push(color[0], color[1], color[2]);
+    }
+  }
+
   quad(a, b, c, d, color) {
     const nn = faceNormal(a, b, c);
     this.tri(a, b, c, color, nn);
     this.tri(a, c, d, color, nn);
+  }
+
+  quadN(a, b, c, d, na, nb, nc, nd, color) {
+    this.triN(a, b, c, na, nb, nc, color);
+    this.triN(a, c, d, na, nc, nd, color);
   }
 
   /** Axis-aligned box by centre and full size. */
@@ -146,16 +212,24 @@ class Builder {
    * into a surface. Used for the nose, the tub and the engine cover, where a
    * box would read as a shoebox and a real car tapers.
    */
-  loft(sections, color, capFirst = true, capLast = true) {
+  loft(sections, color, capFirst = true, capLast = true, normals = null) {
     for (let s = 0; s < sections.length - 1; s++) {
       const A = sections[s], B = sections[s + 1];
+      const NA = normals?.[s], NB = normals?.[s + 1];
       for (let i = 0; i < A.length; i++) {
         const j = (i + 1) % A.length;
-        this.quad(A[i], B[i], B[j], A[j], color);
+        if (normals) this.quadN(A[i], B[i], B[j], A[j], NA[i], NB[i], NB[j], NA[j], color);
+        else this.quad(A[i], B[i], B[j], A[j], color);
       }
     }
+    // Caps stay flat: a cap is a real edge on every shape that has one.
     if (capFirst) this.cap(sections[0], color);
     if (capLast) this.cap(sections[sections.length - 1], color);
+  }
+
+  /** `loft` with normals derived from the section grid -- see `gridNormals`. */
+  smoothLoft(sections, color, capFirst = true, capLast = true) {
+    this.loft(sections, color, capFirst, capLast, gridNormals(sections));
   }
 
   cap(ring, color) {
@@ -167,12 +241,21 @@ class Builder {
     }
   }
 
-  /** Cylinder with its axis along Z -- the road-wheel and hub primitive. */
-  cylZ(cx, cy, cz, r, halfLen, segs, color) {
+  /**
+   * Cylinder with its axis along Z -- the road-wheel and hub primitive.
+   * `smooth` puts the radial normal [cos a, sin a, 0] on each vertex so the
+   * barrel shades round; off, every facet is flat (the default, unchanged).
+   */
+  cylZ(cx, cy, cz, r, halfLen, segs, color, smooth = false) {
     for (let i = 0; i < segs; i++) {
       const a0 = (i / segs) * Math.PI * 2, a1 = ((i + 1) / segs) * Math.PI * 2;
       const p = (a, z) => [cx + Math.cos(a) * r, cy + Math.sin(a) * r, cz + z];
-      this.quad(p(a0, -halfLen), p(a0, halfLen), p(a1, halfLen), p(a1, -halfLen), color);
+      if (smooth) {
+        const n0 = [Math.cos(a0), Math.sin(a0), 0], n1 = [Math.cos(a1), Math.sin(a1), 0];
+        this.quadN(p(a0, -halfLen), p(a0, halfLen), p(a1, halfLen), p(a1, -halfLen), n0, n0, n1, n1, color);
+      } else {
+        this.quad(p(a0, -halfLen), p(a0, halfLen), p(a1, halfLen), p(a1, -halfLen), color);
+      }
     }
   }
 
@@ -194,22 +277,29 @@ class Builder {
     }
   }
 
-  /** Round tube between two points -- suspension links and roll hoops. */
+  /**
+   * Round tube between two points -- suspension links, pylons, pushrods.
+   * Every use is a round bar, so the barrel is always smooth-shaded: the
+   * normal at angle a is u cos a + v sin a, the radial direction itself.
+   * The end caps stay flat.
+   */
   tube(p0, p1, r, segs, color) {
     const axis = norm(sub(p1, p0));
     const helper = Math.abs(axis[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
     const u = norm(cross(helper, axis));
     const v = cross(axis, u);
+    const normals = [];
     const ring = (p) => {
       const out = [];
       for (let i = 0; i < segs; i++) {
         const a = (i / segs) * Math.PI * 2;
-        const c = Math.cos(a) * r, s = Math.sin(a) * r;
-        out.push([p[0] + u[0] * c + v[0] * s, p[1] + u[1] * c + v[1] * s, p[2] + u[2] * c + v[2] * s]);
+        const c = Math.cos(a), s = Math.sin(a);
+        out.push([p[0] + (u[0] * c + v[0] * s) * r, p[1] + (u[1] * c + v[1] * s) * r, p[2] + (u[2] * c + v[2] * s) * r]);
+        if (normals.length < segs) normals.push([u[0] * c + v[0] * s, u[1] * c + v[1] * s, u[2] * c + v[2] * s]);
       }
       return out;
     };
-    this.loft([ring(p0), ring(p1)], color);
+    this.loft([ring(p0), ring(p1)], color, true, true, [normals, normals]);
   }
 
   polyTube(points, r, segs, color) {
@@ -217,7 +307,9 @@ class Builder {
   }
 
   /**
-   * Sweep a circular section along a path that lies in the XY plane.
+   * Sweep a circular section along a path that lies in one plane, given by
+   * that plane's unit normal -- the grips (XY plane) and the roll hoops
+   * (a plane of constant x).
    *
    * `polyTube` cannot do this: it builds each segment as its own `tube`, so
    * every segment picks its own rotational frame from its own axis and gets
@@ -226,29 +318,35 @@ class Builder {
    * for anything that curves, where it reads as a row of blocks.
    *
    * Here the frame is continuous: at each point the section is swept in the
-   * plane of the path's own normal and z, so consecutive rings share an
-   * orientation and the whole thing lofts as one surface with two caps.
+   * plane of the path's in-plane normal and the plane normal, so consecutive
+   * rings share an orientation and the whole thing lofts as one surface with
+   * two caps. The vertex normal is the same radial direction the point was
+   * placed along, so the bar shades round.
    */
-  sweepXY(path, r, segs, color) {
-    const rings = path.map((pt, i) => {
+  sweep(path, r, segs, color, planeN) {
+    const rings = [], normals = [];
+    path.forEach((pt, i) => {
       const prev = path[Math.max(0, i - 1)];
       const next = path[Math.min(path.length - 1, i + 1)];
-      // In-plane normal: the tangent turned a quarter turn.
-      let nx = -(next[1] - prev[1]);
-      let ny = next[0] - prev[0];
-      const len = Math.hypot(nx, ny) || 1;
-      nx /= len;
-      ny /= len;
-      const out = [];
+      // In-plane normal: the tangent turned a quarter turn within the plane.
+      const n1 = norm(cross(planeN, sub(next, prev)));
+      const ring = [], rn = [];
       for (let k = 0; k < segs; k++) {
         const a = (k / segs) * Math.PI * 2;
-        const c = Math.cos(a) * r;
-        const d = Math.sin(a) * r;
-        out.push([pt[0] + nx * c, pt[1] + ny * c, pt[2] + d]);
+        const c = Math.cos(a), d = Math.sin(a);
+        const n = [n1[0] * c + planeN[0] * d, n1[1] * c + planeN[1] * d, n1[2] * c + planeN[2] * d];
+        ring.push([pt[0] + n[0] * r, pt[1] + n[1] * r, pt[2] + n[2] * r]);
+        rn.push(n);
       }
-      return out;
+      rings.push(ring);
+      normals.push(rn);
     });
-    this.loft(rings, color);
+    this.loft(rings, color, true, true, normals);
+  }
+
+  /** `sweep` along a path in the XY plane. */
+  sweepXY(path, r, segs, color) {
+    this.sweep(path, r, segs, color, [0, 0, 1]);
   }
 
   mesh() {
@@ -272,6 +370,60 @@ function norm(v) {
   return [v[0] / l, v[1] / l, v[2] / l];
 }
 function faceNormal(a, b, c) { return norm(cross(sub(b, a), sub(c, a))); }
+
+/**
+ * Smooth normals for a loft, one per section point, from the section grid
+ * itself: the cross product of the tangent along the loft (central
+ * difference between neighbouring sections, one-sided at the ends) and the
+ * tangent around the ring (central difference, the ring being closed). That
+ * is the analytic surface normal of the bilinear patch grid, and for the
+ * superellipse tub sections it is what makes a 12-point ring read as a
+ * continuous monocoque rather than twelve flat panels.
+ *
+ * Returned in the winding order `loft` uses, so it agrees with the face
+ * normals; `triN` re-checks anyway.
+ */
+function gridNormals(sections) {
+  const S = sections.length;
+  return sections.map((ring, s) => {
+    const n = ring.length;
+    const prev = sections[Math.max(0, s - 1)], next = sections[Math.min(S - 1, s + 1)];
+    return ring.map((_, i) => {
+      const tS = sub(next[i], prev[i]);
+      const tI = sub(ring[(i + 1) % n], ring[(i - 1 + n) % n]);
+      return norm(cross(tS, tI));
+    });
+  });
+}
+
+/**
+ * Rings of a surface of revolution about Z, with their analytic normals.
+ * `profile` is a list of [z, r] pairs, in order along the meridian; the
+ * normal at each is the meridian tangent turned a quarter turn, then spun
+ * round the axis with the point, so the tyre shades as one continuous
+ * curve from the crown round the shoulder and down the sidewall.
+ */
+function revolveZ(profile, segs) {
+  const rings = [], normals = [];
+  const last = profile.length - 1;
+  profile.forEach(([z, r], k) => {
+    const [z0, r0] = profile[Math.max(0, k - 1)], [z1, r1] = profile[Math.min(last, k + 1)];
+    // Meridian tangent (dr, dz) -> outward normal (dz, -dr), normalised.
+    const dr = r1 - r0, dz = z1 - z0;
+    const l = Math.hypot(dr, dz) || 1;
+    const nr = dz / l, nz = -dr / l;
+    const ring = [], rn = [];
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      const c = Math.cos(a), s = Math.sin(a);
+      ring.push([c * r, s * r, z]);
+      rn.push([c * nr, s * nr, nz]);
+    }
+    rings.push(ring);
+    normals.push(rn);
+  });
+  return { rings, normals };
+}
 
 /** Rounded-rectangle cross-section at station x, for lofting bodywork. */
 function section(x, halfW, yBot, yTop, round = 0.35) {
@@ -394,7 +546,11 @@ function buildBody() {
   //
   // The top of this loft sits below the cockpit rim, so the rim and its padding
   // are still added on top and the cockpit stays open.
-  b.loft([
+  //
+  // The bodywork lofts are smooth-shaded (`smoothLoft`): the sections are
+  // superellipses, and flat facets on a 12-point ring were what made the
+  // tub read as a folded-paper model from the chase camera.
+  b.smoothLoft([
     section(0.58, 0.295, 0.045, 0.33, 0.45),
     section(0.30, 0.315, 0.040, 0.34, 0.50),
     section(-0.05, 0.325, 0.038, 0.35, 0.55),
@@ -416,7 +572,7 @@ function buildBody() {
   }
 
   // ---- nose: bulkhead tapering to the tip ----
-  b.loft([
+  b.smoothLoft([
     section(0.56, 0.30, 0.05, 0.44, 0.35),
     section(0.78, 0.29, 0.05, 0.40, 0.40),
     section(1.00, 0.22, 0.05, 0.30, 0.50),
@@ -427,7 +583,7 @@ function buildBody() {
   b.box(0.92, 0.315, 0, 0.62, 0.02, 0.075, GOLD);
 
   // ---- engine cover behind the driver ----
-  b.loft([
+  b.smoothLoft([
     section(-0.60, 0.30, 0.05, 0.42, 0.35),
     section(-0.80, 0.30, 0.05, 0.55, 0.35),
     section(-0.98, 0.26, 0.05, 0.48, 0.45),
@@ -436,7 +592,7 @@ function buildBody() {
 
   // ---- side pods ----
   for (const side of [-1, 1]) {
-    b.loft([
+    b.smoothLoft([
       section(0.12, 0.10, 0.09, 0.30, 0.4).map((p) => [p[0], p[1], p[2] + side * 0.44]),
       section(-0.20, 0.13, 0.08, 0.34, 0.4).map((p) => [p[0], p[1], p[2] + side * 0.46]),
       section(-0.52, 0.12, 0.08, 0.32, 0.4).map((p) => [p[0], p[1], p[2] + side * 0.45]),
@@ -492,19 +648,23 @@ function buildBody() {
   // ---- headrest ----
   // Required by the rules, and from outside it is the thing that turns an open
   // box into a cockpit with someone sitting in it.
-  b.loft([
+  b.smoothLoft([
     section(-0.36, 0.135, 0.42, 0.60, 0.8),
     section(-0.46, 0.150, 0.42, 0.62, 0.8),
     section(-0.54, 0.130, 0.42, 0.58, 0.8),
   ], CARBON_LT, true, true);
 
   // ---- roll hoops ----
+  // Each hoop is one bent tube in a plane of constant x, so it is swept as
+  // one continuous surface (see `sweep`) rather than a chain of capped
+  // segments: no seams at the joints, and a round normal all the way round.
+  const HOOP_PLANE = [1, 0, 0];
   const mainHoop = [];
   for (let i = 0; i <= 14; i++) {
     const t = i / 14, a = Math.PI * t;
     mainHoop.push([-0.40, 0.30 + Math.sin(a) * 0.78, -Math.cos(a) * 0.285]);
   }
-  b.polyTube(mainHoop, 0.024, 8, METAL);
+  b.sweep(mainHoop, 0.024, 8, METAL, HOOP_PLANE);
   b.tube([-0.40, 0.98, -0.16], [-0.80, 0.42, -0.20], 0.018, 6, METAL);
   b.tube([-0.40, 0.98, 0.16], [-0.80, 0.42, 0.20], 0.018, 6, METAL);
 
@@ -515,7 +675,7 @@ function buildBody() {
     const t = i / 12, a = Math.PI * t;
     frontHoop.push([0.52, 0.18 + Math.sin(a) * 0.38, -Math.cos(a) * 0.275]);
   }
-  b.polyTube(frontHoop, 0.020, 8, METAL);
+  b.sweep(frontHoop, 0.020, 8, METAL, HOOP_PLANE);
 
   // ---- dash panel and display, angled back toward the driver ----
   for (const side of [-1, 1]) {
@@ -559,7 +719,11 @@ function buildBody() {
 function buildTire() {
   const b = new Builder();
   const R = GEO.tireRadius, HW = GEO.tireHalfWidth;
-  const SEG = 28;
+  // 40 facets: with smooth normals the shading is already round at 28, but
+  // the silhouette against the road is a polygon whichever way it is shaded,
+  // and at 40 the vertices are 31 mm apart on a 200 mm tyre -- under a pixel
+  // from the driver's seat. Four tyres at 40 are ~5100 triangles.
+  const SEG = 40;
 
   // A slick's cross-section is a continuous curve: crowned across the tread,
   // rolling into the shoulder, then a sidewall that bulges before it meets the
@@ -581,11 +745,13 @@ function buildTire() {
   ];
 
   for (const side of [-1, 1]) {
-    const rings = profile.map(([zf, rf]) => ringZ(R * rf, side * HW * zf, SEG));
+    // The whole meridian is revolved at once so the normal is continuous
+    // through the shoulder, where the tread loft meets the sidewall loft.
+    const { rings, normals } = revolveZ(profile.map(([zf, rf]) => [side * HW * zf, R * rf]), SEG);
     // Tread and shoulder in tyre black; the sidewall a touch lighter, which is
     // what makes the shoulder line visible at all.
-    b.loft(rings.slice(0, 4), TIRE, false, false);
-    b.loft(rings.slice(3), TIRE_WALL, false, false);
+    b.loft(rings.slice(0, 4), TIRE, false, false, normals.slice(0, 4));
+    b.loft(rings.slice(3), TIRE_WALL, false, false, normals.slice(3));
     // Close the sidewall onto the rim.
     b.annulusZ(0, 0, side * HW * 0.90, GEO.rimRadius, R * 0.660, SEG, TIRE_WALL);
   }
@@ -599,10 +765,13 @@ function buildTire() {
 function buildRim() {
   const b = new Builder();
   const RR = GEO.rimRadius, HW = GEO.tireHalfWidth;
-  b.cylZ(0, 0, 0, RR, HW * 0.95, 20, RIM);
+  // The barrel is smooth-shaded; 32 facets so the rim's edge, which is seen
+  // against the sidewall from every angle, is as round as the tyre's.
+  const SEG = 32;
+  b.cylZ(0, 0, 0, RR, HW * 0.95, SEG, RIM, true);
   for (const s of [-1, 1]) {
     const z = s * HW * 0.93;
-    b.discZ(0, 0, z, RR * 0.99, 20, RIM_FACE);
+    b.discZ(0, 0, z, RR * 0.99, SEG, RIM_FACE);
     for (let i = 0; i < 5; i++) {
       const a = (i / 5) * Math.PI * 2;
       const ca = Math.cos(a), sa = Math.sin(a);
@@ -615,15 +784,6 @@ function buildRim() {
     b.discZ(0, 0, z + s * 0.004, 0.036, 12, [0.20, 0.21, 0.23]); // hub nut
   }
   return b.mesh();
-}
-
-function ringZ(r, z, segs) {
-  const out = [];
-  for (let i = 0; i < segs; i++) {
-    const a = (i / segs) * Math.PI * 2;
-    out.push([Math.cos(a) * r, Math.sin(a) * r, z]);
-  }
-  return out;
 }
 
 /**
@@ -706,7 +866,7 @@ function buildSteeringWheel() {
   // is where they are on the real wheel and, less romantically, the only place
   // a 23 mm button is not swallowed by a 32 mm grip.
   for (const side of [-1, 1]) {
-    b.cylZ(side * 0.076, HH - 0.018, -0.013, 0.0115, 0.005, 12, GOLD);
+    b.cylZ(side * 0.076, HH - 0.018, -0.013, 0.0115, 0.005, 12, GOLD, true);
     b.discZ(side * 0.076, HH - 0.018, -0.018, 0.0115, 12, GOLD_LIT);
   }
 
@@ -719,7 +879,7 @@ function buildSteeringWheel() {
 
   // ---- three gold rotaries along the bottom ----
   for (const side of [-1, 0, 1]) {
-    b.cylZ(side * 0.034, -0.058, -0.015, 0.0125, 0.007, 12, GOLD);
+    b.cylZ(side * 0.034, -0.058, -0.015, 0.0125, 0.007, 12, GOLD, true);
     b.discZ(side * 0.034, -0.058, -0.022, 0.0125, 12, GOLD_LIT);
   }
 
