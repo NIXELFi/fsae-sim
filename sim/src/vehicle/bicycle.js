@@ -469,6 +469,7 @@ export class BicycleModel {
     const tSpring = 0.5 * tCap * Math.tanh(dWrear / Math.max(dfp.stickRadS, 1e-4));
     const tStop = antiJ * Math.abs(dWrear) / dt;
     const tLock = Math.sign(tSpring) * Math.min(Math.abs(tSpring), tStop);
+    this._tLock = tLock;
     // Torque leaves the faster wheel and arrives at the slower one. These are
     // what the diff delivers BEFORE the driveline's own inertia is taken out
     // of them, which the coupled solve does.
@@ -553,6 +554,8 @@ export class BicycleModel {
     t.rollDeg = t.ayG * p.rollGradientDegG;   // + = leaning right (left turn)
     t.pitchDeg = t.axG * p.pitchGradientDegG; // + = nose up (braking dives)
     t.locked = drive.locked;
+    // The clutch pack's transfer torque: what the log's diff channel records.
+    t.diffNm = this._tLock ?? 0;
 
     // ---- steering torque, for force feedback ----
     // The bicycle model has one front slip angle, but the two tyres carry

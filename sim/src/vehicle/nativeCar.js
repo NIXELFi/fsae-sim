@@ -399,6 +399,7 @@ function blankTelemetry() {
     utilF: 0, utilR: 0, balance: 0,
     downforceN: 0, dragN: 0, driveForceN: 0, steerDeg: 0,
     rollDeg: 0, pitchDeg: 0, locked: false,
+    kappaRL: 0, kappaRR: 0, utilRL: 0, utilRR: 0, diffNm: 0,
     kingpinTorqueNm: 0, rimTorqueNm: 0, trailFm: 0, mechTrailM: 0,
   };
 }

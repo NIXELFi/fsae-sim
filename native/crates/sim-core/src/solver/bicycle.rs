@@ -33,6 +33,8 @@ pub struct BicycleSolver {
     /// between the front wheels but the road.
     w_rl: f64,
     w_rr: f64,
+    /// The clutch pack's transfer torque from the last substep, for telemetry.
+    t_lock_last: f64,
     /// Relaxation-lagged slip angles (rad).
     a_f: f64,
     a_r: f64,
@@ -52,6 +54,7 @@ impl BicycleSolver {
             w_f: 0.0,
             w_rl: 0.0,
             w_rr: 0.0,
+            t_lock_last: 0.0,
             a_f: 0.0,
             a_r: 0.0,
             delta: 0.0,
@@ -412,6 +415,7 @@ impl BicycleSolver {
         let t_spring = 0.5 * t_cap * (d_w_rear / dfp.stick_rad_s.max(1e-4)).tanh();
         let t_stop = anti_j * d_w_rear.abs() / dt;
         let t_lock = t_spring.signum() * t_spring.abs().min(t_stop);
+        self.t_lock_last = t_lock;
         // Torque leaves the faster wheel and arrives at the slower one. These
         // are the torques the diff delivers BEFORE the driveline's own inertia
         // is taken out of them, which the coupled solve does.
@@ -515,6 +519,7 @@ impl BicycleSolver {
             wheel_omega_rear: 0.5 * (self.w_rl + self.w_rr),
             drive_force_n: fx_r,
             locked: drive.locked,
+            diff_nm: self.t_lock_last,
             kingpin_torque_nm: af.align_nm,
             rim_torque_nm: af.align_nm * self.c.params.rim_torque_ratio(),
             trail_front_m: af.trail_m,

@@ -154,7 +154,8 @@ const COLUMNS = [
   { id: "sim.downforce_n", dp: 1, get: (c) => c.t.downforceN },
   { id: "sim.drag_n", dp: 1, get: (c) => c.t.dragN },
   { id: "sim.drive_force_n", dp: 1, get: (c) => c.t.driveForceN },
-  { id: "sim.diff_locked_nm", dp: 2, get: (c) => c.t.locked ?? 0 },
+  // Was `c.t.locked`, the CLUTCH flag: every log before 0.5.7 has 0 here.
+  { id: "sim.diff_locked_nm", dp: 2, get: (c) => c.t.diffNm ?? 0 },
 
   // ---- where the car is on the course --------------------------------------
   { id: "sim.track_s_m", dp: 2, get: (c) => c.s },

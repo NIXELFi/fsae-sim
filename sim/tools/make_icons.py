@@ -65,6 +65,48 @@ def render(size):
     return img.resize((size, size), Image.LANCZOS)
 
 
+DARK = (11, 13, 16, 255)        # the app's window background
+DARK_2 = (23, 27, 33, 255)
+
+
+def render_hset(size):
+    """The Helios setup-file mark: a gold sun disc on a dark tile with two
+    setup sliders across it. Matches the inline SVG in sim/index.html; keep
+    the two in step."""
+    s = size * SS
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    radius = int(s * 0.22)
+    d.rounded_rectangle([0, 0, s - 1, s - 1], radius=radius, fill=DARK)
+    d.rounded_rectangle([int(s * 0.04), int(s * 0.04), s - 1 - int(s * 0.04), s - 1 - int(s * 0.04)],
+                        radius=int(radius * 0.85), outline=DARK_2, width=max(1, int(s * 0.02)))
+
+    cx = cy = s / 2
+    # Rays: eight short bars around the disc.
+    import math
+    r_in, r_out = s * 0.34, s * 0.44
+    w = max(2, int(s * 0.045))
+    for k in range(8):
+        a = k * math.pi / 4
+        d.line([(cx + r_in * math.cos(a), cy + r_in * math.sin(a)),
+                (cx + r_out * math.cos(a), cy + r_out * math.sin(a))], fill=GOLD, width=w)
+    # The disc.
+    r = s * 0.27
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=GOLD)
+    # Two slider tracks with knobs, cut out of the disc in the tile colour.
+    track_h = max(2, int(s * 0.045))
+    knob = s * 0.055
+    for (dy, kx) in ((-s * 0.075, cx - s * 0.07), (s * 0.075, cx + s * 0.08)):
+        y = cy + dy
+        d.rounded_rectangle([cx - r * 0.72, y - track_h / 2, cx + r * 0.72, y + track_h / 2],
+                            radius=track_h, fill=DARK)
+        d.ellipse([kx - knob, y - knob, kx + knob, y + knob], fill=DARK)
+        d.ellipse([kx - knob * 0.55, y - knob * 0.55, kx + knob * 0.55, y + knob * 0.55], fill=GOLD)
+
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     targets = {
@@ -82,6 +124,15 @@ def main():
     ico.save(os.path.join(OUT, "icon.ico"),
              sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     print("  icon.ico  (16-256)")
+
+    # The .hset file-type icon. Tauri's file association has no per-type icon
+    # field, so Windows shows the app icon for .hset files by default; this is
+    # the mark for the Vehicle tab's toolbar and for anyone who registers a
+    # DefaultIcon for the type by hand.
+    hset = render_hset(256)
+    hset.save(os.path.join(OUT, "hset.ico"), sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+    hset.save(os.path.join(OUT, "hset.png"))
+    print("  hset.ico  (16/32/48/256)")
     print(f"-> {OUT}")
 
 

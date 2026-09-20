@@ -23,8 +23,12 @@ mod wheel;
 ///          [--tc on|off] [--abs on|off] [--auto-shift on|off]
 ///          [--driver NAME] [--driver-id ID] [--replay RUN] [--ghost RUN]
 ///          [--reference RUN]
+///          [--setup FILE.hset]
 ///          [--no-record]
 ///          [--autostart] [--fullscreen] [--windowed] [--version]
+///
+/// A bare argument ending in `.hset` is a setup file too: that is what the
+/// shell passes when somebody double-clicks a file associated with the app.
 ///
 /// By default the window comes up borderless and filling the screen (the
 /// game window most people expect); `--windowed` keeps a decorated 1600x900
@@ -65,8 +69,18 @@ struct LaunchOptions {
     /// A label for the session -- test day, setup change, driver coaching --
     /// carried into the manifest so runs can be grouped later.
     session: Option<String>,
+    /// A Helios setup file (`.hset`) to offer on the Vehicle tab. The page
+    /// reads it through `read_text_file` and shows the import summary; the
+    /// driver still has to press Apply.
+    setup: Option<String>,
     /// Arguments the parser did not understand, reported rather than ignored.
     unknown: Vec<String>,
+}
+
+const SETUP_EXT: &str = ".hset";
+
+fn is_setup_path(a: &str) -> bool {
+    !a.starts_with("--") && a.to_ascii_lowercase().ends_with(SETUP_EXT)
 }
 
 fn on_off(v: Option<&String>) -> Option<bool> {
@@ -107,10 +121,13 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> LaunchOptions {
             "--ghost" => o.ghost = take(),
             "--reference" | "--ref" => o.reference = take(),
             "--session" => o.session = take(),
+            "--setup" => o.setup = take(),
             "--no-record" | "--norecord" => o.no_record = true,
             "--autostart" | "--start" => o.autostart = true,
             "--fullscreen" => o.fullscreen = true,
             "--windowed" | "--window" => o.windowed = true,
+            // Double-clicking an associated file launches `fsae-sim <path>`.
+            _ if is_setup_path(a) => o.setup = Some(a.to_string()),
             _ => o.unknown.push(a.to_string()),
         }
         i += 1;
@@ -121,6 +138,68 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> LaunchOptions {
 #[tauri::command]
 fn launch_options(state: tauri::State<'_, LaunchOptions>) -> LaunchOptions {
     state.inner().clone()
+}
+
+/// Cap on a setup file. A real one is a few kilobytes; anything near this is
+/// not a setup and is not worth handing to the webview.
+const SETUP_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Read a Helios setup file for the page. Deliberately NOT a general file
+/// reader: only a `.hset` is accepted, so a `--setup` argument (or a
+/// double-clicked file) cannot be turned into a way to read arbitrary text
+/// off the machine into the webview.
+#[tauri::command(async)]
+fn read_text_file(path: String) -> Result<String, String> {
+    let trimmed = path.trim().trim_matches('"');
+    if !is_setup_path(trimmed) {
+        return Err(format!("not a {SETUP_EXT} file: {trimmed}"));
+    }
+    let p = std::path::Path::new(trimmed);
+    let len = std::fs::metadata(p).map_err(|e| format!("read {}: {e}", p.display()))?.len();
+    if len > SETUP_MAX_BYTES {
+        return Err(format!("{} is {len} bytes, too large for a setup file", p.display()));
+    }
+    std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))
+}
+
+/// Where exported setups go: `sim-setups` beside the runs directory, so a
+/// setup and the runs driven on it live in the same Helios data folder.
+fn setups_dir() -> std::path::PathBuf {
+    runs::runs_dir().with_file_name("sim-setups")
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedSetup {
+    path: String,
+    bytes: usize,
+}
+
+/// Write an exported setup. `name` is a filename the page already made safe
+/// (`setupFilename` in `setupFile.js`); it is checked again here because the
+/// webview is not the trust boundary. Overwrites a setup of the same name,
+/// which is what "export again" should do.
+#[tauri::command(async)]
+fn save_setup_file(name: String, text: String) -> Result<SavedSetup, String> {
+    // A name, not a path: refused rather than rewritten, so a caller that
+    // sends `../x` finds out instead of getting a file called `x`.
+    let trimmed = name.trim();
+    let is_name = !trimmed.is_empty()
+        && !trimmed.contains("..")
+        && trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '));
+    let safe = trimmed.trim_matches('.').trim().to_string();
+    if !is_name || safe.is_empty() {
+        return Err(format!("bad setup file name: {name:?}"));
+    }
+    let file = if safe.to_ascii_lowercase().ends_with(SETUP_EXT) { safe } else { format!("{safe}{SETUP_EXT}") };
+    if text.len() as u64 > SETUP_MAX_BYTES {
+        return Err("setup text is too large".into());
+    }
+    let dir = setups_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join(file);
+    std::fs::write(&path, text.as_bytes()).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(SavedSetup { path: path.display().to_string(), bytes: text.len() })
 }
 
 fn main() {
@@ -166,6 +245,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
 
             launch_options,
+            read_text_file,
+            save_setup_file,
             runs::save_run,
             runs::load_run,
             runs::list_runs,
@@ -288,6 +369,41 @@ mod tests {
         assert_eq!(o.replay.as_deref(), Some("20260918-142233-autocross-9f3a"));
         assert_eq!(o.ghost.as_deref(), Some("other-run"));
         assert!(o.unknown.is_empty());
+    }
+
+    #[test]
+    fn parses_a_setup_flag() {
+        let o = parse_args(args("--setup \"C:\\Setups\\Nick MIS.hset\" --track mis"));
+        assert_eq!(o.setup.as_deref(), Some("C:\\Setups\\Nick MIS.hset"));
+        assert_eq!(o.track.as_deref(), Some("mis"));
+        assert!(o.unknown.is_empty());
+    }
+
+    #[test]
+    fn a_double_clicked_setup_file_is_a_setup() {
+        // What Explorer passes for an associated file: the bare path, nothing else.
+        let o = parse_args(args("\"C:\\Users\\nick\\Downloads\\Quali B.HSET\""));
+        assert_eq!(o.setup.as_deref(), Some("C:\\Users\\nick\\Downloads\\Quali B.HSET"));
+        assert!(o.unknown.is_empty(), "the path must not be reported as unknown");
+        // Any other bare argument is still unknown.
+        let o = parse_args(args("notes.txt"));
+        assert_eq!(o.setup, None);
+        assert_eq!(o.unknown, vec!["notes.txt".to_string()]);
+    }
+
+    #[test]
+    fn read_text_file_only_reads_setups() {
+        let err = read_text_file("C:/Windows/System32/drivers/etc/hosts".into()).unwrap_err();
+        assert!(err.contains("not a .hset file"), "{err}");
+        let err = read_text_file("does-not-exist.hset".into()).unwrap_err();
+        assert!(err.starts_with("read "), "{err}");
+    }
+
+    #[test]
+    fn save_setup_file_rejects_paths_and_empty_names() {
+        assert!(save_setup_file("../escape".into(), "{}".into()).is_err());
+        assert!(save_setup_file("".into(), "{}".into()).is_err());
+        assert!(save_setup_file("///".into(), "{}".into()).is_err());
     }
 
     #[test]

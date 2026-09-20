@@ -200,6 +200,36 @@ reaches slip ratio 4.1, the heavy one only 1.4. Give both a managed launch so
 they are traction-limited and the order flips back to what you would expect
 (3.53 s against 3.66 s).
 
+### Setup files
+
+A setup can leave the machine. The **Setup** toolbar at the top of the Vehicle
+model tab exports the whole parameter set as a `.hset` file (Helios setup):
+JSON text with a name, author, date, course, notes, the simulator version, and
+a `values` block holding every parameter on the sheet plus the two the driver
+moves from the wheel (front roll stiffness and brake bias), under the same
+dotted paths a run manifest records its `setup` in.
+
+It is a **full snapshot, not a diff**. A file means the same thing whatever the
+as-shipped defaults are on the machine that opens it, and a run is only
+interpretable next to every number that was in force -- not just the ones
+somebody remembered to change.
+
+Four ways in: **Import setup...** on the same toolbar, **drag a `.hset` onto
+the window** (any tab, browser or desktop), **double-click the file** (the
+desktop installer associates `.hset` with the app; a running app is re-used
+rather than started twice), or `fsae-sim --setup <file>` from a launcher. All
+of them open a summary card -- name, author, notes, and the list of parameters
+that differ from as-shipped with values and units -- and nothing is written
+into the car until you press **Apply**. Applied values persist the way a slider
+change does and reach the native car immediately. A file for another car, a
+parameter this build does not have, or a value outside the sheet's range is
+warned about on the card (unknown parameters are dropped, out-of-range values
+clamped) rather than refused; only a file that is not a Helios setup at all, or
+one from a newer simulator, is.
+
+On the desktop an export lands in `sim-setups` beside the `sim-runs` folder in
+the Helios data directory; in a browser it downloads.
+
 ## The cockpit
 
 The car is modelled and drawn around the driver: tub, nose, wings, side pods,
@@ -1039,6 +1069,16 @@ WebGL 2.0 came up clean rather than just that nothing crashed.
   model, so kerb strikes and heave dynamics are not simulated.
 
 ## Recording, replay and the delta
+
+Two channels were wrong before 0.5.7, and every log from before then carries
+the mistake: `sim.diff_locked_nm` recorded the clutch's locked flag (so it
+reads 0 everywhere) instead of the differential's transfer torque, and the
+desktop build sent one rear wheel's slip ratio and utilisation for both, so
+`sim.kappa_rl` and `sim.kappa_rr` were always identical. From 0.5.7 the diff
+channel is the clutch pack's actual transfer torque in N.m and the two rear
+wheels are logged separately, which is what tells a setup engineer whether an
+exit wheelspin was one wheel or two. See `docs/setup-autocross-2026-09-20.md`
+for the analysis that found it.
 
 Every run is logged. Not a summary -- the whole car, at 100 Hz, in a form that
 loads into Helios beside the real car's telemetry with no conversion step.

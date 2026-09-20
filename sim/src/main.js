@@ -18,11 +18,12 @@ import { Timing, fmt, sectorVerdict, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S }
 import { keyLabel, buttonLabel, buttonSlot, ACTIONS, ACTION_GROUPS } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
-import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen, restoreFullscreen, appVersion } from "./game/desktop.js";
+import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen, restoreFullscreen, appVersion, readSetupFile, saveSetupFile, onFileDrop } from "./game/desktop.js";
 import { ForceFeedback } from "./game/forceFeedback.js";
 import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet } from "./game/specSheet.js";
 import { PARAM_DEFAULTS, readParam, writeParam } from "./vehicle/paramMeta.js";
+import { serializeSetup, parseSetup, applySetup, setupFilename, diffSetup, SETUP_EXT, SETUP_MIME } from "./vehicle/setupFile.js";
 import { SetupAdjuster, ADJUSTABLE_PATHS } from "./vehicle/setupAdjust.js";
 import { drawCoursePlan } from "./game/coursePlan.js";
 import { Recorder, datumFor } from "./game/recorder.js";
@@ -78,7 +79,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.5.6";
+export let SIM_VERSION = "0.5.7";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
@@ -2117,6 +2118,18 @@ const dom = {
   vehicle: document.getElementById("vehicle"),
   resetParams: document.getElementById("resetParams"),
   paramNote: document.getElementById("paramNote"),
+  exportSetup: document.getElementById("exportSetup"),
+  importSetup: document.getElementById("importSetup"),
+  setupFile: document.getElementById("setupFile"),
+  setupExport: document.getElementById("setupExport"),
+  setupName: document.getElementById("setupName"),
+  setupNotes: document.getElementById("setupNotes"),
+  setupExportGo: document.getElementById("setupExportGo"),
+  setupExportCancel: document.getElementById("setupExportCancel"),
+  setupExportNote: document.getElementById("setupExportNote"),
+  setupCard: document.getElementById("setupCard"),
+  dropOverlay: document.getElementById("dropOverlay"),
+  toast: document.getElementById("toast"),
   restartBtn: document.getElementById("restartBtn"),
   finishMenu: document.getElementById("finishMenu"),
   finishHead: document.getElementById("finishHead"),
@@ -2411,6 +2424,256 @@ function loadParams() {
   } catch { return 0; }
 }
 
+// ---- toast: a short line at the bottom of the launch screen ---------------
+let toastTimer = 0;
+function toast(text, { error = false, ms = 2800 } = {}) {
+  const el = dom.toast;
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle("error", error);
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), ms);
+}
+
+function downloadText(name, text, mime) {
+  try {
+    const url = URL.createObjectURL(new Blob([text], { type: mime }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (err) {
+    console.warn("could not download", name, err);
+  }
+}
+
+// ---- setup files: export, import, drag-and-drop, double-click -------------
+//
+// The file itself is `src/vehicle/setupFile.js`. This is the surface: the
+// Setup toolbar on the Vehicle tab, the summary card an import opens, the
+// drop target the whole window is, and the `--setup` launch option.
+//
+// An import never applies silently. The card shows what would change against
+// as-shipped and waits for Apply, because the next thing that happens is a
+// run recorded against these numbers.
+
+function wireSetupFiles(tabs, onParamChange) {
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const markSvg = '<svg class="hset-mark" aria-hidden="true"><use href="#hset-mark-sym"/></svg>';
+  let pending = null;   // {meta, values, warnings} waiting on Apply
+
+  const isoDay = () => new Date().toISOString().slice(0, 10);
+  const defaultName = () => {
+    const who = (game?.driverName || "").trim();
+    const where = game?.track?.name || game?.trackId || "";
+    return [who, where, isoDay()].filter(Boolean).join(" ");
+  };
+
+  // ---- export -----------------------------------------------------------
+  const closeExport = () => { dom.setupExport.hidden = true; dom.setupExportNote.textContent = ""; };
+  dom.exportSetup.addEventListener("click", () => {
+    hideCard();
+    dom.setupExport.hidden = false;
+    if (!dom.setupName.value.trim()) dom.setupName.value = defaultName();
+    dom.setupName.focus();
+    dom.setupName.select();
+  });
+  dom.setupExportCancel.addEventListener("click", closeExport);
+  dom.setupName.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); dom.setupExportGo.click(); }
+    if (e.key === "Escape") closeExport();
+  });
+  dom.setupExportGo.addEventListener("click", async () => {
+    const name = dom.setupName.value.trim() || defaultName();
+    const text = serializeSetup({
+      name,
+      author: game?.driverName || "",
+      notes: dom.setupNotes.value,
+      track: game?.trackId ?? null,
+      simVersion: SIM_VERSION,
+    });
+    const file = setupFilename(name);
+    if (isDesktop) {
+      try {
+        const saved = await saveSetupFile(file, text);
+        if (saved?.path) {
+          dom.setupExportNote.textContent = `Saved ${saved.path}`;
+          toast(`Setup '${name}' saved to ${saved.path}`, { ms: 5000 });
+          return;
+        }
+      } catch (err) {
+        console.warn("native setup save failed, downloading instead", err);
+      }
+    }
+    downloadText(file, text, SETUP_MIME);
+    dom.setupExportNote.textContent = `Downloaded ${file}`;
+    toast(`Setup '${name}' exported as ${file}`);
+  });
+
+  // ---- import: file picker, drag-and-drop, launch option ----------------
+  dom.importSetup.addEventListener("click", () => { dom.setupFile.value = ""; dom.setupFile.click(); });
+  dom.setupFile.addEventListener("change", () => {
+    const f = dom.setupFile.files?.[0];
+    if (f) openFile(f);
+  });
+
+  async function openFile(file) {
+    try {
+      openText(await file.text(), file.name);
+    } catch (err) {
+      toast(`Could not read ${file.name}: ${err.message ?? err}`, { error: true });
+    }
+  }
+
+  /** Parse setup text and show the card (or say why not). */
+  function openText(text, sourceName = "") {
+    let parsed;
+    try {
+      parsed = parseSetup(text);
+    } catch (err) {
+      const what = sourceName ? `${sourceName}: ` : "";
+      toast(`${what}${err.message ?? err}`, { error: true, ms: 5000 });
+      return false;
+    }
+    showCard(parsed, sourceName);
+    return true;
+  }
+
+  /** A path from `--setup`, a double-click, or a native drop. */
+  async function openPath(path) {
+    if (!path) return false;
+    const name = String(path).split(/[\\/]/).pop();
+    try {
+      const text = isDesktop
+        ? await readSetupFile(String(path))
+        : await fetch(String(path)).then((r) => { if (!r.ok) throw new Error(`${r.status} ${r.statusText}`); return r.text(); });
+      return openText(text, name);
+    } catch (err) {
+      toast(`Could not open ${name}: ${err.message ?? err}`, { error: true, ms: 5000 });
+      return false;
+    }
+  }
+
+  // The whole window is a drop target, in the browser via the DOM and on the
+  // desktop via Tauri's own events (see desktop.js). Depth-counted so the
+  // overlay does not flicker as the drag crosses child elements.
+  let dragDepth = 0;
+  const showOverlay = (on) => {
+    dom.dropOverlay.classList.toggle("show", on);
+    if (!on) dragDepth = 0;
+  };
+  const looksLikeSetup = (name) => String(name ?? "").toLowerCase().endsWith(SETUP_EXT);
+  const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+  document.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    if (dragDepth++ === 0) showOverlay(true);
+  });
+  document.addEventListener("dragover", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  });
+  document.addEventListener("dragleave", (e) => {
+    if (!hasFiles(e)) return;
+    if (--dragDepth <= 0) showOverlay(false);
+  });
+  document.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    showOverlay(false);
+    const files = [...(e.dataTransfer?.files ?? [])];
+    const file = files.find((f) => looksLikeSetup(f.name)) ?? files[0];
+    if (file) openFile(file);
+  });
+  onFileDrop({
+    enter: () => showOverlay(true),
+    leave: () => showOverlay(false),
+    drop: (paths) => {
+      showOverlay(false);
+      const path = paths.find(looksLikeSetup);
+      if (path) openPath(path);
+      else if (paths.length) toast(`Not a setup file: ${String(paths[0]).split(/[\\/]/).pop()}`, { error: true });
+    },
+  });
+
+  // ---- the summary card ---------------------------------------------------
+  function hideCard() {
+    pending = null;
+    dom.setupCard.hidden = true;
+    dom.setupCard.innerHTML = "";
+  }
+
+  function showCard(parsed, sourceName) {
+    pending = parsed;
+    closeExport();
+    const { meta, values, warnings } = parsed;
+    const changes = diffSetup(values);
+    const when = meta.created ? new Date(meta.created) : null;
+    const whenText = when && !Number.isNaN(when.getTime())
+      ? when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+      : (meta.created || "");
+    const trackName = meta.track ? (TRACKS.find((t) => t.id === meta.track)?.name ?? meta.track) : "";
+    const metaBits = [
+      meta.author ? `by ${meta.author}` : "",
+      whenText,
+      trackName,
+      meta.simVersion ? `sim ${meta.simVersion}` : "",
+      sourceName,
+    ].filter(Boolean).map(esc).join("  &middot;  ");
+
+    const rows = changes.map((c) => `
+      <tr>
+        <td>${esc(c.label)}</td>
+        <td class="v">${esc(c.fromText)}<span>${esc(c.unit)}</span></td>
+        <td class="arrow">&rarr;</td>
+        <td class="v to">${esc(c.toText)}<span>${esc(c.unit)}</span></td>
+      </tr>`).join("");
+
+    dom.setupCard.innerHTML = `
+      <div class="head">${markSvg}
+        <div>
+          <h4>${esc(meta.name)}</h4>
+          <div class="meta">${metaBits}</div>
+        </div>
+      </div>
+      ${meta.notes ? `<p class="notes">${esc(meta.notes)}</p>` : ""}
+      ${warnings.length ? `<ul class="warn-list">${warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+      ${changes.length
+        ? `<table class="changes"><tbody>${rows}</tbody></table>
+           <p class="same">${changes.length} parameter${changes.length === 1 ? "" : "s"} differ${changes.length === 1 ? "s" : ""} from as-shipped; the other ${Object.keys(values).length - changes.length} match.</p>`
+        : `<p class="same">Every parameter in this setup is at its as-shipped value.</p>`}
+      <div class="actions">
+        <button class="primary" id="setupApply">Apply</button>
+        <button class="secondary" id="setupCancel">Cancel</button>
+        <span class="note">Apply writes ${Object.keys(values).length} parameters into the car and remembers them like any slider change.</span>
+      </div>`;
+    dom.setupCard.hidden = false;
+    dom.setupCard.querySelector("#setupApply").addEventListener("click", applyPending);
+    dom.setupCard.querySelector("#setupCancel").addEventListener("click", hideCard);
+    tabs.show("vehicle");
+    dom.setupCard.scrollIntoView?.({ block: "nearest" });
+  }
+
+  function applyPending() {
+    if (!pending) return;
+    const { meta, values } = pending;
+    const n = applySetup(values);
+    saveParams();
+    renderSpecSheet(dom.vehicle, onParamChange);
+    game?.pushParams();
+    game?.renderer.rebuildCar(SDM26);
+    updateSession();
+    dom.paramNote.textContent = `Setup '${meta.name}' loaded: ${n} parameters.`;
+    hideCard();
+    toast(`Setup '${meta.name}' loaded`);
+  }
+
+  return { openPath, openText, openFile };
+}
+
 function etcSummary(map) {
   const d = map.describe();
   const name = map.name === "custom" ? "Custom" : map.name[0].toUpperCase() + map.name.slice(1);
@@ -2455,6 +2718,7 @@ async function boot() {
     dom.paramNote.textContent = "All parameters back to as-shipped.";
     updateSession();
   });
+  const setupUi = wireSetupFiles(tabs, onParamChange);
 
   try {
     game = new Game(dom);
@@ -2956,6 +3220,10 @@ async function boot() {
     if (o.autoShift != null) dom.autoToggle.checked = o.autoShift;
     if (o.fullscreen) toggleFullscreen();
     updateSession();
+    // A setup file on the command line -- `--setup x.hset`, or the bare path
+    // a double-click passes -- opens the import card; the driver still
+    // presses Apply. In a browser `?setup=` is a URL to fetch.
+    if (o.setup) await setupUi.openPath(o.setup);
     // A launcher can open straight into a recorded run instead of a drive.
     // That is how Helios's "Watch replay" works: it starts (or re-focuses)
     // the sim with the run it wants on the command line.
@@ -2984,6 +3252,7 @@ async function boot() {
       driver: q.get("driver"), driverId: q.get("driverId"), session: q.get("session"),
       noRecord: onOff(q.get("record")) === false ? true : onOff(q.get("norecord")),
       replay: q.get("replay"), ghost: q.get("ghost"), reference: q.get("reference"),
+      setup: q.get("setup"),
       autostart: onOff(q.get("autostart")) === true, fullscreen: onOff(q.get("fullscreen")) === true,
     };
   };

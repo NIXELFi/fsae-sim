@@ -104,6 +104,10 @@ pub struct Telemetry {
     pub drive_force_n: f64,
     /// Clutch locked this substep.
     pub locked: bool,
+    /// Torque the differential moved from the faster rear wheel to the
+    /// slower one this substep (N.m, signed toward the left wheel). Zero for
+    /// an open axle and for solvers without a differential.
+    pub diff_nm: f64,
     /// Steering feel. The moment both front tyres put on the steering axis,
     /// and what reaches the driver's hands. Left-positive like `steer_rad`:
     /// positive tries to steer further left.

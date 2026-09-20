@@ -389,8 +389,19 @@ pub struct TelemetryOut {
     pub slip_r: f64,
     pub kappa_f: f64,
     pub kappa_r: f64,
+    /// Per rear wheel, so the log can show which side is spinning.
+    #[serde(rename = "kappaRL")]
+    pub kappa_rl: f64,
+    #[serde(rename = "kappaRR")]
+    pub kappa_rr: f64,
     pub util_f: f64,
     pub util_r: f64,
+    #[serde(rename = "utilRL")]
+    pub util_rl: f64,
+    #[serde(rename = "utilRR")]
+    pub util_rr: f64,
+    /// The differential's transfer torque, N.m.
+    pub diff_nm: f64,
     pub balance: f64,
     pub downforce_n: f64,
     pub drag_n: f64,
@@ -1289,8 +1300,13 @@ impl Loop {
                 slip_r: tel.slip_deg[RL],
                 kappa_f: tel.kappa[FL],
                 kappa_r: tel.kappa[RL],
+                kappa_rl: tel.kappa[RL],
+                kappa_rr: tel.kappa[RR],
                 util_f: tel.utilisation[FL],
                 util_r: tel.utilisation[RL],
+                util_rl: tel.utilisation[RL],
+                util_rr: tel.utilisation[RR],
+                diff_nm: tel.diff_nm,
                 balance: tel.balance,
                 downforce_n: tel.downforce_n,
                 drag_n: tel.drag_n,

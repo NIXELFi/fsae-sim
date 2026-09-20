@@ -182,6 +182,43 @@ export function onLaunchOptions(cb) {
   ev.listen("launch-options", (e) => cb(e.payload)).catch(() => {});
 }
 
+// ---- setup files -----------------------------------------------------------
+//
+// A `.hset` arrives three ways on the desktop: `--setup <path>` (or a
+// double-clicked file, which is the same thing), a second launch of the same,
+// or a file dragged onto the window. The first two hand the page a PATH, which
+// the shell reads with `read_text_file` (a reader that accepts nothing but a
+// `.hset`). The third goes through Tauri's own drag-drop events, because with
+// `dragDropEnabled` (the default) the webview never sees HTML5 `drop`.
+
+/** Read a `.hset` by path. Rejects in a browser and for anything else. */
+export const readSetupFile = (path) => invoke("read_text_file", { path }).then((t) => {
+  if (typeof t !== "string") throw new Error("not running in the desktop shell");
+  return t;
+});
+
+/**
+ * Write an exported setup into the Helios data folder (`sim-setups`, beside
+ * the runs). Resolves to `{path, bytes}`, or null in a browser so the caller
+ * falls back to a download.
+ */
+export const saveSetupFile = (name, text) => invoke("save_setup_file", { name, text }).catch((e) => {
+  throw new Error(String(e));
+});
+
+/**
+ * Files dragged onto the native window. `enter`/`leave` bracket the hover so
+ * the page can show its "drop to load" overlay; `drop` gets the paths. No-op
+ * in a browser, where the DOM drag events do the same job.
+ */
+export function onFileDrop({ enter, leave, drop }) {
+  const ev = window.__TAURI__?.event;
+  if (!ev?.listen) return;
+  ev.listen("tauri://drag-enter", (e) => enter?.(e.payload?.paths ?? [])).catch(() => {});
+  ev.listen("tauri://drag-leave", () => leave?.()).catch(() => {});
+  ev.listen("tauri://drag-drop", (e) => drop?.(e.payload?.paths ?? [])).catch(() => {});
+}
+
 export const rigNative = {
   /** True only in the desktop shell. */
   available: () => !!window.__TAURI__?.core?.invoke,
