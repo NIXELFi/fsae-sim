@@ -37,8 +37,9 @@ const GHOST_ALPHA = 0.55;
 const SKID_MAX = 8000;
 /** Floats per segment: two triangles of (x, y, z, alpha). */
 const SKID_FLOATS = 6 * 4;
-/** Half-width of a mark, metres -- a 7 in slick leaves about this. */
-const SKID_HALF_W = 0.085;
+/** Half-width of a mark, metres -- a bit under the slick's 7 in, since only
+ *  the loaded shoulder really scrubs. */
+const SKID_HALF_W = 0.07;
 /** Height of the marks above the deck: over the ribbon, under a cone's plate. */
 const SKID_Y = 0.018;
 const SHADOW_SIZE = 2048;     // texels, per cascade
@@ -509,8 +510,8 @@ uniform vec3 uEye;
 out vec4 frag;
 void main() {
   float d = length(vWorld - uEye);
-  float fade = 1.0 - smoothstep(70.0, 180.0, d);
-  frag = vec4(0.015, 0.015, 0.02, vA * fade);
+  float fade = 1.0 - smoothstep(50.0, 140.0, d);
+  frag = vec4(0.03, 0.03, 0.035, vA * fade);
 }`;
 
 const RIBBON_VS = `#version 300 es
@@ -1668,12 +1669,14 @@ export class Renderer {
       const z = this._hubXZ[i * 2 + 1];
       const prev = sk.prev[i];
       const a = intensity[i] ?? 0;
-      if (prev && a > 0.04) {
+      if (prev && a > 0.15) {
         const dx = x - prev.x, dz = z - prev.z;
         const len = Math.hypot(dx, dz);
         if (len > 0.015 && len < 2.5) {
           const nx = (-dz / len) * SKID_HALF_W, nz = (dx / len) * SKID_HALF_W;
-          const alpha = Math.min(0.7, 0.15 + a * 0.55);
+          // Faint at the onset, never black: rubber on asphalt is a shade
+          // darker, not paint.
+          const alpha = Math.min(0.38, 0.04 + a * 0.34);
           const v = sk.seg;
           const put = (k, px, pz) => { v[k] = px; v[k + 1] = SKID_Y; v[k + 2] = pz; v[k + 3] = alpha; };
           put(0, prev.x + nx, prev.z + nz); put(4, prev.x - nx, prev.z - nz); put(8, x - nx, z - nz);

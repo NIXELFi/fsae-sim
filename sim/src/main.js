@@ -1258,12 +1258,16 @@ class Game {
   skidIntensity(tel) {
     const sk = this._skid ?? (this._skid = [0, 0, 0, 0]);
     if (this.car.speed < 1.5) { sk[0] = sk[1] = sk[2] = sk[3] = 0; return sk; }
-    const lockF = Math.max(0, -(tel.kappaF ?? 0) - 0.15) * 2.5;
-    const lockR = Math.max(0, -(tel.kappaR ?? 0) - 0.15) * 2.5;
-    const spinR = Math.max(0, (tel.kappaR ?? 0) - 0.15) * 2.5;
-    const scrubF = Math.max(0, (tel.utilF ?? 0) - 0.92) / 0.08;
-    const scrubR = Math.max(0, (tel.utilR ?? 0) - 0.92) / 0.08;
-    const f = Math.min(1, Math.max(lockF, scrubF));
+    // Only a tyre genuinely past its peak marks the road: a car cornering
+    // hard but within its grip leaves nothing, which is what a slick on
+    // warm asphalt does. The first cut at 92% painted every corner black.
+    const lockF = Math.max(0, -(tel.kappaF ?? 0) - 0.30) * 2.0;
+    const lockR = Math.max(0, -(tel.kappaR ?? 0) - 0.30) * 2.0;
+    const spinR = Math.max(0, (tel.kappaR ?? 0) - 0.30) * 2.0;
+    const scrubF = Math.max(0, (tel.utilF ?? 0) - 0.985) / 0.03;
+    const scrubR = Math.max(0, (tel.utilR ?? 0) - 0.985) / 0.03;
+    // Fronts mark less: they carry less load and scrub at a lower angle.
+    const f = Math.min(1, Math.max(lockF, scrubF)) * 0.6;
     const r = Math.min(1, Math.max(lockR, spinR, scrubR));
     sk[0] = f; sk[1] = f; sk[2] = r; sk[3] = r;
     return sk;
