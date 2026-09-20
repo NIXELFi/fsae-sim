@@ -78,7 +78,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.5.3";
+export let SIM_VERSION = "0.5.5";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
@@ -1234,6 +1234,9 @@ class Game {
     sv.yawOffset = cam.rigid ? this.headYaw : 0;
     sv.pitchOffset = cam.pitch;
     sv.rigid = cam.rigid;
+    // The cockpit camera sits inside the helmet; the driver is for the
+    // other cameras and the replay ghost.
+    scene.hideDriver = !!cam.live;
     sv.orbit = cam.orbit;
     sv.yaw = this.chaseYaw ?? drawn.psi;
     // Live, so the walkaround can be moved while looking at the car --

@@ -140,3 +140,17 @@ export function invertRigid(out, m) {
   out[15] = 1;
   return out;
 }
+
+/**
+ * A rigid frame from three axis vectors and an origin, column-major: the
+ * matrix that carries local +X, +Y, +Z onto `x`, `y`, `z` and the local
+ * origin onto `origin`. The axes are written as given -- orthonormalise
+ * them first if the frame has to be rigid. In place, no allocation.
+ */
+export function basisFromAxes(out, x, y, z, origin) {
+  out[0] = x[0]; out[1] = x[1]; out[2] = x[2]; out[3] = 0;
+  out[4] = y[0]; out[5] = y[1]; out[6] = y[2]; out[7] = 0;
+  out[8] = z[0]; out[9] = z[1]; out[10] = z[2]; out[11] = 0;
+  out[12] = origin[0]; out[13] = origin[1]; out[14] = origin[2]; out[15] = 1;
+  return out;
+}

@@ -23,6 +23,7 @@
 import {
   mat4, perspective, lookAlong, multiply, normalize, identity, ortho,
   translation, rotX, rotY, rotZ, scale, transformDir, transformPoint,
+  basisFromAxes,
 } from "./math.js";
 import { buildCarMeshes, GEO, HUBS } from "./carmesh.js";
 import { buildVenueMesh } from "./venuemesh.js";
@@ -134,6 +135,10 @@ const MAT = {
   // `wheel` it caught the sky and read as bare aluminium, which is the one
   // thing an AiM case is not.
   dash: [0.88, 0.0, 0.0],
+  // The driver: a Nomex suit and belts are cloth, about as matte as it gets.
+  suit: [0.92, 0.0, 0.0],
+  // The helmet is a lacquered shell, the one part of the driver that gleams.
+  helmet: [0.28, 0.0, 0.9],
 };
 
 /** How hard the display-space S-curve in `finish` pulls at contrast.
@@ -505,7 +510,7 @@ void main() {
 
   // Below the horizon there is nothing but the ground plane, which is fogged
   // to the same colour; a slightly darker band there hides any seam.
-  if (y < 0.0) c = mix(uHorizon, uHorizon * 0.96, clamp(-y * 8.0, 0.0, 1.0));
+  if (y < 0.0) c = uHorizon;
   frag = finish(c);
 }`;
 
@@ -1069,7 +1074,19 @@ export class Renderer {
       rim: this.makeMesh(carMeshes.rim),
       steeringWheel: this.makeMesh(carMeshes.steeringWheel),
       dashCase: this.makeMesh(carMeshes.dashCase),
+      // The driver: helmet, shoulders, belts and upper arms. Always the
+      // procedural one, even under a CAD body -- a CAD export has no driver.
+      // Skipped from the cockpit camera, which sits inside the helmet.
+      driver: carMeshes.driver ? this.makeMesh(carMeshes.driver) : null,
+      helmet: carMeshes.helmet ? this.makeMesh(carMeshes.helmet) : null,
+      // The arms: canonical bones along +X, posed per frame by `placeArms`
+      // from the shoulders to the gloves on the wheel. Drawn from every
+      // camera -- from the seat they are the point.
+      upperArm: carMeshes.upperArm ? this.makeMesh(carMeshes.upperArm) : null,
+      forearm: carMeshes.forearm ? this.makeMesh(carMeshes.forearm) : null,
     };
+    /** Shoulders, glove positions, bone lengths -- see `armRig` in carmesh. */
+    this.arms = carMeshes.arms ?? null;
 
     // The dash screen: a textured quad, and the canvas the HUD draws into.
     this.dashScreen = this.makeScreenQuad(GEO.dashHalfWidth, GEO.dashHalfHeight);
@@ -1079,6 +1096,16 @@ export class Renderer {
     // cascade as well as the main pass.
     this.dashModel = mat4();
     this.steerModel = mat4();
+    // The wheel's own frame in CHASSIS space (steerModel without the
+    // chassis in front of it), kept so the arm IK can find the gloves
+    // without inverting the chassis every frame. One for the ghost too.
+    this.wheelLocal = mat4();
+    this._ghostWheelLocal = mat4();
+    // Arm model matrices: [upper L, fore L, upper R, fore R].
+    this._armMats = [mat4(), mat4(), mat4(), mat4()];
+    this._ghostArmMats = [mat4(), mat4(), mat4(), mat4()];
+    this._armT = mat4();
+    this._armV = Array.from({ length: 8 }, () => new Float64Array(3));
 
     this.viewProj = mat4();
     this.proj = mat4();
@@ -1152,7 +1179,12 @@ export class Renderer {
         rim: this.makeMesh(car.rim),
         steeringWheel: this.makeMesh(car.steeringWheel),
         dashCase: this.makeMesh(meshes.dashCase),
+        driver: meshes.driver ? this.makeMesh(meshes.driver) : null,
+        helmet: meshes.helmet ? this.makeMesh(meshes.helmet) : null,
+        upperArm: meshes.upperArm ? this.makeMesh(meshes.upperArm) : null,
+        forearm: meshes.forearm ? this.makeMesh(meshes.forearm) : null,
       };
+      this.arms = meshes.arms ?? null;
       this.carModel = { hubs: car.hubs, steerCentre: car.steerCentre };
     } else {
       this.car = {
@@ -1161,7 +1193,12 @@ export class Renderer {
         rim: this.makeMesh(meshes.rim),
         steeringWheel: this.makeMesh(meshes.steeringWheel),
         dashCase: this.makeMesh(meshes.dashCase),
+        driver: meshes.driver ? this.makeMesh(meshes.driver) : null,
+        helmet: meshes.helmet ? this.makeMesh(meshes.helmet) : null,
+        upperArm: meshes.upperArm ? this.makeMesh(meshes.upperArm) : null,
+        forearm: meshes.forearm ? this.makeMesh(meshes.forearm) : null,
       };
+      this.arms = meshes.arms ?? null;
       this.carModel = null;
     }
   }
@@ -1247,6 +1284,7 @@ export class Renderer {
       if (sw?.vao) gl.deleteVertexArray(sw.vao);
       for (const b of Object.values(sw?.buffers ?? {})) gl.deleteBuffer(b);
       this.car.steeringWheel = this.makeMesh(meshes.steeringWheel);
+      this.arms = meshes.arms ?? null;
       if (!this.wheelModel) {
         for (const key of ["tire", "rim"]) {
           const m = this.car[key];
@@ -1261,17 +1299,24 @@ export class Renderer {
       // Same for an imported wheel: rebuild the body, keep the wheel.
       const meshes = buildCarMeshes(params);
       const gl = this.gl;
-      for (const key of ["body", "steeringWheel"]) {
+      for (const key of ["body", "steeringWheel", "driver", "helmet", "upperArm", "forearm"]) {
         const mesh = this.car[key];
         if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
         for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
       }
       this.car.body = this.makeMesh(meshes.body);
       this.car.steeringWheel = this.makeMesh(meshes.steeringWheel);
+      this.car.driver = meshes.driver ? this.makeMesh(meshes.driver) : null;
+      this.car.helmet = meshes.helmet ? this.makeMesh(meshes.helmet) : null;
+      this.car.upperArm = meshes.upperArm ? this.makeMesh(meshes.upperArm) : null;
+      this.car.forearm = meshes.forearm ? this.makeMesh(meshes.forearm) : null;
+      this.arms = meshes.arms ?? null;
       return;
     }
     const gl = this.gl;
-    const body = buildCarMeshes(params).body;
+    const rebuilt = buildCarMeshes(params);
+    const body = rebuilt.body;
+    this.arms = rebuilt.arms ?? null;   // the shoulders follow the eye point
     gl.bindBuffer(gl.ARRAY_BUFFER, this.car.body.buffers.position);
     gl.bufferData(gl.ARRAY_BUFFER, body.position, gl.STATIC_DRAW);
     this.car.body.count = body.count;
@@ -1734,7 +1779,9 @@ export class Renderer {
     this.setContact(ug, cam);
     gl.uniformMatrix4fv(ug.uViewProj, false, this.viewProj);
     gl.uniform2f(ug.uCamXZ, eye[0], eye[2]);
-    gl.uniform1f(ug.uExtent, 900);
+    // Out to where the fog is complete (3 km is 1 - exp(-(3000/520)^1.6),
+    // i.e. all of it); at 900 m the edge was 9 % unfogged and drew a line.
+    gl.uniform1f(ug.uExtent, 3000);
     // The venue paves its own ground; sink the procedural lot below it.
     gl.uniform1f(ug.uDrop, this.venue ? 0.35 : 0.0);
     gl.uniform2f(ug.uLotCentre, this.lot.cx, this.lot.cz);
@@ -2064,6 +2111,11 @@ export class Renderer {
     this._placeWheelSet(this._ghostAxles,
       { steerRad: g.steerRad || 0, spinFront: g.spinFront || 0, spinRear: g.spinRear || 0 },
       s.hubs, this._ghostWheelMats, this._ghostMirrored, null);
+    // The ghost has no wheel drawn, but its driver's arms still follow the
+    // steering it logged, or they would sit at dead-ahead through every
+    // corner of the lap.
+    this.wheelFrame(this._ghostWheelLocal, g.steerRad || 0, s.wheels?.steerRatio);
+    this.placeArms(this._ghostWheelLocal, this._ghostChassis, this._ghostArmMats);
     const c = g.color;
     if (c) { this._ghostOv[0] = c[0]; this._ghostOv[1] = c[1]; this._ghostOv[2] = c[2]; }
     this._ghostOv[3] = g.tint ?? 0.8;
@@ -2107,6 +2159,13 @@ export class Renderer {
       this.drawArrays(gl.TRIANGLES, 0, mesh.count);
     };
     part(this.car.body, this._ghostChassis, MAT.paint);
+    if (this.car.driver) part(this.car.driver, this._ghostChassis, MAT.suit);
+    if (this.car.helmet) part(this.car.helmet, this._ghostChassis, MAT.helmet);
+    if (this.arms && this.car.upperArm && this.car.forearm) {
+      for (let k = 0; k < 4; k++) {
+        part(k & 1 ? this.car.forearm : this.car.upperArm, this._ghostArmMats[k], MAT.suit);
+      }
+    }
     for (let i = 0; i < 4; i++) {
       gl.frontFace(this._ghostMirrored[i] ? gl.CW : gl.CCW);
       part(this.car.tire, this._ghostWheelMats[i], MAT.tyre);
@@ -2193,6 +2252,20 @@ export class Renderer {
         cast(this.car.steeringWheel, this.steerModel);
         cast(this.car.dashCase, this.dashModel);
         for (let k = 0; k < 4; k++) cast(this.car.rim, this._wheelMats[k]);
+        // The arms: their shadow on the tub and the wheel is what places
+        // the gloves on the rim rather than in front of it.
+        if (this.arms) {
+          for (let k = 0; k < 4; k++) cast(k & 1 ? this.car.forearm : this.car.upperArm, this._armMats[k]);
+        }
+      }
+      // The driver's helmet stands proud of the tub, so its shadow is on the
+      // deck from any camera; cast it in both cascades, whether or not the
+      // cockpit camera is hiding the mesh itself.
+      for (const mesh of [this.car.driver, this.car.helmet]) {
+        if (!mesh) continue;
+        gl.uniformMatrix4fv(ud.uModel, false, this.chassis);
+        gl.bindVertexArray(mesh.vao);
+        this.drawArrays(gl.TRIANGLES, 0, mesh.count);
       }
       // The ghost throws a shadow too, or it reads as a hologram.
       if (this._ghostOn) {
@@ -2240,6 +2313,20 @@ export class Renderer {
     };
 
     part(this.car.body, this.chassis, null, MAT.paint);
+    // The driver rides on the chassis frame. Not from the cockpit camera:
+    // that eye is inside the helmet, and a helmet lining is not a view.
+    if (!s.hideDriver) {
+      if (this.car.driver) part(this.car.driver, this.chassis, null, MAT.suit);
+      if (this.car.helmet) part(this.car.helmet, this.chassis, null, MAT.helmet);
+    }
+    // The arms, from EVERY camera: from the seat they are what you see of
+    // yourself, and they are posed by `placeArms` so the elbows stay in the
+    // tub whatever the wheel is doing.
+    if (this.arms && this.car.upperArm && this.car.forearm) {
+      for (let k = 0; k < 4; k++) {
+        part(k & 1 ? this.car.forearm : this.car.upperArm, this._armMats[k], null, MAT.suit);
+      }
+    }
 
     const w = s.wheels;
     for (let i = 0; i < 4; i++) {
@@ -2298,12 +2385,110 @@ export class Renderer {
       translation(T[1], dc[0], dc[1], dc[2]),
       rotX(T[2], GEO.dashTiltRad),
     ]);
-    this.chain(this.steerModel, [
-      this.chassis,
+    this.wheelFrame(this.wheelLocal, w.steerRad, w.steerRatio);
+    multiply(this.steerModel, this.chassis, this.wheelLocal);
+    this.placeArms(this.wheelLocal, this.chassis, this._armMats);
+  }
+
+  /**
+   * The steering wheel's frame in chassis space: column position, column
+   * tilt, then the spin. `steerModel` is the chassis times this; the arm IK
+   * reads it directly, because the gloves are authored in this frame.
+   */
+  wheelFrame(out, steerRad, steerRatio) {
+    const T = this._t;
+    const tilt = GEO.steerTiltRad;
+    const basis = T[3];
+    basis.set([
+      0, 0, -1, 0,
+      Math.sin(tilt), Math.cos(tilt), 0, 0,
+      Math.cos(tilt), -Math.sin(tilt), 0, 0,
+      0, 0, 0, 1,
+    ]);
+    const sc = this.carModel?.steerCentre ?? GEO.steerCentre;
+    return this.chain(out, [
       translation(T[0], sc[0], sc[1], sc[2]),
       basis,
-      rotZ(T[1], -w.steerRad * (w.steerRatio ?? GEO.steeringRatio)),
+      rotZ(T[1], -steerRad * (steerRatio ?? GEO.steeringRatio)),
     ]);
+  }
+
+  /**
+   * Pose the driver's arms: a two-bone IK per side from the shoulder (fixed
+   * in the chassis) to the glove (fixed on the wheel, so it goes wherever
+   * the steering takes it).
+   *
+   * The reach is clamped to what the two bones can span; with the lengths
+   * in `armRig` the wheel never carries a hand out of reach, so the fist
+   * always sits on the wrist. The elbow angle comes from the law of
+   * cosines, and the elbow itself is dropped into the plane of the
+   * shoulder-hand line and the hint direction -- down and a little
+   * outboard, which is where an elbow goes in a tub 600 mm wide. The
+   * frames are built from the bone directions with the hint as the up
+   * reference; both bones are tubes, so their roll does not matter.
+   *
+   * `wheelLocal` is the wheel's frame in CHASSIS space and `chassis` the
+   * frame the result is drawn in; the ghost passes its own of each. Writes
+   * `out` as [upper L, fore L, upper R, fore R]. No allocation.
+   */
+  placeArms(wheelLocal, chassis, out) {
+    const rig = this.arms;
+    if (!rig || !this.car.upperArm || !this.car.forearm) return;
+    const V = this._armV;
+    const S = V[0], H = V[1], U = V[2], N = V[3], E = V[4], X = V[5], Y = V[6], Z = V[7];
+    const a = rig.lUpper, b = rig.lFore;
+    const EPS = 0.005;
+    const setCross = (o, p, q) => {
+      o[0] = p[1] * q[2] - p[2] * q[1];
+      o[1] = p[2] * q[0] - p[0] * q[2];
+      o[2] = p[0] * q[1] - p[1] * q[0];
+    };
+    const unit = (o) => {
+      const l = Math.hypot(o[0], o[1], o[2]) || 1;
+      o[0] /= l; o[1] /= l; o[2] /= l;
+      return l;
+    };
+    for (let side = 0; side < 2; side++) {
+      const sh = rig.shoulders[side], hd = rig.hands[side], hint = rig.elbowHints[side];
+      S[0] = sh[0]; S[1] = sh[1]; S[2] = sh[2];
+      // The glove, carried from the wheel's frame into the chassis's.
+      H[0] = wheelLocal[0] * hd[0] + wheelLocal[4] * hd[1] + wheelLocal[8] * hd[2] + wheelLocal[12];
+      H[1] = wheelLocal[1] * hd[0] + wheelLocal[5] * hd[1] + wheelLocal[9] * hd[2] + wheelLocal[13];
+      H[2] = wheelLocal[2] * hd[0] + wheelLocal[6] * hd[1] + wheelLocal[10] * hd[2] + wheelLocal[14];
+      U[0] = H[0] - S[0]; U[1] = H[1] - S[1]; U[2] = H[2] - S[2];
+      const dist = unit(U);
+      const d = Math.min(Math.max(dist, Math.abs(a - b) + EPS), a + b - EPS);
+      // Law of cosines: the elbow's distance along the shoulder-hand line
+      // and its drop off it.
+      const xE = (d * d + a * a - b * b) / (2 * d);
+      const h = Math.sqrt(Math.max(0, a * a - xE * xE));
+      // The hint, made perpendicular to the line.
+      let k = hint[0] * U[0] + hint[1] * U[1] + hint[2] * U[2];
+      N[0] = hint[0] - k * U[0]; N[1] = hint[1] - k * U[1]; N[2] = hint[2] - k * U[2];
+      if (unit(N) < 1e-4) {
+        // Hint along the bone line: fall back to straight down.
+        k = -U[1];
+        N[0] = -k * U[0]; N[1] = -1 - k * U[1]; N[2] = -k * U[2];
+        unit(N);
+      }
+      E[0] = S[0] + U[0] * xE + N[0] * h;
+      E[1] = S[1] + U[1] * xE + N[1] * h;
+      E[2] = S[2] + U[2] * xE + N[2] * h;
+      // Upper arm: +X from the shoulder to the elbow.
+      X[0] = E[0] - S[0]; X[1] = E[1] - S[1]; X[2] = E[2] - S[2];
+      unit(X);
+      setCross(Z, X, N); unit(Z);
+      setCross(Y, Z, X);
+      basisFromAxes(this._armT, X, Y, Z, S);
+      multiply(out[side * 2], chassis, this._armT);
+      // Forearm: +X from the elbow to the (reach-clamped) hand.
+      X[0] = S[0] + U[0] * d - E[0]; X[1] = S[1] + U[1] * d - E[1]; X[2] = S[2] + U[2] * d - E[2];
+      unit(X);
+      setCross(Z, X, N); unit(Z);
+      setCross(Y, Z, X);
+      basisFromAxes(this._armT, X, Y, Z, E);
+      multiply(out[side * 2 + 1], chassis, this._armT);
+    }
   }
 
   /**

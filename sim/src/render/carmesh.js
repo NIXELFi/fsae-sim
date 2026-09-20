@@ -13,7 +13,7 @@
 // lighting, so a face pointing the wrong way still shades correctly. Inside a
 // cockpit you are looking at the back of half the bodywork by definition.
 
-import { lengthToFrontAxle, lengthToRearAxle } from "../vehicle/params.js";
+import { SDM26, lengthToFrontAxle, lengthToRearAxle } from "../vehicle/params.js";
 
 // ---- palette ----
 //
@@ -69,6 +69,22 @@ const AMBER_LIT = [1.0, 0.80, 0.34];
 /** The domed face of a button, which catches the light the barrel does not. */
 const GOLD_LIT = [1.0, 0.88, 0.42];
 const EMBLEM = [0.86, 0.87, 0.88];
+
+// ---- the driver ----
+// Same display-space rule as the rest: the suit and the harness are the
+// darkest cloth on the car, and Nomex under sunlight is about 0.03 linear,
+// not zero. The suit carries a little of the team's maroon so it separates
+// from the carbon around it; the webbing is navy so it separates from the
+// suit.
+const SUIT = [0.205, 0.17, 0.18];
+const GLOVE = [0.30, 0.13, 0.17];
+const STRAP = [0.17, 0.185, 0.26];
+/** Helmet shell: gloss white, with the maroon below the visor and up the crown. */
+const HELMET = [0.90, 0.895, 0.88];
+const HELMET_TRIM = MAROON;
+/** Visor: a dark tint under gloss. The liner is the matte black inside it. */
+const VISOR = [0.17, 0.185, 0.215];
+const HELMET_LINER = [0.19, 0.19, 0.20];
 
 // Real SDM26 dimensions (Helios spec sheet).
 export const GEO = {
@@ -896,10 +912,382 @@ function buildSteeringWheel() {
   b.box(0, 0.005, MZ, 0.027, 0.005, 0.003, EMBLEM);     // crossbar
   b.box(0, -0.008, MZ, 0.0055, 0.022, 0.003, EMBLEM);   // shaft
 
-  // No hands. Full lock swings a glove from 3 o'clock round to 10, high
-  // enough to break the horizon in the middle of the frame, and without
-  // modelled arms that reads as a floating black box on the road.
+  // ---- the driver's gloves ----
+  //
+  // Fists at 9 and 3, wrapped round the grips, in the wheel's frame so they
+  // stay on the grips at any lock. The forearms are NOT here: a forearm
+  // rigid with the wheel swings up into the sky at 90 degrees of lock and
+  // fills the cockpit view. They are separate meshes (`buildForearm`,
+  // `buildUpperArm`) that the renderer poses every frame from the glove
+  // positions `handsInWheelFrame` reports and the shoulders in
+  // `driverPose`, so the elbow stays down in the tub whatever the wheel is
+  // doing.
+  const hands = handsInWheelFrame();
+  for (const [gx, gy, gz] of hands) {
+    b.smoothLoft([
+      ovalRing(gy - 0.047, gx, gz, 0.012, 0.012, 2.4, 12),
+      ovalRing(gy - 0.041, gx, gz, 0.024, 0.024, 2.4, 12),
+      ovalRing(gy - 0.015, gx, gz, 0.029, 0.028, 2.6, 12),
+      ovalRing(gy + 0.017, gx, gz, 0.029, 0.028, 2.6, 12),
+      ovalRing(gy + 0.041, gx, gz, 0.024, 0.024, 2.4, 12),
+      ovalRing(gy + 0.047, gx, gz, 0.012, 0.012, 2.4, 12),
+    ], GLOVE, true, true);
+  }
   return b.mesh();
+}
+
+// ------------------------------------------------------------------ driver ---
+
+/**
+ * Where the driver sits, in the chassis frame. Everything about the figure
+ * hangs off the eye point the cockpit camera uses, so the helmet is built
+ * AROUND the camera: the eye is 30 mm below and 40 mm ahead of the helmet's
+ * centre, inside the shell, and the cockpit view skips the `driver` and
+ * `helmet` meshes so it never sees the inside of its own head.
+ *
+ * The arms are not in either mesh. The gloves ride on the steering wheel;
+ * the upper arm and forearm are canonical bones (`buildUpperArm`,
+ * `buildForearm`) that the renderer places every frame with a two-bone IK
+ * from the shoulders here to the gloves wherever the wheel has taken them,
+ * elbow pulled toward `elbowHint`. `buildCarMeshes` hands those numbers to
+ * the renderer as `arms` so nothing about the pose is typed twice.
+ */
+function driverPose(params) {
+  const eyeX = params?.eyeAheadOfCgM ?? SDM26.eyeAheadOfCgM;
+  const eyeY = params?.eyeHeightM ?? SDM26.eyeHeightM;
+  return {
+    helmetCentre: [eyeX - 0.04, eyeY + 0.03, 0],
+    /** Shell half-sizes: a road helmet is longer than it is wide. */
+    helmetRadii: [0.135, 0.13, 0.12],
+    /** Shoulder joint, driver's right; mirror z for the left. Inside the
+     *  torso, so the upper arm's root is buried and only the sleeve shows. */
+    shoulder: [-0.115, 0.485, 0.19],
+    /** Bone lengths: shoulder to elbow, and elbow to the centre of the fist
+     *  (the last 60 mm of the forearm is inside the glove). Together they
+     *  are 40 mm longer than the farthest the wheel can carry a hand, so
+     *  the elbow always has somewhere to bend to. */
+    lUpper: 0.28,
+    lFore: 0.30,
+    /** Where the elbow goes: down and a little outboard, against the tub.
+     *  z is for the driver's right; the renderer mirrors it. */
+    elbowHint: [0, -1, 0.35],
+    /** Neck: a short thick tube from the shoulders up into the shell. With
+     *  a HANS on, almost none of a driver's neck shows. */
+    neckBase: [-0.17, 0.53, 0],
+    neckTop: [-0.18, 0.645, 0],
+  };
+}
+
+/**
+ * The centres of the two fists in the steering wheel's own frame,
+ * [left, right]. Wheel +x is the driver's LEFT; the grips sit at
+ * +-(steerHalfWidth - grip radius), and the fist is a touch outboard of
+ * the grip centre and proud of it toward the driver (-z).
+ */
+function handsInWheelFrame() {
+  const gx = GEO.steerHalfWidth - 0.016 + 0.004;
+  return [[gx, -0.005, -0.024], [-gx, -0.005, -0.024]];
+}
+
+/**
+ * Horizontal superellipse ring at height y, centred on (cx, cz), for
+ * lofting a body: `e` is the exponent, 2 for an ellipse, higher for a
+ * squarer section (a chest is about 2.6).
+ */
+function ovalRing(y, cx, cz, hx, hz, e, n = 16) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const c = Math.cos(a), s = Math.sin(a);
+    pts.push([cx + hx * Math.sign(c) * Math.pow(Math.abs(c), 2 / e), y,
+              cz + hz * Math.sign(s) * Math.pow(Math.abs(s), 2 / e)]);
+  }
+  return pts;
+}
+
+/**
+ * A patch of an ellipsoid, with its analytic normal (x/rx^2, y/ry^2, z/rz^2)
+ * on every vertex. Latitude is measured from the equator toward +Y,
+ * longitude from +X toward +Z. A longitude span of a full turn closes the
+ * ring; a latitude that reaches a pole collapses that row to triangles
+ * instead of emitting degenerate quads. `offset` pushes the patch out along
+ * its normal, which is how the visor and the trim sit proud of the shell
+ * without z-fighting it. Returns the point grid, row 0 first.
+ */
+function ellipsoidPatch(b, c, r, lat0, lat1, lon0, lon1, nLat, nLon, color, offset = 0) {
+  const closed = Math.abs(lon1 - lon0 - Math.PI * 2) < 1e-9;
+  const cols = closed ? nLon : nLon + 1;
+  const P = [], N = [];
+  for (let i = 0; i <= nLat; i++) {
+    const la = lat0 + ((lat1 - lat0) * i) / nLat;
+    const row = [], rn = [];
+    for (let j = 0; j < cols; j++) {
+      const lo = lon0 + ((lon1 - lon0) * j) / nLon;
+      const ux = Math.cos(la) * Math.cos(lo), uy = Math.sin(la), uz = Math.cos(la) * Math.sin(lo);
+      const n = norm([ux / r[0], uy / r[1], uz / r[2]]);
+      row.push([c[0] + ux * r[0] + n[0] * offset, c[1] + uy * r[1] + n[1] * offset, c[2] + uz * r[2] + n[2] * offset]);
+      rn.push(n);
+    }
+    P.push(row);
+    N.push(rn);
+  }
+  const atPole = (la) => Math.abs(Math.abs(la) - Math.PI / 2) < 1e-9;
+  for (let i = 0; i < nLat; i++) {
+    for (let j = 0; j < nLon; j++) {
+      const k = (j + 1) % cols;
+      if (i === nLat - 1 && atPole(lat1)) {
+        b.triN(P[i][j], P[i][k], P[i + 1][k], N[i][j], N[i][k], N[i + 1][k], color);
+      } else if (i === 0 && atPole(lat0)) {
+        b.triN(P[i][j], P[i + 1][k], P[i + 1][j], N[i][j], N[i + 1][k], N[i + 1][j], color);
+      } else {
+        b.quadN(P[i][j], P[i][k], P[i + 1][k], P[i + 1][j], N[i][j], N[i][k], N[i + 1][k], N[i + 1][j], color);
+      }
+    }
+  }
+  return P;
+}
+
+/**
+ * A round bar that changes radius along its length -- a sleeve, a forearm,
+ * a neck. Same frame construction as `tube`; the normal is the radial
+ * direction leaned along the axis by the cone's half-angle, so a taper
+ * shades as a cone and not as a cylinder with a kink at each end.
+ */
+function taperTube(b, p0, p1, r0, r1, segs, color) {
+  const d = sub(p1, p0);
+  const L = Math.hypot(d[0], d[1], d[2]) || 1;
+  const axis = [d[0] / L, d[1] / L, d[2] / L];
+  const helper = Math.abs(axis[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const u = norm(cross(helper, axis));
+  const v = cross(axis, u);
+  const lean = Math.atan2(r0 - r1, L);
+  const cl = Math.cos(lean), sl = Math.sin(lean);
+  const ring = (p, r) => {
+    const pts = [], ns = [];
+    for (let i = 0; i < segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      const c = Math.cos(a), s = Math.sin(a);
+      const rad = [u[0] * c + v[0] * s, u[1] * c + v[1] * s, u[2] * c + v[2] * s];
+      pts.push([p[0] + rad[0] * r, p[1] + rad[1] * r, p[2] + rad[2] * r]);
+      ns.push([rad[0] * cl + axis[0] * sl, rad[1] * cl + axis[1] * sl, rad[2] * cl + axis[2] * sl]);
+    }
+    return { pts, ns };
+  };
+  const A = ring(p0, r0), B = ring(p1, r1);
+  b.loft([A.pts, B.pts], color, true, true, [A.ns, B.ns]);
+}
+
+/**
+ * The torso, as horizontal sections from well inside the tub up to the
+ * base of the neck. The line of the sections leans back: a Formula
+ * Student driver reclines at about 45 degrees, so the chest at the
+ * cockpit rim is ahead of the shoulders, and the shoulders are ahead of
+ * the headrest.
+ *
+ * Kept as data so the harness can be laid on the surface it describes.
+ */
+const TORSO = [
+  { y: 0.26, cx: 0.05, hx: 0.11, hz: 0.18 },
+  { y: 0.37, cx: 0.00, hx: 0.115, hz: 0.20 },
+  { y: 0.44, cx: -0.05, hx: 0.115, hz: 0.215 },
+  { y: 0.495, cx: -0.10, hx: 0.11, hz: 0.225 },
+  { y: 0.52, cx: -0.125, hx: 0.095, hz: 0.21 },
+  { y: 0.535, cx: -0.145, hx: 0.075, hz: 0.15 },
+  { y: 0.545, cx: -0.16, hx: 0.06, hz: 0.08 },
+];
+const TORSO_E = 2.6;
+
+/** The x of the torso's FRONT surface at height y, `z` off the centreline. */
+function torsoFront(y, z) {
+  let lo = TORSO[0], hi = TORSO[TORSO.length - 1];
+  for (let i = 0; i < TORSO.length - 1; i++) {
+    if (y >= TORSO[i].y && y <= TORSO[i + 1].y) { lo = TORSO[i]; hi = TORSO[i + 1]; break; }
+  }
+  const t = hi.y === lo.y ? 0 : (y - lo.y) / (hi.y - lo.y);
+  const cx = lo.cx + (hi.cx - lo.cx) * t;
+  const hx = lo.hx + (hi.hx - lo.hx) * t;
+  const hz = lo.hz + (hi.hz - lo.hz) * t;
+  const f = Math.max(0, 1 - Math.pow(Math.min(1, Math.abs(z) / hz), TORSO_E));
+  return cx + hx * Math.pow(f, 1 / TORSO_E);
+}
+
+/**
+ * A flat strip of webbing along a path in a plane of constant z, lifted
+ * `lift` off the surface it follows. Lofted as rectangular rings with flat
+ * normals, because a strap's edges are real edges and a smooth normal on a
+ * 5 mm rectangle would shade it as a tube.
+ */
+function strap(b, path, z, width, lift, color) {
+  const rings = path.map((p, i) => {
+    const prev = path[Math.max(0, i - 1)], next = path[Math.min(path.length - 1, i + 1)];
+    const t = norm(sub(next, prev));
+    const n = norm(cross([0, 0, 1], t));      // in-plane normal, "outward"
+    const c = [p[0] + n[0] * lift, p[1] + n[1] * lift, z];
+    const th = 0.0025, hw = width / 2;
+    return [
+      [c[0] - n[0] * th, c[1] - n[1] * th, z - hw],
+      [c[0] - n[0] * th, c[1] - n[1] * th, z + hw],
+      [c[0] + n[0] * th, c[1] + n[1] * th, z + hw],
+      [c[0] + n[0] * th, c[1] + n[1] * th, z - hw],
+    ];
+  });
+  b.loft(rings, color, true, true);
+}
+
+/**
+ * The helmet, on its own so the renderer can give it a clearcoat: the shell
+ * is the one glossy thing on the driver, and a suit with a clearcoat reads
+ * as vinyl.
+ *
+ * An ellipsoid, a touch longer than it is wide, open at the bottom where
+ * the neck goes in. The bottom band below the visor line is maroon, which
+ * from the chase camera is what reads as a chin bar; the visor is a dark
+ * patch across the eye line, proud of the shell by 3 mm; a maroon stripe
+ * runs from above the visor over the crown to the nape. The open bottom
+ * gets a flat liner-black cap so the shell does not read as hollow from
+ * the walkaround camera at a low angle.
+ */
+function buildHelmet(params) {
+  const b = new Builder();
+  const { helmetCentre: c, helmetRadii: r } = driverPose(params);
+  const D = Math.PI / 180;
+  const TAU = Math.PI * 2;
+  const LON = 20;
+  const BOTTOM = -62 * D, BAND = -30 * D;
+
+  // Shell: maroon band, then white to the crown.
+  const bottomRing = ellipsoidPatch(b, c, r, BOTTOM, BAND, 0, TAU, 2, LON, HELMET_TRIM)[0];
+  ellipsoidPatch(b, c, r, BAND, 90 * D, 0, TAU, 9, LON, HELMET);
+  b.cap(bottomRing, HELMET_LINER);
+
+  // Visor: centred on the eye line, 30 mm below the shell's centre, across
+  // the front 140 degrees.
+  ellipsoidPatch(b, c, r, -33 * D, 7 * D, -70 * D, 70 * D, 3, 8, VISOR, 0.003);
+
+  // Crown stripe: two meridians at z = +-18 mm from just above the visor,
+  // over the top, down to the nape.
+  const zs = 0.018;
+  const k = Math.sqrt(1 - (zs / r[2]) ** 2);
+  const rows = [];
+  for (const z of [-zs, zs]) {
+    const row = [], rn = [];
+    for (let i = 0; i <= 14; i++) {
+      const phi = 14 * D + ((168 - 14) * D * i) / 14;
+      const ux = k * Math.cos(phi), uy = k * Math.sin(phi), uz = z / r[2];
+      const n = norm([ux / r[0], uy / r[1], uz / r[2]]);
+      row.push([c[0] + ux * r[0] + n[0] * 0.003, c[1] + uy * r[1] + n[1] * 0.003, c[2] + z + n[2] * 0.003]);
+      rn.push(n);
+    }
+    rows.push({ row, rn });
+  }
+  for (let i = 0; i < 14; i++) {
+    const A = rows[0], B = rows[1];
+    b.quadN(A.row[i], A.row[i + 1], B.row[i + 1], B.row[i],
+            A.rn[i], A.rn[i + 1], B.rn[i + 1], B.rn[i], HELMET_TRIM);
+  }
+  return b.mesh();
+}
+
+/**
+ * The figure in the seat, minus the helmet and minus the forearms: torso,
+ * neck, HANS collar, shoulder straps and the upper-arm sleeves. All matte,
+ * all rigid with the chassis, all skipped by the cockpit camera.
+ */
+function buildDriver(params) {
+  const b = new Builder();
+  const pose = driverPose(params);
+
+  // ---- torso ----
+  // Open at the bottom (inside the tub, never seen) and at the neck (the
+  // neck tube plugs it).
+  b.smoothLoft(TORSO.map((s) => ovalRing(s.y, s.cx, 0, s.hx, s.hz, TORSO_E)), SUIT, false, false);
+
+  // ---- neck, up into the shell ----
+  taperTube(b, pose.neckBase, pose.neckTop, 0.066, 0.058, 12, SUIT);
+
+  // ---- HANS collar ----
+  // The yoke round the back of the neck, sitting on the shoulders, and its
+  // two legs forward over them. A horizontal-plane sweep, so it lofts as one
+  // surface.
+  const hansC = [pose.neckBase[0] - 0.005, 0.552, 0];
+  const yoke = [];
+  for (let i = 0; i <= 10; i++) {
+    const a = (95 + (170 * i) / 10) * (Math.PI / 180);   // 95 deg round the back to 265
+    yoke.push([hansC[0] + Math.cos(a) * 0.085, hansC[1], hansC[2] + Math.sin(a) * 0.085]);
+  }
+  b.sweep(yoke, 0.021, 8, CARBON, [0, 1, 0]);
+  for (const side of [-1, 1]) {
+    b.box(-0.19, 0.544, side * 0.105, 0.11, 0.016, 0.05, CARBON);
+  }
+
+  // ---- shoulder straps ----
+  // Over the shoulders from the harness bar behind the seat, then down the
+  // chest to the lap. The chest run is laid on the torso's front surface.
+  for (const side of [-1, 1]) {
+    const z = side * 0.09;
+    const path = [
+      [-0.35, 0.485, z],
+      [-0.25, 0.52, z],
+      [-0.17, 0.54, z],
+      [torsoFront(0.53, z), 0.53, z],
+      [torsoFront(0.49, z), 0.49, z],
+      [torsoFront(0.45, z), 0.45, z],
+      [torsoFront(0.40, z), 0.40, z],
+      [torsoFront(0.34, z), 0.34, z],
+    ];
+    strap(b, path, z, 0.075, 0.004, STRAP);
+  }
+
+  return b.mesh();
+}
+
+/**
+ * The upper arm as a canonical bone: shoulder joint at the origin, elbow at
+ * x = lUpper, along +X. A sleeve that is thicker at the shoulder, with a
+ * ball at the elbow so the forearm can meet it at any angle without a
+ * visible corner. The renderer orients it per frame.
+ */
+function buildUpperArm(params) {
+  const b = new Builder();
+  const { lUpper } = driverPose(params);
+  const R_SHOULDER = 0.052, R_ELBOW = 0.040;
+  taperTube(b, [0, 0, 0], [lUpper, 0, 0], R_SHOULDER, R_ELBOW, 12, SUIT);
+  ellipsoidPatch(b, [lUpper, 0, 0], [R_ELBOW, R_ELBOW, R_ELBOW],
+                 -Math.PI / 2, Math.PI / 2, 0, Math.PI * 2, 6, 8, SUIT);
+  return b.mesh();
+}
+
+/**
+ * The forearm as a canonical bone: elbow at the origin, the centre of the
+ * fist at x = lFore, along +X. Suit sleeve tapering to the wrist, then the
+ * glove's cuff for the last 60 mm, which is the part inside the fist on the
+ * wheel.
+ */
+function buildForearm(params) {
+  const b = new Builder();
+  const { lFore } = driverPose(params);
+  const CUFF = 0.06;
+  taperTube(b, [0, 0, 0], [lFore - CUFF, 0, 0], 0.038, 0.029, 12, SUIT);
+  taperTube(b, [lFore - CUFF, 0, 0], [lFore, 0, 0], 0.031, 0.027, 12, GLOVE);
+  return b.mesh();
+}
+
+/**
+ * What the renderer needs to pose the arms: shoulders in the chassis
+ * frame, fists in the STEERING WHEEL's local frame (they move with it),
+ * bone lengths and the elbow hint, each as [left, right].
+ */
+function armRig(params) {
+  const pose = driverPose(params);
+  const [sx, sy, sz] = pose.shoulder;
+  const [hx, hy, hz] = pose.elbowHint;
+  return {
+    shoulders: [[sx, sy, -sz], [sx, sy, sz]],
+    hands: handsInWheelFrame(),
+    lUpper: pose.lUpper,
+    lFore: pose.lFore,
+    elbowHints: [[hx, hy, -hz], [hx, hy, hz]],
+  };
 }
 
 /**
@@ -1020,6 +1408,12 @@ export function buildCarMeshes(params) {
     rim: buildRim(),
     steeringWheel: buildSteeringWheel(),
     dashCase: buildDashCase(),
+    driver: buildDriver(params),
+    helmet: buildHelmet(params),
+    upperArm: buildUpperArm(params),
+    forearm: buildForearm(params),
+    // Not a mesh: the pose data the renderer's arm IK reads (see `armRig`).
+    arms: armRig(params),
   };
 }
 

@@ -34,6 +34,8 @@ const ITER_MIN = 0, ITER_MAX = 40000;
 /** How many frames a measurement is averaged over before the loop length
  *  moves. Short enough to follow a camera change, long enough not to hunt. */
 const ADJUST_EVERY = 12;
+/** Timer queries allowed in flight before a frame goes unmeasured. */
+const MAX_IN_FLIGHT = 3;
 
 const VS = `#version 300 es
 void main() {
@@ -111,6 +113,13 @@ export class GpuHold {
     if (!this.enabled || !this.supported || this._open) return;
     const gl = this.gl, ext = this.ext;
     this._drain();
+    // With vsync off (a frame-rate-limit flag, or a compositor that does not
+    // throttle) frames come faster than the GPU answers timer queries; left
+    // alone the queue grew without bound and the padding it was steering
+    // turned into 50 ms stalls. Bounded here: at the cap this frame is
+    // neither measured nor padded, and a card that busy holds its clocks
+    // without help anyway.
+    if (this._pending.length >= MAX_IN_FLIGHT) return;
     const q = gl.createQuery();
     gl.beginQuery(ext.TIME_ELAPSED_EXT, q);
     this._pending.push(q);

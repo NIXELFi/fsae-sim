@@ -257,6 +257,20 @@ is where the car's corners actually are.
   MIS; the stall lines are one-way bays with drive aisles; and the surface
   has a gentle relief normal so it reads as a pour, not a plastic sheet.
 
+- **There is a driver in the car.** Helmet in the team colours with a dark
+  visor, HANS, shoulders and belts in the suit, seen from every camera but
+  the cockpit's, whose eye sits inside the helmet. The gloves ride on the
+  wheel at 9 and 3; the forearms and upper arms are posed every frame by a
+  two-bone solve from the fixed shoulders to the gloves, so at any rim angle
+  the arm runs from the glove to an elbow inside the tub and up to the
+  shoulder. The replay ghost carries its own driver.
+- **The lot has a venue around it.** Conifers and broadleaf trees in clumps,
+  a stepped grandstand with rows, aisles and a roof on posts, garages,
+  a two-storey office and a gabled shed with doors and window reveals, and a
+  jagged treeline and low hills out in the haze so the horizon is never a
+  straight line. All procedural, one draw, ~90-110k triangles; the ground
+  runs out to 3 km and is fully fogged there, so it has no edge.
+
 ### Frame pacing
 
 The renderer takes about 1.5 ms of GPU time and under 1.5 ms of JavaScript
