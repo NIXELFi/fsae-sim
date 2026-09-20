@@ -1,6 +1,6 @@
 [package]
 name = "fsae-sim"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 description = "SDM26 Driver-in-Loop: first-person FSAE simulator"
 authors = ["Sun Devil Motorsports"]

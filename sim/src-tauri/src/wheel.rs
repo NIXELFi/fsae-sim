@@ -13,6 +13,13 @@
 //! wheel is read here because a DirectInput exclusive acquire is needed to
 //! play effects, and once acquired exclusively nothing else can read it.
 //!
+//! Enumeration is the exception. `EnumDevices` walks every HID and Bluetooth
+//! game controller and takes 20-600 ms; on the 1 kHz rig thread that was a
+//! visible hitch every 2 s whenever no wheel was open. So `scan` runs on a
+//! helper thread and hands back `Found` -- plain data, GUIDs and names --
+//! and only `Wheel::open_from`, the cheap `CreateDevice`/`Acquire` part,
+//! runs on the rig thread, and only when the scan turned up a candidate.
+//!
 //! The data format is c_dfDIJoystick rebuilt by hand -- the `windows` crate
 //! does not export the static -- as eight axes, four hats and 32 buttons on
 //! the DIJOYSTATE layout, every object optional so a base with no rudder
@@ -90,12 +97,10 @@ pub fn looks_like_peripheral(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-pub use win::{enumerate, Wheel};
+pub use win::{scan, Found, Wheel};
 
 #[cfg(not(windows))]
-pub use stub::Wheel;
-#[cfg(not(windows))]
-pub use stub_enum::enumerate;
+pub use stub::{scan, Found, Wheel};
 
 // ----------------------------------------------------------------- Windows --
 
@@ -169,10 +174,20 @@ mod win {
         ranges: Vec<[(f32, f32); 8]>,
     }
 
-    struct Found {
-        guid: GUID,
-        name: String,
-        ffb: bool,
+    /// A game controller a scan turned up: enough to open it later without
+    /// enumerating again. Plain data, so unlike the device objects it can
+    /// cross from the scan thread to the rig thread.
+    #[derive(Clone, Debug)]
+    pub struct Found {
+        pub guid: GUID,
+        pub name: String,
+        pub ffb: bool,
+    }
+
+    impl Found {
+        pub fn info(&self) -> DeviceInfo {
+            DeviceInfo { name: self.name.clone(), force_feedback: self.ffb }
+        }
     }
 
     fn hr(r: windows::core::Result<()>, what: &str) -> Result<(), String> {
@@ -214,12 +229,13 @@ mod win {
         }
     }
 
-    /// What is plugged in, for the settings panel's picker.
-    pub fn enumerate() -> Vec<DeviceInfo> {
-        match create_di().and_then(|di| enumerate_with(&di)) {
-            Ok(v) => v.into_iter().map(|f| DeviceInfo { name: f.name, force_feedback: f.ffb }).collect(),
-            Err(_) => Vec::new(),
-        }
+    /// Every attached game controller. This is the slow call (tens to
+    /// hundreds of milliseconds through HID and Bluetooth) and it touches no
+    /// device object, so it can run on any thread; the rig runs it on a
+    /// helper and opens from the result with `Wheel::open_from`.
+    pub fn scan() -> Result<Vec<Found>, String> {
+        let di = create_di()?;
+        enumerate_with(&di)
     }
 
     /// Which device to steer with. A name the driver picked wins; otherwise
@@ -249,21 +265,24 @@ mod win {
 
     impl Wheel {
         /// Open the wheel base (and everything else plugged in, for pedals
-        /// and shifters). `prefer` is a product name the driver chose.
-        pub fn open(hwnd_raw: isize, prefer: Option<&str>) -> Result<Wheel, String> {
+        /// and shifters) from what a `scan` found. `prefer` is a product
+        /// name the driver chose. Must be called on the thread that will
+        /// read the wheel. With no candidate in the list this returns
+        /// before touching DirectInput at all, so calling it on the rig
+        /// thread with a pad-only list costs nothing.
+        pub fn open_from(found: &[Found], hwnd_raw: isize, prefer: Option<&str>) -> Result<Wheel, String> {
+            let idx = choose(found, prefer).ok_or_else(|| {
+                if found.is_empty() {
+                    "no game controller found. Is the wheel base on and in PC mode?".to_string()
+                } else {
+                    format!(
+                        "no steering wheel among: {}. Pick one in the controls panel.",
+                        found.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")
+                    )
+                }
+            })?;
             unsafe {
                 let di = create_di()?;
-                let found = enumerate_with(&di)?;
-                let idx = choose(&found, prefer).ok_or_else(|| {
-                    if found.is_empty() {
-                        "no game controller found. Is the wheel base on and in PC mode?".to_string()
-                    } else {
-                        format!(
-                            "no steering wheel among: {}. Pick one in the controls panel.",
-                            found.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")
-                        )
-                    }
-                })?;
                 let base = &found[idx];
 
                 let device = Self::open_one(&di, base.guid, hwnd_raw, base.ffb)?;
@@ -605,8 +624,24 @@ mod win {
 
 #[cfg(not(windows))]
 mod stub {
-    use super::DeviceState;
+    use super::{DeviceInfo, DeviceState};
 
+    /// Nothing is ever found off Windows.
+    #[derive(Clone, Debug)]
+    pub struct Found {
+        pub name: String,
+        pub ffb: bool,
+    }
+
+    impl Found {
+        pub fn info(&self) -> DeviceInfo {
+            DeviceInfo { name: self.name.clone(), force_feedback: self.ffb }
+        }
+    }
+
+    pub fn scan() -> Result<Vec<Found>, String> {
+        Ok(Vec::new())
+    }
 
     /// No native wheel off Windows. The rig still runs the physics; steering
     /// comes from the webview.
@@ -618,7 +653,7 @@ mod stub {
     }
 
     impl Wheel {
-        pub fn open(_hwnd_raw: isize, _prefer: Option<&str>) -> Result<Wheel, String> {
+        pub fn open_from(_found: &[Found], _hwnd_raw: isize, _prefer: Option<&str>) -> Result<Wheel, String> {
             Err("native wheel input and force feedback need the Windows build (DirectInput)".into())
         }
         pub fn read(&mut self) -> Option<DeviceState> {
@@ -633,14 +668,6 @@ mod stub {
 
 #[cfg(not(windows))]
 pub fn realtime_thread() {}
-
-#[cfg(not(windows))]
-mod stub_enum {
-    pub fn enumerate() -> Vec<super::DeviceInfo> {
-        Vec::new()
-    }
-}
-
 
 #[cfg(windows)]
 pub use win::realtime_thread;

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use sim_core::prelude::*;
 use sim_core::solver::Solver;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::wheel::{self, DeviceInfo, DeviceState, Wheel, AXES_PER_DEVICE, MAX_DEVICES};
@@ -81,12 +81,18 @@ fn trace_on() -> bool {
 }
 
 const RATE_HZ: f64 = 1000.0;
+/// The longest step the vehicle model is ever asked to take. A tick that
+/// arrives later than this (a stall) steps the car by this much and the rest
+/// of the wall-clock time is dropped -- and counted, in `StatsOut::lost_ms`.
+const MAX_DT: f64 = 0.01;
 /// How long the rig drives on the last inputs before it decides the webview
 /// has gone away (reload, exception, devtools pause) and holds the car with
 /// the pedals up and the motor off.
 const INPUT_STALE: Duration = Duration::from_millis(250);
 /// How often to look for a base when none is open or the open one went quiet.
 const RESCAN_EVERY: Duration = Duration::from_secs(2);
+/// The window the controls panel's "us max" is the maximum over.
+const TICK_MAX_WINDOW: Duration = Duration::from_secs(1);
 /// A rim rate above this is a glitch (respawn, reacquire), not a driver.
 const MAX_RIM_RATE_DEG_S: f64 = 5000.0;
 
@@ -461,8 +467,18 @@ pub struct DeviceOut {
 pub struct StatsOut {
     pub ticks: u64,
     pub tick_us_avg: f64,
+    /// Longest tick in the last one to two seconds (`TICK_MAX_WINDOW`), so
+    /// the number in the controls panel says something about NOW rather
+    /// than about the worst thing that ever happened.
     pub tick_us_max: f64,
+    /// Longest tick since the thread started.
+    pub tick_us_max_all: f64,
+    /// Late ticks, counted in periods: a tick that arrives 611 ms late is
+    /// 611 ticks that did not happen, not one.
     pub overruns: u64,
+    /// Wall-clock time the car did NOT simulate because a tick arrived more
+    /// than `MAX_DT` late and the step was clamped. Zero on a healthy rig.
+    pub lost_ms: f64,
     pub rate_hz: f64,
 }
 
@@ -656,6 +672,12 @@ struct Loop {
     /// change.
     requested_device: String,
     next_rescan: Instant,
+    /// A DirectInput scan in flight on its helper thread, if any. Polled
+    /// with `try_recv` once per tick; never waited on.
+    scan: Option<mpsc::Receiver<ScanResult>>,
+    /// What the last scan found. The picker's list, and what a `SelectDevice`
+    /// opens from without waiting for a fresh scan.
+    found: Vec<wheel::Found>,
     ffb_cfg: FfbConfig,
     ffb: FfbMixer,
     device: DeviceState,
@@ -667,8 +689,14 @@ struct Loop {
     // for the display-only gradients the JS model carried
     ticks: u64,
     tick_us_sum: f64,
+    /// Longest tick of the last completed `TICK_MAX_WINDOW`.
     tick_us_max: f64,
+    /// Longest tick of the window in progress, and when it closes.
+    win_max: f64,
+    win_end: Instant,
+    tick_us_max_all: f64,
     overruns: u64,
+    lost_s: f64,
     boundary_hit: bool,
     /// The last respawn token the webview sent. See `Snapshot::respawn_seq`.
     respawn_seq: u32,
@@ -683,25 +711,19 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
     );
     car.reset(0.0, 0.0, 0.0, 0.0);
 
-    // The wheel is optional: no wheel means the webview steers.
-    let wheel = open_wheel(&shared, hwnd_raw, None);
-    {
-        let mut st = shared.status.lock().unwrap();
-        st.running = true;
-    }
-    let _ = ready.send(());
-
     let mut lp = Loop {
         car,
         assists: Assists::default(),
         boundary: None,
         etc: EtcMap::linear(),
-        wheel,
+        wheel: None,
         hwnd_raw,
         shared: shared.clone(),
         wheel_cfg: WheelConfig::default(),
         requested_device: String::new(),
         next_rescan: Instant::now() + RESCAN_EVERY,
+        scan: None,
+        found: Vec::new(),
         ffb_cfg: FfbConfig::default(),
         ffb: FfbMixer::default(),
         device: DeviceState::default(),
@@ -711,10 +733,24 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
         ticks: 0,
         tick_us_sum: 0.0,
         tick_us_max: 0.0,
+        win_max: 0.0,
+        win_end: Instant::now() + TICK_MAX_WINDOW,
+        tick_us_max_all: 0.0,
         overruns: 0,
+        lost_s: 0.0,
         boundary_hit: false,
         respawn_seq: 0,
     };
+
+    // The wheel is optional: no wheel means the webview steers. The first
+    // scan is synchronous -- nothing is ticking yet and `rig_start` is
+    // waiting for the answer -- every later one runs on a helper thread.
+    lp.on_scan(wheel::scan());
+    {
+        let mut st = shared.status.lock().unwrap();
+        st.running = true;
+    }
+    let _ = ready.send(());
 
     let period = Duration::from_secs_f64(1.0 / RATE_HZ);
     let mut next = Instant::now() + period;
@@ -723,7 +759,13 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
 
     while shared.running.load(Ordering::Relaxed) {
         let t0 = Instant::now();
-        let dt = (t0 - last).as_secs_f64().clamp(1e-4, 0.01);
+        // The step is clamped so a stall cannot become one giant integration
+        // step; what the clamp throws away is counted rather than vanishing.
+        let elapsed = (t0 - last).as_secs_f64();
+        let dt = elapsed.clamp(1e-4, MAX_DT);
+        if elapsed > MAX_DT {
+            lp.lost_s += elapsed - MAX_DT;
+        }
         last = t0;
 
         // Rare commands, drained without holding the lock across the tick.
@@ -754,6 +796,7 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
         let shift_down = shared.shift_down.swap(0, Ordering::Relaxed);
         let cone_hits = shared.cone_hits.swap(0, Ordering::Relaxed);
 
+        lp.poll_scan();
         lp.maybe_rescan();
         let snap = lp.tick(dt, &input, shift_up, shift_down, cone_hits);
         *shared.snapshot.lock().unwrap() = snap;
@@ -763,7 +806,13 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
         let spent = t0.elapsed().as_secs_f64() * 1e6;
         lp.ticks += 1;
         lp.tick_us_sum += spent;
-        lp.tick_us_max = lp.tick_us_max.max(spent);
+        lp.win_max = lp.win_max.max(spent);
+        lp.tick_us_max_all = lp.tick_us_max_all.max(spent);
+        if t0 >= lp.win_end {
+            lp.tick_us_max = lp.win_max;
+            lp.win_max = 0.0;
+            lp.win_end = t0 + TICK_MAX_WINDOW;
+        }
         let now = Instant::now();
         if next > now {
             let remaining = next - now;
@@ -775,7 +824,9 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
             }
             next += period;
         } else {
-            lp.overruns += 1;
+            // One overrun per period missed, so a stall shows up as the
+            // number of ticks it cost and not as a single late one.
+            lp.overruns += 1 + ((now - next).as_secs_f64() * RATE_HZ) as u64;
             next = now + period;
         }
     }
@@ -787,33 +838,110 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
     st.running = false;
 }
 
-/// Open (or re-open) the base and report what happened in the status.
-fn open_wheel(shared: &Arc<Shared>, hwnd_raw: isize, prefer: Option<&str>) -> Option<Wheel> {
-    let available = wheel::enumerate();
-    let result = Wheel::open(hwnd_raw, prefer);
-    let mut st = shared.status.lock().unwrap();
-    st.available = available;
-    match result {
-        Ok(w) => {
-            st.wheel_present = true;
-            st.ffb_active = w.ffb;
-            st.wheel_name = w.name.clone();
-            st.device_names = w.names.clone();
-            st.wheel_error = if w.ffb { String::new() } else { "no force feedback actuator on this base (console mode, or a wheel DirectInput cannot drive); steering and pedals still work".into() };
-            Some(w)
-        }
-        Err(e) => {
-            st.wheel_present = false;
-            st.ffb_active = false;
-            st.wheel_name.clear();
-            st.device_names.clear();
-            st.wheel_error = e;
-            None
-        }
-    }
-}
+/// What the scan thread sends back.
+type ScanResult = Result<Vec<wheel::Found>, String>;
 
 impl Loop {
+    /// Take (or fail to take) a freshly opened base and say so in the status.
+    fn set_wheel(&mut self, result: Result<Wheel, String>) {
+        let mut st = self.shared.status.lock().unwrap();
+        match result {
+            Ok(w) => {
+                st.wheel_present = true;
+                st.ffb_active = w.ffb;
+                st.wheel_name = w.name.clone();
+                st.device_names = w.names.clone();
+                st.wheel_error = if w.ffb { String::new() } else { "no force feedback actuator on this base (console mode, or a wheel DirectInput cannot drive); steering and pedals still work".into() };
+                self.wheel = Some(w);
+            }
+            Err(e) => {
+                st.wheel_present = false;
+                st.ffb_active = false;
+                st.wheel_name.clear();
+                st.device_names.clear();
+                st.wheel_error = e;
+                self.wheel = None;
+            }
+        }
+    }
+
+    fn prefer(&self) -> Option<&str> {
+        if self.requested_device.is_empty() {
+            None
+        } else {
+            Some(self.requested_device.as_str())
+        }
+    }
+
+    /// Has the open base stopped answering for long enough to give up on it?
+    fn wheel_lost(&self) -> bool {
+        self.wheel.is_some() && self.lost_ticks > (2.0 * RATE_HZ) as u32
+    }
+
+    /// Start a DirectInput scan on a helper thread, unless one is running.
+    /// The rig thread never waits for it: `poll_scan` picks the answer up.
+    fn request_scan(&mut self) {
+        if self.scan.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("rig-scan".into())
+            .spawn(move || {
+                let _ = tx.send(wheel::scan());
+            });
+        if spawned.is_ok() {
+            self.scan = Some(rx);
+        }
+    }
+
+    /// Once per tick: a finished scan, if there is one. Non-blocking.
+    fn poll_scan(&mut self) {
+        let Some(rx) = self.scan.as_ref() else { return };
+        match rx.try_recv() {
+            Ok(res) => {
+                self.scan = None;
+                self.on_scan(res);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.scan = None,
+        }
+    }
+
+    /// A scan came back: refresh the picker's list and, with no base open
+    /// (or one that has gone quiet), open from it. `Wheel::open_from` does
+    /// nothing at all unless the list holds a candidate, so with a pad or
+    /// nothing plugged in this costs the tick a string compare.
+    fn on_scan(&mut self, res: ScanResult) {
+        match res {
+            Ok(found) => {
+                self.found = found;
+                self.shared.status.lock().unwrap().available = self.found.iter().map(wheel::Found::info).collect();
+                if self.wheel.is_none() || self.wheel_lost() {
+                    self.open_from_found();
+                }
+            }
+            Err(e) => {
+                self.shared.status.lock().unwrap().available.clear();
+                if self.wheel.is_none() {
+                    self.shared.status.lock().unwrap().wheel_error = e;
+                }
+            }
+        }
+    }
+
+    /// Close whatever is open and open the best base in `found`.
+    fn open_from_found(&mut self) {
+        if let Some(mut w) = self.wheel.take() {
+            w.close();
+        }
+        self.device = DeviceState::default();
+        self.device_present = false;
+        self.lost_ticks = 0;
+        self.next_rescan = Instant::now() + RESCAN_EVERY;
+        let result = Wheel::open_from(&self.found, self.hwnd_raw, self.prefer());
+        self.set_wheel(result);
+    }
     fn apply_command(&mut self, c: RigCommand) {
         match c {
             RigCommand::Respawn { x, y, psi, speed, seq } => {
@@ -841,33 +969,30 @@ impl Loop {
                 let want = cfg.device_name.clone();
                 self.wheel_cfg = *cfg;
                 if want != self.requested_device {
-                    self.requested_device = want.clone();
-                    let prefer = if want.is_empty() { None } else { Some(want.as_str()) };
-                    self.reopen(prefer);
+                    self.requested_device = want;
+                    self.reopen();
                 }
             }
             RigCommand::SelectDevice { name } => {
-                self.requested_device = name.clone();
-                let prefer = if name.is_empty() { None } else { Some(name.as_str()) };
-                self.reopen(prefer);
+                self.requested_device = name;
+                self.reopen();
             }
         }
     }
 
-    fn reopen(&mut self, prefer: Option<&str>) {
-        if let Some(mut w) = self.wheel.take() {
-            w.close();
-        }
-        self.device = DeviceState::default();
-        self.device_present = false;
-        self.lost_ticks = 0;
-        self.next_rescan = Instant::now() + RESCAN_EVERY;
-        self.wheel = open_wheel(&self.shared, self.hwnd_raw, prefer);
+    /// The driver picked a base. The picker showed the last scan's list, so
+    /// open from that list right now -- the choice should take effect this
+    /// tick, not after a scan -- and start a fresh scan behind it. If the
+    /// immediate open failed (the device is gone, or held elsewhere) the
+    /// scan's answer retries it.
+    fn reopen(&mut self) {
+        self.open_from_found();
+        self.request_scan();
     }
 
     /// Hot-plug. With no base open, or one that has stopped answering for a
-    /// couple of seconds, try again every `RESCAN_EVERY`. Enumeration is
-    /// cheap and also refreshes the picker's list.
+    /// couple of seconds, scan again every `RESCAN_EVERY`. The scan runs on
+    /// its own thread; this only starts it.
     fn maybe_rescan(&mut self) {
         if !cfg!(windows) {
             return;
@@ -877,11 +1002,8 @@ impl Loop {
             return;
         }
         self.next_rescan = now + RESCAN_EVERY;
-        let lost = self.wheel.is_some() && self.lost_ticks > (2.0 * RATE_HZ) as u32;
-        if self.wheel.is_none() || lost {
-            let want = self.requested_device.clone();
-            let prefer = if want.is_empty() { None } else { Some(want.as_str()) };
-            self.reopen(prefer);
+        if self.wheel.is_none() || self.wheel_lost() {
+            self.request_scan();
         }
     }
 
@@ -1195,8 +1317,12 @@ impl Loop {
             stats: StatsOut {
                 ticks: self.ticks,
                 tick_us_avg: if self.ticks > 0 { self.tick_us_sum / self.ticks as f64 } else { 0.0 },
-                tick_us_max: self.tick_us_max,
+                // The last completed window or the one in progress, whichever
+                // is worse: a max over the last one to two seconds.
+                tick_us_max: self.tick_us_max.max(self.win_max),
+                tick_us_max_all: self.tick_us_max_all,
                 overruns: self.overruns,
+                lost_ms: self.lost_s * 1e3,
                 rate_hz: RATE_HZ,
             },
             boundary_hit: self.boundary_hit,

@@ -114,7 +114,12 @@ pub struct SavedRun {
 }
 
 /// Write one run. Called once, at the end of a drive.
-#[tauri::command]
+///
+/// `async` on a plain fn puts the call on Tauri's blocking thread pool: a
+/// multi-megabyte telemetry write must not sit on the thread that answers
+/// `rig_frame`, or the webview draws the same snapshot until the disk is
+/// done and the rig's watchdog holds the car. Same for the two readers.
+#[tauri::command(async)]
 pub fn save_run(run_id: String, manifest: String, telemetry: String) -> Result<SavedRun, String> {
     let dir = run_path(&run_id)?;
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -164,7 +169,7 @@ pub struct LoadedRun {
 
 /// Read a run back for replay. Accepts either a run id or a path to the run
 /// directory / its manifest, so `--replay` can take whatever a user pastes.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_run(run: String) -> Result<LoadedRun, String> {
     let dir = resolve_run_dir(&run)?;
     let manifest = fs::read_to_string(dir.join(MANIFEST))
@@ -232,7 +237,7 @@ pub struct RunSummary {
     pub manifest: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_runs(limit: Option<usize>) -> Result<Vec<RunSummary>, String> {
     let root = runs_dir();
     let Ok(entries) = fs::read_dir(&root) else {
