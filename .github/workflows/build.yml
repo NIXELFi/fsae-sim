@@ -1,0 +1,75 @@
+# Builds the simulator executable for the platforms Helios can install on,
+# and leaves each one as a workflow artifact for `sim/tools/publish_build.mjs
+# --platform <p> --exe <path>` to put on the feed.
+#
+# Not a release: publishing to the feed needs the Supabase service key and
+# stays a deliberate step on a maintainer's machine. This exists because the
+# only machine that has ever built the simulator is a Windows laptop, and
+# Helios on a Mac was reading a feed with nothing on it for macOS and saying
+# "not installed" as if that were the driver's doing.
+#
+# macOS is built as one universal binary (arm64 + x86_64 lipo'd together) so
+# the feed needs one entry for the platform, which is all Helios asks for.
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["sim-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sim/src-tauri
+            native
+      - name: Build both architectures
+        run: |
+          cargo build --release --manifest-path sim/src-tauri/Cargo.toml --target aarch64-apple-darwin
+          cargo build --release --manifest-path sim/src-tauri/Cargo.toml --target x86_64-apple-darwin
+      - name: Universal binary
+        run: |
+          mkdir -p out
+          lipo -create \
+            sim/src-tauri/target/aarch64-apple-darwin/release/fsae-sim \
+            sim/src-tauri/target/x86_64-apple-darwin/release/fsae-sim \
+            -output out/fsae-sim
+          chmod +x out/fsae-sim
+          lipo -info out/fsae-sim
+          out/fsae-sim --version
+          shasum -a 256 out/fsae-sim
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fsae-sim-macos
+          path: out/fsae-sim
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sim/src-tauri
+            native
+      - name: Build
+        run: cargo build --release --manifest-path sim/src-tauri/Cargo.toml
+      - name: Version
+        run: sim/src-tauri/target/release/fsae-sim.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fsae-sim-windows
+          path: sim/src-tauri/target/release/fsae-sim.exe
+          if-no-files-found: error

@@ -1,6 +1,7 @@
 // Publish a simulator build so Helios can offer it as a download.
 //
 //   node sim/tools/publish_build.mjs --version 0.2.0 [--notes "..."] [--dry-run]
+//                                    [--platform macos --exe path/to/fsae-sim]
 //
 // Needs, in the environment:
 //   SUPABASE_URL          https://<ref>.supabase.co
@@ -54,10 +55,20 @@ if (!/^[A-Za-z0-9._-]{1,64}$/.test(VERSION)) {
 
 // Only Windows is built here today; the field exists so the feed can carry
 // more than one platform when there is one.
-const PLATFORM = process.platform === "win32" ? "windows"
-  : process.platform === "darwin" ? "macos" : "linux";
+// `--platform` publishes for another platform than the one this runs on, and
+// `--exe` names the file to publish -- together they let a build that the
+// `build` workflow produced on a GitHub macOS runner be put on the feed from
+// the maintainer's Windows machine, which is the only one with the key.
+const PLATFORM = arg("platform") ?? (process.platform === "win32" ? "windows"
+  : process.platform === "darwin" ? "macos" : "linux");
+if (!["windows", "macos", "linux"].includes(PLATFORM)) {
+  console.error(`publish_build: --platform must be windows, macos or linux, not "${PLATFORM}"`);
+  process.exit(1);
+}
 const EXE_NAME = PLATFORM === "windows" ? "fsae-sim.exe" : "fsae-sim";
-const exePath = path.join(REPO, "sim", "src-tauri", "target", "release", EXE_NAME);
+const exePath = arg("exe")
+  ? path.resolve(arg("exe"))
+  : path.join(REPO, "sim", "src-tauri", "target", "release", EXE_NAME);
 
 if (!fs.existsSync(exePath)) {
   console.error(`publish_build: no build at ${exePath}`);
@@ -76,7 +87,13 @@ const sha256 = crypto.createHash("sha256").update(fs.readFileSync(exePath)).dige
 // told 0.2.0 is available, forever, because the thing it just installed
 // still says 0.1.0. Nothing downstream can detect that; only here, where
 // both numbers are in the same room, can it be caught.
-{
+const HOST = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
+if (PLATFORM !== HOST) {
+  // A macOS binary cannot answer `--version` on Windows. The build workflow
+  // prints it in the job log, and that is where the number on the command
+  // line has to come from -- say so, loudly, rather than pretend to check.
+  console.log(`version ${VERSION} (NOT checked: a ${PLATFORM} build cannot run here; take it from the build job's log)`);
+} else {
   const out = spawnSync(exePath, ["--version"], { encoding: "utf8", timeout: 15000 });
   const said = (out.stdout || "").trim().split(/\s+/).pop();
   if (!said) {
