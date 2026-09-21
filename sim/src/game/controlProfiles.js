@@ -472,8 +472,8 @@ export const PROFILES = {
     },
     buttons: {
       // MOZA base, measured 2026-09-17: right paddle 13, left paddle 12.
-      // The hat is delivered as virtual buttons 128-131 (see `HAT_BASE` in
-      // input.js) so it can never collide with a real button.
+      // The hat is delivered as virtual buttons 128-131 (see the layout in
+      // controlBindings.js) so it can never collide with a real button.
       upshift: 13, downshift: 12, launch: 0, reset: 1, traction: 2, camera: 3,
       restart: 8, pause: 9, home: 10,
       dpadUp: 128, dpadDown: 129, dpadLeft: 130, dpadRight: 131,

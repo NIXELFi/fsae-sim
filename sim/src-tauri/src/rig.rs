@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::wheel::{self, DeviceInfo, DeviceState, Wheel, AXES_PER_DEVICE, MAX_DEVICES};
+use crate::wheel::{self, DeviceCaps, DeviceInfo, DeviceState, Wheel, AXES_PER_DEVICE, BUTTON_WORDS, HATS_PER_DEVICE, MAX_DEVICES};
 
 /// Aligning-torque weight vs speed: 0 below 0.3 m/s, 1 from 1.8 m/s, smooth between.
 ///
@@ -532,8 +532,10 @@ pub struct DeviceOut {
     pub force_feedback: bool,
     /// Axis `8*d + i`: axis i of device d; device 0 is the base.
     pub axes: [f32; MAX_DEVICES * AXES_PER_DEVICE],
-    /// Per device, bit i is button i.
-    pub buttons: [u32; MAX_DEVICES],
+    /// Per device, four words: button i is bit `i % 32` of word `i / 32`.
+    pub buttons: [[u32; BUTTON_WORDS]; MAX_DEVICES],
+    /// Per device, four hats: centidegrees clockwise from up, or -1.
+    pub hats: [[i32; HATS_PER_DEVICE]; MAX_DEVICES],
     pub pov: i32,
     pub rim_deg: f64,
     pub half_lock_deg: f64,
@@ -600,6 +602,8 @@ pub struct RigStatus {
     pub wheel_name: String,
     /// Every device being read, base first.
     pub device_names: Vec<String>,
+    /// What each of those reports: buttons, hats, axes. Same order.
+    pub device_caps: Vec<DeviceCaps>,
     pub wheel_error: String,
     /// Everything plugged in, for the picker.
     pub available: Vec<DeviceInfo>,
@@ -928,6 +932,7 @@ impl Loop {
                 st.ffb_active = w.ffb;
                 st.wheel_name = w.name.clone();
                 st.device_names = w.names.clone();
+                st.device_caps = w.caps.clone();
                 st.wheel_error = if w.ffb { String::new() } else { "no force feedback actuator on this base (console mode, or a wheel DirectInput cannot drive); steering and pedals still work".into() };
                 self.wheel = Some(w);
             }
@@ -936,6 +941,7 @@ impl Loop {
                 st.ffb_active = false;
                 st.wheel_name.clear();
                 st.device_names.clear();
+                st.device_caps.clear();
                 st.wheel_error = e;
                 self.wheel = None;
             }
@@ -1404,6 +1410,7 @@ impl Loop {
                 force_feedback: self.wheel.as_ref().map_or(false, |w| w.force_feedback),
                 axes: self.device.axes,
                 buttons: self.device.buttons,
+                hats: self.device.hats,
                 pov: self.device.pov,
                 rim_deg,
                 half_lock_deg: half_lock,

@@ -377,7 +377,17 @@ export class ControlsPanel {
     this.statusEl = el("small", "ctl-hint", this.rigStatusLine());
     box.append(this.statusEl);
     if (st?.wheelPresent && st.deviceNames?.length > 1) {
-      box.append(el("small", "ctl-hint", `Also reading: ${st.deviceNames.slice(1).join(", ")} (axes 8 and up, buttons 32 and up).`));
+      box.append(el("small", "ctl-hint", `Also reading: ${st.deviceNames.slice(1).join(", ")} (axes 8 and up; buttons show as "Dev 2", "Dev 3"...).`));
+    }
+    // What each device reports. When a button does nothing, this is the first
+    // thing to check: a button past what the device reports is not a sim bug,
+    // and one past 128 is beyond what DirectInput can hand over at all.
+    if (st?.wheelPresent && st.deviceCaps?.length) {
+      const caps = st.deviceCaps.map((c, i) => {
+        const over = c.buttons > 128 ? ` (only the first 128 are readable)` : "";
+        return `${i === 0 ? "Base" : `Dev ${i + 1}`}: ${c.buttons} buttons${over}, ${c.hats} hat${c.hats === 1 ? "" : "s"}, ${c.axes} axes`;
+      });
+      box.append(el("small", "ctl-hint", caps.join(" · ")));
     }
 
     // Which base, when there is a choice.

@@ -41,7 +41,9 @@ import {
   detectProfile, usableLockFrac, stepPedal } from "./controlProfiles.js";
 import { roadFromRimDeg, rimFromRoadDeg } from "../vehicle/params.js";
 import { presetFor, presetPaths, PRESET_VERSION } from "./wheelPresets.js";
-import { ACTIONS, buttonSlot } from "./controlBindings.js";
+import {
+  ACTIONS, buttonSlot, HAT_BASE, NATIVE_BUTTON_COUNT, NATIVE_BUTTONS, NATIVE_DEVICES, NATIVE_HATS, nativeButtonIndex, nativeHatIndex,
+} from "./controlBindings.js";
 
 /**
  * Held, not tapped. These are read as a level every frame and never appear in
@@ -63,8 +65,8 @@ const EDGE_ACTIONS = ACTIONS.filter(
  */
 const SOURCE_THRESHOLD = 0.02;
 
-/** First virtual button index for a native base's hat switch: above 4 devices x 32 real buttons. */
-export const HAT_BASE = 128;
+/** First virtual button index for the base's first hat; the full layout is in controlBindings.js. */
+export { HAT_BASE };
 /** Hat direction (0 up, 1 right, 2 down, 3 left) for each virtual hat button (up, down, left, right). */
 const HAT_DIRS = [0, 2, 3, 1];
 
@@ -340,47 +342,53 @@ export class Input {
    * controls work from a wheel's hat.
    */
   syntheticPad(nd) {
-    // Buttons: 32 per device, base first, so a button box's buttons sit at
-    // 32 and up. The base's hat becomes four virtual buttons ABOVE every
-    // real one (HAT_BASE..HAT_BASE+3: up, down, left, right) -- it used to
-    // overwrite indices 12-15, which on a MOZA base are the shift paddles,
-    // so a paddle pull stepped the setup menu instead of shifting.
+    // Up to four devices of 128 buttons and four hats each, flattened by the
+    // layout in controlBindings.js: buttons 0-31 of each device where they
+    // always were (32 per device, base first), the base's first hat at
+    // HAT_BASE..+3, and everything the old 32-button read could not see --
+    // buttons 32-127, the other hats, every hat on a peripheral -- above
+    // that. The hat is ABOVE the real buttons because it used to overwrite
+    // indices 12-15, which on a MOZA base are the shift paddles, so a paddle
+    // pull stepped the setup menu instead of shifting.
     //
-    // The pad object and its 132 button objects are persistent and updated
-    // in place: this runs every frame on the rig, and building them fresh
-    // was ~140 allocations a frame for a state that changes a bit at a time.
-    // The profiles only ever read `.pressed` / `.value` off them.
-    const words = Array.isArray(nd.buttons) ? nd.buttons : [nd.buttons | 0];
+    // The pad object and its button objects are persistent and updated in
+    // place: this runs every frame on the rig, and building them fresh was
+    // hundreds of allocations a frame for a state that changes a bit at a
+    // time. The profiles only ever read `.pressed` / `.value` off them.
+    //
+    // `nd.buttons` is per device either four 32-bit words (this rig) or one
+    // number (an older rig, which read 32 buttons).
+    const devs = Array.isArray(nd.buttons) ? nd.buttons : [nd.buttons | 0];
     const syn = this._syn ??= {
       id: "", index: -1, connected: true, mapping: "", axes: [], buttons: [],
     };
     const buttons = syn.buttons;
-    const real = Math.max(words.length * 32, HAT_BASE);
-    const total = HAT_BASE + 4;
-    // A device came or went: resize once, filling with fresh button records.
-    if (buttons.length !== total || real !== syn.real) {
+    if (buttons.length !== NATIVE_BUTTON_COUNT) {
       buttons.length = 0;
-      for (let i = 0; i < total; i++) buttons.push({ pressed: false, value: 0 });
-      syn.real = real;
+      for (let i = 0; i < NATIVE_BUTTON_COUNT; i++) buttons.push({ pressed: false, value: 0 });
     }
-    for (let d = 0; d < words.length; d++) {
-      const w = words[d];
-      for (let i = 0; i < 32; i++) {
-        const b = buttons[d * 32 + i];
-        const on = (w & (1 << i)) !== 0;
-        b.pressed = on; b.value = on ? 1 : 0;
+    const set = (i, on) => { const b = buttons[i]; b.pressed = on; b.value = on ? 1 : 0; };
+    for (let d = 0; d < NATIVE_DEVICES; d++) {
+      const dev = devs[d];
+      const words = Array.isArray(dev) ? dev : [dev | 0];
+      for (let b = 0; b < NATIVE_BUTTONS; b++) {
+        const w = words[b >> 5] | 0;
+        set(nativeButtonIndex(d, b), (w & (1 << (b & 31))) !== 0);
       }
     }
-    // Slots above the last real device, below the hat: always off.
-    for (let i = words.length * 32; i < HAT_BASE; i++) {
-      const b = buttons[i];
-      b.pressed = false; b.value = 0;
-    }
-    const dir = nd.pov >= 0 ? Math.round(nd.pov / 9000) % 4 : -1; // 0 up, 1 right, 2 down, 3 left
-    for (let k = 0; k < 4; k++) {
-      const on = dir === HAT_DIRS[k];
-      const b = buttons[HAT_BASE + k];
-      b.pressed = on; b.value = on ? 1 : 0;
+    // Hats: every hat of every device as four directions, and the base's
+    // first hat again at HAT_BASE, where every binding made so far points.
+    const hats = Array.isArray(nd.hats) ? nd.hats : [[nd.pov ?? -1]];
+    for (let d = 0; d < NATIVE_DEVICES; d++) {
+      for (let h = 0; h < NATIVE_HATS; h++) {
+        const pov = hats[d]?.[h] ?? -1;
+        const dir = pov >= 0 ? Math.round(pov / 9000) % 4 : -1; // 0 up, 1 right, 2 down, 3 left
+        for (let k = 0; k < 4; k++) {
+          const on = dir === HAT_DIRS[k];
+          set(nativeHatIndex(d, h, k), on);
+          if (d === 0 && h === 0) set(HAT_BASE + k, on);
+        }
+      }
     }
     // The rig's axes arrive as a fresh JSON array each frame; hand it over
     // rather than copying it.

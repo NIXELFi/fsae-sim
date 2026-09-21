@@ -11,6 +11,8 @@
 import {
   ACTIONS, ACTION_GROUPS, DEFAULT_KEYS, RESERVED_KEYS, buttonSlot, keyLabel,
   buttonLabel, UNBOUND, BindingCapture, ensureEscapeHatch,
+  HAT_BASE, NATIVE_DEVICES, NATIVE_BUTTONS, NATIVE_HATS, NATIVE_BUTTON_COUNT,
+  nativeButtonIndex, nativeHatIndex, decodeNativeIndex,
 } from "../src/game/controlBindings.js";
 
 // `Input` and `ControlSettings` live in the browser. Everything they touch at
@@ -130,6 +132,81 @@ section("labels a driver can read");
   ok(buttonLabel(0, { launch: "A" }, "launch") === "A", "a pad's own naming wins");
   ok(buttonLabel(128) === "Hat up", "the hat is named, not numbered");
   ok(buttonLabel(35).startsWith("Dev 2"), "a second device says which device");
+  ok(buttonLabel(nativeButtonIndex(0, 40)) === "Button 40", "a base button past 32 is numbered as itself");
+  ok(buttonLabel(nativeButtonIndex(2, 100)) === "Dev 3 btn 100", "so is a peripheral's");
+  ok(buttonLabel(nativeHatIndex(0, 1, 2)) === "Hat 2 left", "a second hat is named");
+  ok(buttonLabel(nativeHatIndex(1, 0, 0)) === "Dev 2 Hat up", "a peripheral's hat says which device");
+}
+
+section("the native layout: 128 buttons and 4 hats a device, old numbers kept");
+{
+  // Every binding saved under the 32-button layout means the same thing now.
+  for (let d = 0; d < NATIVE_DEVICES; d++) {
+    for (let b = 0; b < 32; b++) ok(nativeButtonIndex(d, b) === 32 * d + b, `device ${d} button ${b} keeps index ${32 * d + b}`);
+  }
+  ok(HAT_BASE === 128, "the base's first hat is still 128-131");
+  // No two inputs share a number, and every number decodes back.
+  const seen = new Map();
+  for (let d = 0; d < NATIVE_DEVICES; d++) {
+    for (let b = 0; b < NATIVE_BUTTONS; b++) {
+      const i = nativeButtonIndex(d, b);
+      ok(!seen.has(i), `button d${d} b${b} -> ${i} is unique (also ${seen.get(i)})`);
+      seen.set(i, `d${d} b${b}`);
+      const back = decodeNativeIndex(i);
+      ok(back?.device === d && back?.button === b, `index ${i} decodes to d${d} b${b}`);
+    }
+    for (let h = 0; h < NATIVE_HATS; h++) {
+      for (let k = 0; k < 4; k++) {
+        const i = nativeHatIndex(d, h, k);
+        ok(!seen.has(i) && i >= HAT_BASE + 4, `hat d${d} h${h} k${k} -> ${i} is unique and above the old range`);
+        seen.set(i, `d${d} h${h} k${k}`);
+        const back = decodeNativeIndex(i);
+        ok(back?.device === d && back?.hat === h && back?.dir === k, `index ${i} decodes to its hat`);
+      }
+    }
+  }
+  ok(Math.max(...seen.keys()) === NATIVE_BUTTON_COUNT - 1, "the layout is dense up to NATIVE_BUTTON_COUNT");
+}
+
+section("the rig's 128-button snapshot reaches the bindings");
+{
+  const input = new Input();
+  const words = () => [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+  const hats = () => [[-1, -1, -1, -1], [-1, -1, -1, -1], [-1, -1, -1, -1], [-1, -1, -1, -1]];
+  const pad = (btn, hat) => input.syntheticPad({ axes: [], buttons: btn, hats: hat, pov: hat[0][0] });
+
+  let w = words(); w[0][1] = 1 << (45 - 32);            // base button 45
+  let p = pad(w, hats());
+  ok(p.buttons[nativeButtonIndex(0, 45)].pressed, "base button 45 is pressed at its index");
+  ok(p.buttons.filter((b) => b.pressed).length === 1, "and nothing else is");
+
+  w = words(); w[1][0] = 1 << 3; w[2][3] = 1 << 31;       // dev 2 button 3, dev 3 button 127
+  p = pad(w, hats());
+  ok(p.buttons[35].pressed, "device 2 button 3 is still index 35");
+  ok(p.buttons[nativeButtonIndex(2, 127)].pressed, "device 3 button 127 is readable");
+
+  const h = hats(); h[0][0] = 9000; h[0][1] = 18000; h[1][0] = 0;
+  p = pad(words(), h);
+  ok(p.buttons[HAT_BASE + 3].pressed, "base hat 1 right lights the old hat-right index");
+  ok(p.buttons[nativeHatIndex(0, 0, 3)].pressed, "and its new one");
+  ok(p.buttons[nativeHatIndex(0, 1, 1)].pressed, "base hat 2 down is readable");
+  ok(p.buttons[nativeHatIndex(1, 0, 0)].pressed, "a peripheral's hat is readable");
+
+  // An older rig: one 32-bit word per device, one hat.
+  p = input.syntheticPad({ axes: [], buttons: [1 << 5, 1, 0, 0], pov: 27000 });
+  ok(p.buttons[5].pressed && p.buttons[32].pressed, "the old snapshot shape still reads");
+  ok(p.buttons[HAT_BASE + 2].pressed, "with its hat");
+
+  // A capture sees a high button and binds it by that index.
+  const cap = new BindingCapture({ pad: () => cur });
+  let cur = pad(words(), hats());
+  let got = null;
+  cap.start("button", (r) => { got = r; });
+  cap.tick();
+  w = words(); w[0][2] = 1 << (70 - 64);
+  cur = pad(w, hats());
+  cap.tick();
+  ok(got?.kind === "button" && got.index === nativeButtonIndex(0, 70), `pressing button 70 binds index ${nativeButtonIndex(0, 70)} (got ${got?.index})`);
 }
 
 // ------------------------------------------------------ what the game reads --

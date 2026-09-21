@@ -20,31 +20,108 @@
 //! and only `Wheel::open_from`, the cheap `CreateDevice`/`Acquire` part,
 //! runs on the rig thread, and only when the scan turned up a candidate.
 //!
-//! The data format is c_dfDIJoystick rebuilt by hand -- the `windows` crate
-//! does not export the static -- as eight axes, four hats and 32 buttons on
-//! the DIJOYSTATE layout, every object optional so a base with no rudder
-//! still acquires.
+//! The data format is the first part of c_dfDIJoystick2 rebuilt by hand --
+//! the `windows` crate does not export the static -- as eight axes, four
+//! hats and 128 buttons, every object optional so a base with no rudder
+//! still acquires. It was the 32-button DIJOYSTATE layout, and DirectInput
+//! silently drops every object that does not fit the format: on a DD base
+//! whose rim reports its encoders, funky switch and dials as buttons 33 and
+//! up, those buttons simply did not exist, and the driver had to choose
+//! which 32 to live with.
 
 /// How many game controllers are read at once: the wheel base plus up to
 /// three more -- a separate pedal set, a shifter, a button box.
 pub const MAX_DEVICES: usize = 4;
 /// Axes per device, in DirectInput order: X Y Z Rx Ry Rz Slider0 Slider1.
 pub const AXES_PER_DEVICE: usize = 8;
+/// Buttons per device: DIJOYSTATE2's 128, as four 32-bit words.
+pub const BUTTONS_PER_DEVICE: usize = 128;
+pub const BUTTON_WORDS: usize = BUTTONS_PER_DEVICE / 32;
+/// Hat switches (POVs) per device.
+pub const HATS_PER_DEVICE: usize = 4;
 
 /// One read of every device. Axis `8*d + i` is axis `i` of device `d`;
 /// device 0 is always the wheel base.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceState {
     pub axes: [f32; MAX_DEVICES * AXES_PER_DEVICE],
-    /// Per device, button i is bit i.
-    pub buttons: [u32; MAX_DEVICES],
-    /// The base's hat switch, centidegrees clockwise from up, or -1 centred.
+    /// Per device, button i is bit `i % 32` of word `i / 32`.
+    pub buttons: [[u32; BUTTON_WORDS]; MAX_DEVICES],
+    /// Per device, each hat in centidegrees clockwise from up, or -1 centred.
+    pub hats: [[i32; HATS_PER_DEVICE]; MAX_DEVICES],
+    /// The base's first hat; `hats[0][0]`, kept for the webview's old path.
     pub pov: i32,
 }
 
 impl Default for DeviceState {
     fn default() -> Self {
-        Self { axes: [0.0; MAX_DEVICES * AXES_PER_DEVICE], buttons: [0; MAX_DEVICES], pov: -1 }
+        Self {
+            axes: [0.0; MAX_DEVICES * AXES_PER_DEVICE],
+            buttons: [[0; BUTTON_WORDS]; MAX_DEVICES],
+            hats: [[-1; HATS_PER_DEVICE]; MAX_DEVICES],
+            pov: -1,
+        }
+    }
+}
+
+/// Is this a gamepad or a desk device rather than part of the rig? Those are
+/// still read -- a driver may genuinely want one -- but only after every
+/// pedal set, shifter and button box has a slot.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn looks_like_pad(name: &str) -> bool {
+    let l = name.to_lowercase();
+    ["xbox", "xinput", "gamepad", "wireless controller", "dualsense", "dualshock", "pro controller", "spacemouse", "3dconnexion", "vjoy"]
+        .iter()
+        .any(|k| l.contains(k))
+}
+
+/// The order the non-base devices take the three spare slots in: rig
+/// peripherals first, then anything unrecognised, then pads, and by name
+/// within each group.
+///
+/// It was enumeration order, which is whatever order Windows happens to list
+/// HID devices in that boot. A button box's buttons are bound by slot (32 and
+/// up for the second device), so plugging in a pad, or a reboot that listed
+/// things differently, moved the box to another slot and left its bindings
+/// pointing at the wrong buttons -- or at a device that had no slot at all.
+/// Sorting by kind and name keeps a rig's layout the same across boots and
+/// across whatever else is plugged in.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn extras_order(names: &[&str]) -> Vec<usize> {
+    let rank = |n: &str| {
+        if looks_like_peripheral(n) {
+            0
+        } else if looks_like_pad(n) {
+            2
+        } else {
+            1
+        }
+    };
+    let mut idx: Vec<usize> = (0..names.len()).collect();
+    idx.sort_by(|&a, &b| rank(names[a]).cmp(&rank(names[b])).then_with(|| names[a].cmp(names[b])));
+    idx
+}
+
+/// DirectInput's button bytes (high bit = down) as four 32-bit words.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn pack_buttons(bytes: &[u8; BUTTONS_PER_DEVICE]) -> [u32; BUTTON_WORDS] {
+    let mut words = [0u32; BUTTON_WORDS];
+    for (i, b) in bytes.iter().enumerate() {
+        if b & 0x80 != 0 {
+            words[i / 32] |= 1 << (i % 32);
+        }
+    }
+    words
+}
+
+/// A raw POV reading as centidegrees, or -1 centred. Centred is documented as
+/// 0xFFFFFFFF, but some drivers set only the low word.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn hat_value(raw: u32) -> i32 {
+    if raw == 0xFFFF_FFFF || (raw & 0xFFFF) == 0xFFFF || raw >= 36_000 {
+        -1
+    } else {
+        raw as i32
     }
 }
 
@@ -54,6 +131,17 @@ impl Default for DeviceState {
 pub struct DeviceInfo {
     pub name: String,
     pub force_feedback: bool,
+}
+
+/// What an opened device says it has, for the controls panel: when a button
+/// does not respond, the first question is whether the device reports it.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceCaps {
+    pub name: String,
+    pub buttons: u32,
+    pub hats: u32,
+    pub axes: u32,
 }
 
 /// The one list of steering-wheel name keywords, shared with the webview.
@@ -106,7 +194,7 @@ pub use stub::{scan, Found, Wheel};
 
 #[cfg(windows)]
 mod win {
-    use super::{looks_like_peripheral, looks_like_wheel, DeviceInfo, DeviceState};
+    use super::{extras_order, looks_like_peripheral, looks_like_wheel, DeviceCaps, DeviceInfo, DeviceState};
     use windows::core::{Interface, GUID};
     use windows::Win32::Devices::HumanInterfaceDevice::*;
     use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND};
@@ -129,13 +217,20 @@ mod win {
     /// Axis range we ask the driver for, so a reading normalises trivially.
     const AXIS_RANGE: i32 = 10_000;
 
-    /// DIJOYSTATE, laid out by hand so its offsets are ours.
+    /// The head of DIJOYSTATE2, laid out by hand so its offsets are ours:
+    /// 32 + 16 + 128 = 176 bytes, a multiple of four as DirectInput requires.
     #[repr(C)]
-    #[derive(Default, Clone, Copy)]
+    #[derive(Clone, Copy)]
     struct JoyState {
         axes: [i32; 8],
         pov: [u32; 4],
-        buttons: [u8; 32],
+        buttons: [u8; super::BUTTONS_PER_DEVICE],
+    }
+
+    impl Default for JoyState {
+        fn default() -> Self {
+            Self { axes: [0; 8], pov: [0xFFFF_FFFF; 4], buttons: [0; super::BUTTONS_PER_DEVICE] }
+        }
     }
 
     pub struct Wheel {
@@ -172,6 +267,8 @@ mod win {
         /// (min, max) of each axis as the driver reports it, base first.
         /// The range we ask for is a request; a base may keep its own.
         ranges: Vec<[(f32, f32); 8]>,
+        /// What each opened device reports, base first.
+        pub caps: Vec<DeviceCaps>,
     }
 
     /// A game controller a scan turned up: enough to open it later without
@@ -288,10 +385,16 @@ mod win {
                 let device = Self::open_one(&di, base.guid, hwnd_raw, base.ffb)?;
                 let mut names = vec![base.name.clone()];
                 let mut extras = Vec::new();
-                for (i, f) in found.iter().enumerate() {
-                    if i == idx || extras.len() + 1 >= super::MAX_DEVICES {
-                        continue;
+                // Everything else, peripherals first and by name, so a
+                // device keeps its slot -- and its bindings -- from one boot
+                // to the next. See `extras_order`.
+                let others: Vec<usize> = (0..found.len()).filter(|&i| i != idx).collect();
+                let other_names: Vec<&str> = others.iter().map(|&i| found[i].name.as_str()).collect();
+                for k in extras_order(&other_names) {
+                    if extras.len() + 1 >= super::MAX_DEVICES {
+                        break;
                     }
+                    let f = &found[others[k]];
                     // Pedals, shifters and button boxes: read only, shared.
                     if let Ok(d) = Self::open_one(&di, f.guid, hwnd_raw, false) {
                         extras.push(d);
@@ -302,6 +405,10 @@ mod win {
                 let mut ranges = vec![Self::axis_ranges(&device)];
                 for d in &extras {
                     ranges.push(Self::axis_ranges(d));
+                }
+                let mut caps = vec![Self::caps(&device, &names[0])];
+                for (k, d) in extras.iter().enumerate() {
+                    caps.push(Self::caps(d, &names[k + 1]));
                 }
                 let mut w = Wheel {
                     name: base.name.clone(),
@@ -315,6 +422,7 @@ mod win {
                     effect_stopped: false,
                     lost: 0,
                     ranges,
+                    caps,
                 };
                 if w.ffb {
                     if let Err(e) = w.create_effect() {
@@ -335,9 +443,10 @@ mod win {
             hr(di.CreateDevice(&guid, &mut device, None), "CreateDevice")?;
             let device = device.ok_or("CreateDevice returned nothing")?;
 
-            // c_dfDIJoystick, by hand. Offsets follow JoyState above.
+            // c_dfDIJoystick2's axes, hats and buttons, by hand. Offsets
+            // follow JoyState above.
             let axis_guids = [&GUID_XAxis, &GUID_YAxis, &GUID_ZAxis, &GUID_RxAxis, &GUID_RyAxis, &GUID_RzAxis, &GUID_Slider, &GUID_Slider];
-            let mut objs: Vec<DIOBJECTDATAFORMAT> = Vec::with_capacity(44);
+            let mut objs: Vec<DIOBJECTDATAFORMAT> = Vec::with_capacity(8 + 4 + super::BUTTONS_PER_DEVICE);
             for (i, g) in axis_guids.iter().enumerate() {
                 objs.push(DIOBJECTDATAFORMAT {
                     pguid: *g,
@@ -354,7 +463,7 @@ mod win {
                     dwFlags: 0,
                 });
             }
-            for i in 0..32 {
+            for i in 0..super::BUTTONS_PER_DEVICE {
                 objs.push(DIOBJECTDATAFORMAT {
                     pguid: std::ptr::null(),
                     dwOfs: (48 + i) as u32,
@@ -416,6 +525,24 @@ mod win {
 
             hr(device.Acquire(), if exclusive { "Acquire (bring the game window to the front)" } else { "Acquire" })?;
             Ok(device)
+        }
+
+        /// How many buttons, hats and axes the device reports. Logged under
+        /// FSAE_RIG_TRACE, and shown in the controls panel: a device that
+        /// reports more buttons than the 128 read here is worth knowing about.
+        unsafe fn caps(device: &IDirectInputDevice8W, name: &str) -> DeviceCaps {
+            let mut c = DIDEVCAPS { dwSize: std::mem::size_of::<DIDEVCAPS>() as u32, ..Default::default() };
+            let ok = device.GetCapabilities(&mut c).is_ok();
+            let out = DeviceCaps {
+                name: name.to_string(),
+                buttons: if ok { c.dwButtons } else { 0 },
+                hats: if ok { c.dwPOVs } else { 0 },
+                axes: if ok { c.dwAxes } else { 0 },
+            };
+            if std::env::var_os("FSAE_RIG_TRACE").is_some() {
+                eprintln!("wheel: {name}: {} buttons, {} hats, {} axes (caps read: {ok})", out.buttons, out.hats, out.axes);
+            }
+            out
         }
 
         /// The range each axis actually reports, read back per object. Falls
@@ -507,7 +634,7 @@ mod win {
                 self.lost = 0;
                 let mut s = DeviceState::default();
                 Self::unpack(&js, 0, &mut s, &self.ranges[0]);
-                s.pov = if js.pov[0] == 0xFFFF_FFFF || (js.pov[0] & 0xFFFF) == 0xFFFF { -1 } else { js.pov[0] as i32 };
+                s.pov = s.hats[0][0];
                 for (k, d) in self.extras.iter().enumerate() {
                     if let Some(js) = Self::read_one(d) {
                         Self::unpack(&js, k + 1, &mut s, &self.ranges[k + 1]);
@@ -523,13 +650,10 @@ mod win {
                 let v = (js.axes[i] as f32 - lo) / (hi - lo) * 2.0 - 1.0;
                 s.axes[slot * super::AXES_PER_DEVICE + i] = v.clamp(-1.0, 1.0);
             }
-            let mut bits = 0u32;
-            for (i, b) in js.buttons.iter().enumerate() {
-                if b & 0x80 != 0 {
-                    bits |= 1 << i;
-                }
+            s.buttons[slot] = super::pack_buttons(&js.buttons);
+            for (h, &p) in js.pov.iter().enumerate() {
+                s.hats[slot][h] = super::hat_value(p);
             }
-            s.buttons[slot] = bits;
         }
 
         /// Start the constant-force effect again after the device was lost and
@@ -624,7 +748,7 @@ mod win {
 
 #[cfg(not(windows))]
 mod stub {
-    use super::{DeviceInfo, DeviceState};
+    use super::{DeviceCaps, DeviceInfo, DeviceState};
 
     /// Nothing is ever found off Windows.
     #[derive(Clone, Debug)]
@@ -650,6 +774,7 @@ mod stub {
         pub names: Vec<String>,
         pub ffb: bool,
         pub force_feedback: bool,
+        pub caps: Vec<DeviceCaps>,
     }
 
     impl Wheel {
@@ -691,5 +816,38 @@ mod tests {
         assert!(looks_like_peripheral("MOZA SR-P Pedals"));
         assert!(looks_like_peripheral("Heusinkveld Sim Pedals Sprint"));
         assert!(!looks_like_peripheral("Fanatec Podium Wheel Base DD1"));
+    }
+
+    #[test]
+    fn buttons_past_32_are_kept() {
+        let mut bytes = [0u8; BUTTONS_PER_DEVICE];
+        for i in [0, 31, 32, 63, 64, 100, 127] {
+            bytes[i] = 0x80;
+        }
+        bytes[5] = 0x7F; // high bit clear: not pressed
+        let w = pack_buttons(&bytes);
+        assert_eq!(w[0], 1 | (1 << 31));
+        assert_eq!(w[1], 1 | (1 << 31));
+        assert_eq!(w[2], 1);
+        assert_eq!(w[3], (1 << (100 - 96)) | (1 << 31));
+    }
+
+    #[test]
+    fn hats_centre_and_direction() {
+        assert_eq!(hat_value(0xFFFF_FFFF), -1);
+        assert_eq!(hat_value(0x0000_FFFF), -1);
+        assert_eq!(hat_value(0), 0);
+        assert_eq!(hat_value(27_000), 27_000);
+    }
+
+    #[test]
+    fn extras_are_ordered_by_kind_then_name() {
+        let names = ["Xbox Controller", "Leo Bodnar BBI-32 Button Box", "Some HID Thing", "MOZA SR-P Pedals"];
+        let order: Vec<&str> = extras_order(&names).into_iter().map(|i| names[i]).collect();
+        assert_eq!(order, ["Leo Bodnar BBI-32 Button Box", "MOZA SR-P Pedals", "Some HID Thing", "Xbox Controller"]);
+        // The same set in another enumeration order lands in the same slots.
+        let shuffled = ["MOZA SR-P Pedals", "Some HID Thing", "Xbox Controller", "Leo Bodnar BBI-32 Button Box"];
+        let again: Vec<&str> = extras_order(&shuffled).into_iter().map(|i| shuffled[i]).collect();
+        assert_eq!(order, again);
     }
 }

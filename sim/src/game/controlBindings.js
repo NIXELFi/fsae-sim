@@ -186,24 +186,77 @@ export function keyLabel(code) {
   return code;
 }
 
-/** First virtual button index for a native base's hat; mirrors `input.js`. */
-const HAT_BASE = 128;
-const HAT_NAMES = ["Hat up", "Hat down", "Hat left", "Hat right"];
+// ---- the native rig's button numbering -------------------------------------
+//
+// A binding is one flat index. The rig reads up to four devices (the base
+// first), each with 128 buttons and four hats; the index space is laid out so
+// that everything the OLD 32-button layout could express keeps its number, and
+// every binding saved before this is still right:
+//
+//     0 - 127   device d, buttons 0-31       32*d + b            (unchanged)
+//   128 - 131   the base's first hat: up, down, left, right       (unchanged)
+//   132 - 515   device d, buttons 32-127     132 + 96*d + (b - 32)
+//   516 - 579   device d, hat h, direction   516 + 16*d + 4*h + k
+//
+// The base's first hat appears twice (128-131 and 516-519); both light up, and
+// the capture takes the lower number, so it binds as it always has.
+
+export const NATIVE_DEVICES = 4;
+export const NATIVE_BUTTONS = 128;
+export const NATIVE_HATS = 4;
+/** First virtual button index for the base's first hat (the old layout's). */
+export const HAT_BASE = 128;
+/** Buttons 32-127 of every device. */
+export const EXT_BUTTON_BASE = HAT_BASE + 4;
+/** Every hat of every device, four directions each. */
+export const EXT_HAT_BASE = EXT_BUTTON_BASE + NATIVE_DEVICES * (NATIVE_BUTTONS - 32);
+export const NATIVE_BUTTON_COUNT = EXT_HAT_BASE + NATIVE_DEVICES * NATIVE_HATS * 4;
+
+/** Flat index of button `b` (0-127) on device `d`. */
+export function nativeButtonIndex(d, b) {
+  return b < 32 ? 32 * d + b : EXT_BUTTON_BASE + (NATIVE_BUTTONS - 32) * d + (b - 32);
+}
+
+/** Flat index of direction `k` (0 up, 1 down, 2 left, 3 right) of hat `h` on device `d`. */
+export function nativeHatIndex(d, h, k) {
+  return EXT_HAT_BASE + 16 * d + 4 * h + k;
+}
+
+/** What a flat index is: { device, button } or { device, hat, dir }, or null. */
+export function decodeNativeIndex(i) {
+  if (i < 0) return null;
+  if (i < HAT_BASE) return { device: Math.floor(i / 32), button: i % 32 };
+  if (i < EXT_BUTTON_BASE) return { device: 0, hat: 0, dir: i - HAT_BASE };
+  if (i < EXT_HAT_BASE) {
+    const j = i - EXT_BUTTON_BASE;
+    return { device: Math.floor(j / (NATIVE_BUTTONS - 32)), button: 32 + (j % (NATIVE_BUTTONS - 32)) };
+  }
+  if (i < NATIVE_BUTTON_COUNT) {
+    const j = i - EXT_HAT_BASE;
+    return { device: Math.floor(j / 16), hat: Math.floor((j % 16) / 4), dir: j % 4 };
+  }
+  return null;
+}
+
+const HAT_DIR_NAMES = ["up", "down", "left", "right"];
 
 /**
  * A device button index as something a driver can find.
  *
  * `labels` is the profile's own naming for a known layout -- an Xbox pad's
  * button 0 is "A" and saying "button 0" instead would be wilfully unhelpful.
- * Nothing names a wheel's buttons, so those stay numbered.
+ * Nothing names a wheel's buttons, so those stay numbered, from 0 as they
+ * always have been here.
  */
 export function buttonLabel(index, labels, slot) {
   if (index == null || index < 0) return "";
   if (labels && slot && labels[slot]) return labels[slot];
-  if (index >= HAT_BASE && index < HAT_BASE + 4) return HAT_NAMES[index - HAT_BASE];
-  // Buttons are 32 per device, base first; say which device once past the first.
-  if (index >= 32) return `Dev ${Math.floor(index / 32) + 1} btn ${index % 32}`;
-  return `Button ${index}`;
+  const n = decodeNativeIndex(index);
+  if (!n) return `Button ${index}`;
+  const dev = n.device > 0 ? `Dev ${n.device + 1} ` : "";
+  if (n.hat != null) return `${dev}Hat${n.hat > 0 ? ` ${n.hat + 1}` : ""} ${HAT_DIR_NAMES[n.dir]}`.trim();
+  if (n.device > 0) return `Dev ${n.device + 1} btn ${n.button}`;
+  return `Button ${n.button}`;
 }
 
 // ------------------------------------------------------------- capture ----
