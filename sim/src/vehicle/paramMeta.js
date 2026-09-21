@@ -178,7 +178,7 @@ export function parameterGroups() {
 
     rows("Roll balance", [
       p("Roll stiffness distribution, front", v.roll.rsdFront * 100, "%", "team",
-        "From the team's 2026 Anti-Roll Bar Calculator; the with-tyre no-ARB baseline."),
+        "Team setup choice, between the measured blade settings: front 1-1 / rear 1-1 is 46%, front 4-7 / rear 1-1 is 51%."),
       p("CG to roll-axis arm", v.roll.hRollArmM * 1000, "mm", "team",
         "Matches the SDM25 RSD test sheet's measured 10.34 in."),
       p("Roll centre, front", v.roll.rcFrontM * 1000, "mm", "team", "", { path: "roll.rcFrontM", min: -60, max: 160, step: 0.5, factor: 1000 }),
@@ -223,7 +223,7 @@ export function parameterGroups() {
       p("Max brake torque", v.brakeTorqueMaxNm, "N.m", "estimate",
         "Derived, not measured: the brakes calculator's 70 bar max working pressure through the P4.24/P2.24 callipers, pad mu 0.45 and the 54% bias bar. That is 206 lbf on the pedal; the force a driver reaches is the unmeasured part. All four lock at 786 N.m (1.5 g)."),
       p("Brake bias, front", v.brakeBiasFront * 100, "%", "team",
-        "Torque share from the calliper geometry and the 54% bias bar on the car (calculator: 71.3%, workbook radii: 72.7%). The bias bar's 54% is a pressure split."),
+        "Team setup choice, as a torque share. The 54% bias bar measured on the car gives 72% through the calliper geometry (calculator: 71.3%, workbook radii: 72.7%); 65% is a bar near 45%. The bias bar figure is a pressure split."),
     ]),
 
     rows("Driver & environment", [

@@ -159,7 +159,9 @@ export const SDM26 = {
     // too easily, and more front roll stiffness is the first and most direct
     // answer: it moves lateral load transfer forward, which costs the front
     // grip and makes the car push. Adjustable live from the wheel, 30-70%.
-    rsdFront: 0.51,
+    // 2026-09-21 (Nick): set to 0.48, between the 1-1/1-1 baseline (0.46) and
+    // the 4-7/1-1 setting (0.51) this ran at before.
+    rsdFront: 0.48,
     hRollArmM: 0.2626, // sprung-CG to roll-axis arm
     rcFrontM: 0.0186,  // front roll-centre height
     rcRearM: 0.0251,   // rear roll-centre height
@@ -299,7 +301,10 @@ export const SDM26 = {
   // bias bar is 0.727 (the calculator's own sheet says 0.713 with slightly
   // different radii). The bias bar figure alone is a pressure split, not a
   // torque split; the front callipers are twice the rear.
-  brakeBiasFront: 0.72,
+  // 2026-09-21 (Nick): set to 0.65 front torque share. Through the same
+  // calliper geometry that is a bias bar near 45% front, not the 54% on the
+  // car on 2026-04-11.
+  brakeBiasFront: 0.65,
 
   // TEAM: the differential. SDM26 runs a Drexler Formula Student V3, a 1.5-way
   // Salisbury (clutch-pack) LSD, in its default 40 deg drive / 50 deg coast

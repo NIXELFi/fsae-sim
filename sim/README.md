@@ -460,7 +460,9 @@ Lifted verbatim from Helios `SDM26_VEHICLE` / `SDM26_ROLL`: mass 267 kg, 48.5%
 front, CG 284.5 mm, wheelbase 1.53 m, tracks 1.207/1.194, tyre radius 0.20 m
 (the TTC loaded radius at 12 psi and 667 N is 196.5 mm), Crr 0.02, driveline
 0.85, CBR600RR ratios with 2.111 primary and SDM's 3.0 final, 14 500 rpm limit,
-100 ms shift, roll-stiffness distribution 0.512 on a 262.6 mm roll arm.
+100 ms shift, and a 262.6 mm roll arm. Roll-stiffness distribution is the
+team's 0.48 setup, between the measured 1-1/1-1 (0.46) and 4-7/1-1 (0.51)
+blade settings, rather than Helios's 0.512.
 
 Aero is the 2026 full-car CFD ride-height map from the team's Drive ('Ride
 Height Data (BW)'): CdA 1.267 / ClA 3.132 at 52.4% front at nominal ride
@@ -470,8 +472,9 @@ sheet. From the team's Drive as well, via the AC mod's transcription
 Izz 93.7 kg.m^2, unsprung 7.56 / 7.77 kg per corner, wheel inertia 0.154 /
 0.152 kg.m^2 ('SDM26 Full-Vehicle Sim Parameters'); steering ratio 4.411,
 caster 4.743 deg, 18.85 mm mechanical trail ('SDM26 Designed vs Actual
-Kinematics', OptimumK); brake torque share 0.72 and the 70 bar system limit
-('SDM26 Brakes Calculator'); tyre load sensitivity 0.12 (the team's PAC2002
+Kinematics', OptimumK); the 70 bar system limit and a 0.72 brake torque share
+at the 54% bias bar ('SDM26 Brakes Calculator'; the sim runs the team's 0.65
+setup); tyre load sensitivity 0.12 (the team's PAC2002
 TTC fit); pitch gradient 0.89 deg/g ('SDM26 Ride Roll Calc'). Pneumatic trail
 is fitted straight to the raw TTC Round 9 Mz data for the R20 by
 `sim/tools/ttc_trail.py` (see `docs/tyre-models-review.md`).

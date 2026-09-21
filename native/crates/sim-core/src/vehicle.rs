@@ -330,14 +330,16 @@ pub fn sdm26() -> VehicleParams {
             // the team runs on the acceleration car. 1-1/1-1 is 0.46 and is
             // the event target, but the driver wants the car to rotate less
             // and front roll stiffness is the most direct lever.
-            rsd_front: 0.51,
+            // 2026-09-21 (Nick): 0.48, between the two; see params.js.
+            rsd_front: 0.48,
             roll_arm_m: 0.2626,
             rc_front_m: 0.0186,
             rc_rear_m: 0.0251,
         },
         // 70 bar max working pressure through the measured callipers and
-        // 54% bias bar; see params.js.
-        brakes: BrakeParams { max_torque_nm: 1235.0, bias_front: 0.72 },
+        // 54% bias bar; see params.js. Bias set to 0.65 front torque share
+        // 2026-09-21 (Nick), a bar near 45% front.
+        brakes: BrakeParams { max_torque_nm: 1235.0, bias_front: 0.65 },
         // TEAM: Drexler Formula Student V3 in its default 40 deg drive /
         // 50 deg coast configuration, which the manual's lock table reads as
         // 0.60 and 0.42, with the fixed unit's 25 N.m breakaway preload. The
