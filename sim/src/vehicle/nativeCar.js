@@ -199,6 +199,7 @@ export class NativeCar {
       gamma: ffb.gamma ?? 0.75, knee: ffb.knee ?? 0.6,
       parkFriction: ffb.parkFriction ?? 0.10, stopDamping: ffb.stopDamping ?? 0.35,
       understeerEffect: ffb.understeerEffect ?? 0, oversteerEffect: ffb.oversteerEffect ?? 0,
+      model: ffb.model === 2 ? 2 : 1,
     });
     const isWheel = profile.kind === "wheel";
     const w = profile.wheel || {};
@@ -401,6 +402,6 @@ function blankTelemetry() {
     downforceN: 0, dragN: 0, driveForceN: 0, steerDeg: 0,
     rollDeg: 0, pitchDeg: 0, locked: false,
     kappaRL: 0, kappaRR: 0, utilRL: 0, utilRR: 0, diffNm: 0,
-    kingpinTorqueNm: 0, rimTorqueNm: 0, trailFm: 0, mechTrailM: 0,
+    kingpinTorqueNm: 0, rimTorqueNm: 0, trailFm: 0, mechTrailM: 0, scrubMomentNm: 0,
   };
 }

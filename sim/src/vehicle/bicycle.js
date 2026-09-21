@@ -130,6 +130,7 @@ export class BicycleModel {
       // the steering axis; rimTorqueNm is what reaches the driver's hands.
       // Both left-positive like `delta`: positive tries to steer further left.
       kingpinTorqueNm: 0, rimTorqueNm: 0, trailFm: 0, mechTrailM: 0,
+      scrubMomentNm: 0, scrubRimNm: 0,
     };
   }
 
@@ -567,6 +568,7 @@ export class BicycleModel {
     const mechTrail = p.tireRadiusM * Math.tan((geo.casterDeg * Math.PI) / 180) +
       geo.kingpinOffsetTrailM;
     let kingpin = 0;
+    let scrub = 0;
     if (FzF > 1) {
       const half = FzF / 2;
       const shift = Math.min(Math.abs(dFzF), half);
@@ -583,6 +585,13 @@ export class BicycleModel {
       const fyO = fF.fy * (wO / (wO + wI)), fyI = fF.fy * (wI / (wO + wI));
       kingpin = -(fyO * (tO + mechTrail) + fyI * (tI + mechTrail));
       t.trailFm = (tO * outer + tI * inner) / FzF;
+      // FFB model v2: the front longitudinal forces through the scrub radius,
+      // scrub * (Fx_right - Fx_left). Each patch's Fx at the shared slip ratio
+      // scales with its own mu * load exactly as its Fy does, so the same
+      // split applies. Positive dFzF (a left turn) loads the right tyre.
+      // Telemetry only -- see `scrub_moment_nm` in the Rust solver.
+      const fxO = fF.fx * (wO / (wO + wI)), fxI = fF.fx * (wI / (wO + wI));
+      scrub = (geo.scrubM ?? 0) * (dFzF >= 0 ? fxO - fxI : fxI - fxO);
     } else {
       t.trailFm = 0;
     }
@@ -590,6 +599,9 @@ export class BicycleModel {
     t.kingpinTorqueNm = kingpin;
     const torqueRatio = geo.torqueRatio ?? 1 / Math.max(p.steeringRatio, 1e-6);
     t.rimTorqueNm = kingpin * torqueRatio * geo.rackEfficiency;
+    t.scrubMomentNm = scrub;
+    // At the rim through the same ratio, for the force-feedback mixer.
+    t.scrubRimNm = scrub * torqueRatio * geo.rackEfficiency;
   }
 
   /**

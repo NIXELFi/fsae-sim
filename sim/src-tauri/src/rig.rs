@@ -281,6 +281,18 @@ pub struct FfbConfig {
     /// `smoothstep(rear - front normalised slip, 0.15, 0.65)`, which gives a
     /// small base a direction as well as a weight.
     pub oversteer_effect: f64,
+    /// Steering-torque model, for A/B testing what the rim should feel like.
+    ///
+    /// 1 -- the tyres' aligning moment only: lateral force through the
+    ///      pneumatic and mechanical trails. What every build before this had.
+    /// 2 -- adds the front LONGITUDINAL forces through the 25.5 mm scrub
+    ///      radius (`Telemetry::scrub_moment_nm`). Braking in a corner the
+    ///      loaded outside front pulls harder than the inside one, which adds
+    ///      centring torque; this is the term that makes brake balance reach
+    ///      the rim directly rather than only through the tyres' slip.
+    ///
+    /// The physics is identical either way; only the rim torque changes.
+    pub model: u8,
 }
 
 impl Default for FfbConfig {
@@ -306,6 +318,7 @@ impl Default for FfbConfig {
             stop_damping: 0.35,
             understeer_effect: 0.0,
             oversteer_effect: 0.0,
+            model: 1,
         }
     }
 }
@@ -453,6 +466,9 @@ pub struct TelemetryOut {
     pub rim_torque_nm: f64,
     pub trail_fm: f64,
     pub mech_trail_m: f64,
+    /// Front Fx through the scrub radius, kingpin level, whichever FFB model
+    /// is selected -- so a v1 run can still be analysed for it.
+    pub scrub_moment_nm: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -1258,7 +1274,12 @@ impl Loop {
         } else {
             self.car.params().rim_torque_ratio()
         };
-        tel.rim_torque_nm = tel.kingpin_torque_nm * rim_ratio;
+        // FFB model v2 adds the front brake forces through the scrub radius.
+        // Applied here, to the rim torque, so the logged `sim.rim_torque_nm`
+        // is what the selected model put in the driver's hands.
+        let kingpin_nm = tel.kingpin_torque_nm
+            + if self.ffb_cfg.model >= 2 { tel.scrub_moment_nm } else { 0.0 };
+        tel.rim_torque_nm = kingpin_nm * rim_ratio;
 
         // ---- force feedback ----
         // Caster/KPI jacking: turning the wheel lifts that corner of the car,
@@ -1360,6 +1381,7 @@ impl Loop {
                 rim_torque_nm: tel.rim_torque_nm,
                 trail_fm: tel.trail_front_m,
                 mech_trail_m: tel.mech_trail_m,
+                scrub_moment_nm: tel.scrub_moment_nm,
             },
             pt: pt_out,
             applied: AppliedOut { steer, throttle, brake, native_steer: native },
@@ -1557,6 +1579,9 @@ mod tests {
         let cfg = FfbConfig::default();
         assert_eq!(cfg.understeer_effect, 0.0);
         assert_eq!(cfg.oversteer_effect, 0.0);
+        // v1 stays the default: a settings file written before the option
+        // existed must feel exactly as it did.
+        assert_eq!(cfg.model, 1);
         // And a sliding, unbalanced car mixes exactly as it did without them.
         let tel = sim_core::solver::Telemetry {
             rim_torque_nm: -10.0,

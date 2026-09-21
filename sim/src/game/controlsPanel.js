@@ -336,6 +336,35 @@ export class ControlsPanel {
       }),
     );
 
+    // Steering-torque model, for A/B testing brake balance at the rim.
+    const model = document.createElement("select");
+    model.id = `ffb-model-${id}`;
+    model.setAttribute("aria-label", "Steering torque model");
+    for (const [v, text] of [
+      [1, "Steering model v1: tyre aligning torque only"],
+      [2, "Steering model v2: + brake force through scrub radius"],
+    ]) {
+      const o = document.createElement("option");
+      o.value = String(v);
+      o.textContent = text;
+      if ((profile.forceFeedback.model ?? 1) === v) o.selected = true;
+      model.append(o);
+    }
+    model.addEventListener("change", () => {
+      s.set(id, "forceFeedback.model", Number(model.value));
+      this.input.refreshProfile();
+      this.onChange?.();
+      this.render();
+    });
+    box.append(model);
+    box.append(el("small", "ctl-hint",
+      (profile.forceFeedback.model ?? 1) === 2
+        ? "v2: braking in a corner, the loaded outside front pulls harder than the inside one through the " +
+          "25.5 mm scrub radius, adding weight to the rim. This is how brake balance reaches your hands " +
+          "directly. The car handles identically in both; only the rim torque differs, and it is logged."
+        : "v1: the rim torque is the front tyres' lateral force through the pneumatic and mechanical trail. " +
+          "Brake balance only reaches the rim through the tyres' slip. Switch to v2 to compare."));
+
     const st = this.game?.rigState;
     this.statusEl = el("small", "ctl-hint", this.rigStatusLine());
     box.append(this.statusEl);

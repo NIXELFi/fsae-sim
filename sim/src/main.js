@@ -1120,6 +1120,7 @@ class Game {
     c.steerSource = this.input.steerSource;
     c.ffbCommand = this.ffb.last?.command ?? 0;
     c.ffbClipped = !!this.ffb.last?.clipped;
+    c.ffbModel = this.input.profile?.forceFeedback?.model === 2 ? 2 : 1;
     // The JS model runs two rear wheels through the differential; the native
     // rig reports the axle mean.
     c.wRL = this.car.wRL ?? this.car.wR;

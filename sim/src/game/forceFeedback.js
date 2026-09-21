@@ -138,7 +138,12 @@ export class ForceFeedback {
     //    that flips sign as the car wriggles -- measured as +-5..10 N.m at
     //    0.4-3 m/s on the rig. Nothing a driver reads lives there.
     const fade = lowSpeedFade(tel.speed);
-    out.align = -tel.rimTorqueNm * cfg.alignTorqueGain * fade;
+    //    FFB model v2 adds the front brake forces through the scrub radius
+    //    (`scrubRimNm`, from the JS model). The native rig folds it into its
+    //    own rim torque instead and does not send `scrubRimNm`, so it cannot
+    //    be counted twice.
+    const scrubNm = cfg.model === 2 ? (tel.scrubRimNm ?? 0) : 0;
+    out.align = -(tel.rimTorqueNm + scrubNm) * cfg.alignTorqueGain * fade;
 
     // 1b. Understeer effect. The tyre model's own cue is small: with 19 mm
     //     of mechanical trail under a pneumatic trail that collapses, the

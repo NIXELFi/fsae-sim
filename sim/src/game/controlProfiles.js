@@ -558,6 +558,13 @@ export const PROFILES = {
        * gives a small base a direction as well. Off by default.
        */
       oversteerEffect: 0.0,
+      /**
+       * Steering-torque model, for A/B testing. 1 = the tyres' aligning
+       * moment only (lateral force through the trails). 2 = also the front
+       * brake forces through the 25.5 mm scrub radius, which is how brake
+       * balance reaches the rim directly. Physics identical either way.
+       */
+      model: 1,
       /** Stiffness of the stop past the car's lock. */
       softLockGain: 1.0,
       /** Lift torques below this fraction of rated, past the motor's cogging. */

@@ -70,10 +70,10 @@ fn main() {
             let s = car.state();
             let tel = car.telemetry();
             rows.push(format!(
-                "{{\"f\":{f},\"x\":{:.9},\"y\":{:.9},\"psi\":{:.9},\"u\":{:.9},\"v\":{:.9},\"r\":{:.9},\"rpm\":{:.9},\"gear\":{},\"wF\":{:.9},\"wR\":{:.9},\"ayG\":{:.9},\"slipF\":{:.9},\"kappaR\":{:.9},\"rim\":{:.9},\"trail\":{:.9}}}",
+                "{{\"f\":{f},\"x\":{:.9},\"y\":{:.9},\"psi\":{:.9},\"u\":{:.9},\"v\":{:.9},\"r\":{:.9},\"rpm\":{:.9},\"gear\":{},\"wF\":{:.9},\"wR\":{:.9},\"ayG\":{:.9},\"slipF\":{:.9},\"kappaR\":{:.9},\"rim\":{:.9},\"trail\":{:.9},\"scrub\":{:.9}}}",
                 s.x, s.y, s.psi, s.u, s.v, s.r, tel.engine_rpm, tel.gear,
                 tel.wheel_omega_front, tel.wheel_omega_rear, tel.ay_g, tel.slip_deg[0],
-                tel.kappa[2], tel.rim_torque_nm, tel.trail_front_m
+                tel.kappa[2], tel.rim_torque_nm, tel.trail_front_m, tel.scrub_moment_nm
             ));
         }
     }

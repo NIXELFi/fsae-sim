@@ -108,6 +108,18 @@ impl BicycleSolver {
             align_nm: -(fo.fy * (fo.trail + self.c.params.mechanical_trail())
                 + fi.fy * (fi.trail + self.c.params.mechanical_trail())),
             trail_m: (fo.trail * outer + fi.trail * inner) / fz_axle,
+            // Longitudinal forces through the scrub radius (static scrub, the
+            // usual scope assumption): a force Fx at the contact patch, a
+            // scrub radius outboard of its kingpin, turns that wheel by
+            // -y*Fx, so the pair sums to scrub * (Fx_right - Fx_left). The
+            // transfer is signed with ay, and positive ay (a left turn) loads
+            // the right-hand tyre, so the outer patch is the right one then.
+            // Both fronts share one slip ratio here, so the split is by load
+            // alone -- the inside wheel cannot lock ahead of the outside one.
+            scrub_nm: {
+                let (fx_r, fx_l) = if d_fz >= 0.0 { (fo.fx, fi.fx) } else { (fi.fx, fo.fx) };
+                self.c.params.steering.scrub_m * (fx_r - fx_l)
+            },
         }
     }
 }
@@ -122,6 +134,8 @@ struct AxleForces {
     outer_fz: f64,
     align_nm: f64,
     trail_m: f64,
+    /// Fx through the scrub radius, for the v2 steering-torque model only.
+    scrub_nm: f64,
 }
 
 impl Solver for BicycleSolver {
@@ -290,6 +304,7 @@ impl BicycleSolver {
             outer_fz: outer_r,
             align_nm: 0.0,
             trail_m: 0.0,
+            scrub_nm: 0.0,
         };
         // Front lateral peak relative to the rear (`front_grip_factor`). The
         // fitted curve is linear in mu at a given slip, so scaling the force is
@@ -524,6 +539,7 @@ impl BicycleSolver {
             rim_torque_nm: af.align_nm * self.c.params.rim_torque_ratio(),
             trail_front_m: af.trail_m,
             mech_trail_m: self.c.params.mechanical_trail(),
+            scrub_moment_nm: af.scrub_nm,
         };
     }
 }

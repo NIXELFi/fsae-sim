@@ -476,7 +476,7 @@ console.log("\nRUST PARITY  (sim-core golden vectors vs the JS model)");
   car.pt.syncToWheel(15 / 0.2);
   const dt = golden.dt;
   const shifts = new Set(golden.shiftFrames);
-  let worstPos = 0, worstVel = 0, worstRpm = 0, worstRim = 0, worstTrail = 0;
+  let worstPos = 0, worstVel = 0, worstRpm = 0, worstRim = 0, worstTrail = 0, worstScrub = 0, peakScrub = 0;
   const byFrame = new Map(golden.rows.map((r) => [r.f, r]));
   for (let f = 0; f < 12 * 60; f++) {
     const [steer, throttle, brake] = script(f * dt);
@@ -490,6 +490,9 @@ console.log("\nRUST PARITY  (sim-core golden vectors vs the JS model)");
     worstRpm = Math.max(worstRpm, Math.abs(car.pt.engineRpm - g.rpm));
     worstRim = Math.max(worstRim, Math.abs(t.rimTorqueNm - g.rim));
     worstTrail = Math.max(worstTrail, Math.abs(t.trailFm - g.trail));
+    // FFB model v2's scrub term (the drive brakes in a light corner at 5 s).
+    worstScrub = Math.max(worstScrub, Math.abs(t.scrubMomentNm - g.scrub));
+    peakScrub = Math.max(peakScrub, Math.abs(g.scrub));
     if (car.pt.gear !== g.gear) worstRpm = 1e9;
   }
   // Floating-point noise, not bit-identity. The two ports were bit-identical
@@ -517,12 +520,15 @@ console.log("\nRUST PARITY  (sim-core golden vectors vs the JS model)");
   // rather than silently accumulating until it is not.
   console.log("  (raw: pos " + worstPos.toExponential(3) + ", vel " + worstVel.toExponential(3)
     + ", rpm " + worstRpm.toExponential(3) + ", rim " + worstRim.toExponential(3)
-    + ", trail " + worstTrail.toExponential(3) + ")");
+    + ", trail " + worstTrail.toExponential(3) + ", scrub " + worstScrub.toExponential(3) + ")");
   check("worst pose difference", worstPos, 0, 1e-7, " m|rad");
   check("worst velocity difference", worstVel, 0, 1e-7, " m/s|rad/s");
   check("worst engine rpm difference", worstRpm, 0, 1e-6, " rpm");
   check("worst rim torque difference", worstRim, 0, 1e-6, " N.m");
   check("worst front trail difference", worstTrail, 0, 1e-7, " m");
+  check("worst scrub moment difference", worstScrub, 0, 1e-6, " N.m");
+  // Guard the guard: a drive that never loads the term would pass trivially.
+  check("golden drive exercises the scrub term", peakScrub, 0.05, 1e3, " N.m");
 }
 
 // ------------------------------------------------------------- differential ---

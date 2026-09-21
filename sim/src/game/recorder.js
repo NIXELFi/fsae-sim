@@ -119,6 +119,12 @@ const COLUMNS = [
   { id: "sim.kingpin_torque_nm", dp: 3, get: (c) => c.t.kingpinTorqueNm },
   { id: "sim.ffb_command", dp: 4, get: (c) => c.ffbCommand },
   { id: "sim.ffb_clipped", dp: 0, get: (c) => (c.ffbClipped ? 1 : 0) },
+  // Front brake (and drive) forces through the scrub radius, kingpin level,
+  // left-positive. Logged whichever steering model is selected, so a v1 run
+  // shows what v2 would have added; `sim.ffb_model` says which one the rim
+  // actually carried (`sim.rim_torque_nm` includes it on the rig under v2).
+  { id: "sim.scrub_moment_nm", dp: 3, get: (c) => c.t.scrubMomentNm ?? 0 },
+  { id: "sim.ffb_model", dp: 0, get: (c) => c.ffbModel ?? 1 },
 
   // ---- chassis state -----------------------------------------------------
   { id: "sim.pos_x", dp: 3, get: (c) => c.car.X },
