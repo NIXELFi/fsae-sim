@@ -28,6 +28,7 @@ import {
 import { buildCarMeshes, GEO, HUBS } from "./carmesh.js";
 import { buildVenueMesh } from "./venuemesh.js";
 import { buildEnvironmentMesh } from "./envmesh.js";
+import { PRESETS } from "./quality.js";
 
 // Far enough that a cone arrives out of the fog rather than popping in on
 // the endurance straights; the instance buffer holds 4096, plenty.
@@ -43,7 +44,6 @@ const SKID_FLOATS = 6 * 5;
 const SKID_HALF_W = 0.07;
 /** Height of the marks above the deck: over the ribbon, under a cone's plate. */
 const SKID_Y = 0.018;
-const SHADOW_SIZE = 2048;     // texels, per cascade
 // Two cascades: a tight box for the car's own shadow and a wide one so the
 // cones down the course carry shadows instead of popping into them.
 const SHADOW_HALF = [14, 64]; // m, half-extent of each cascade
@@ -233,8 +233,13 @@ float anoise(vec2 p, float freq, float px) {
   return k > 0.0 ? mix(0.5, noise(p * freq), k) : 0.5;
 }
 float afbm(vec2 p, float freq, float px) {
+#if Q_DETAIL == 0
+  // Two octaves, renormalised so the mean and the spread stay put.
+  return (anoise(p, freq, px) * 0.5 + anoise(p, freq * 2.03, px) * 0.25) / 0.75;
+#else
   return anoise(p, freq, px) * 0.5 + anoise(p, freq * 2.03, px) * 0.25
        + anoise(p, freq * 4.11, px) * 0.125 + anoise(p, freq * 8.3, px) * 0.0625;
+#endif
 }
 
 // ---- lot relief --------------------------------------------------------
@@ -249,11 +254,15 @@ float lotHeight(vec2 p, float px) {
   return anoise(p, 0.7, px) * 0.6 + anoise(p, 1.9, px) * 0.4;
 }
 vec3 lotNormal(vec2 p, float px, float h0) {
+#if Q_DETAIL == 0
+  return vec3(0.0, 1.0, 0.0);
+#else
   float e = max(0.12, px);         // never step less than a pixel: that aliases too
   float hx = lotHeight(p + vec2(e, 0.0), px);
   float hz = lotHeight(p + vec2(0.0, e), px);
   const float AMP = 0.035;         // metres of relief per unit of the field
   return normalize(vec3((h0 - hx) * AMP / e, 1.0, (h0 - hz) * AMP / e));
+#endif
 }
 
 // ---- sky ---------------------------------------------------------------
@@ -322,7 +331,6 @@ float cascade(highp sampler2DShadow tex, mat4 m, vec3 world, vec3 n, float texel
   vec2 e = min(p.xy, 1.0 - p.xy);
   inside = smoothstep(0.0, 0.08, min(e.x, e.y));
   if (inside <= 0.0 || p.z > 1.0) return 1.0;
-  float r = 1.4 / ${SHADOW_SIZE}.0;
   // Constant bias: 0.00004 of the 180 m depth range is 7 mm along the sun.
   // It was 0.00025, which is 45 mm -- enough to lift every cone's shadow
   // clear of its 24 mm base plate and float the car's off its tyres. The
@@ -330,18 +338,28 @@ float cascade(highp sampler2DShadow tex, mat4 m, vec3 world, vec3 n, float texel
   // what actually holds off acne on the casters, and the ground cannot acne
   // at all: it is never drawn into the map, only shadowed by it.
   float z = p.z - 0.00004;
+#if Q_SHADOWS < 2
+  // Medium: the hardware 2x2 compare alone. Harder-edged, a quarter of the taps.
+  return texture(tex, vec3(p.xy, z));
+#else
+  float r = 1.4 / SHADOW_RES;
   float s = 0.0;
   for (int i = 0; i < 4; i++) s += texture(tex, vec3(p.xy + POISSON[i] * r, z));
   return s * 0.25;
+#endif
 }
 
 float shadowAt(vec3 world, vec3 n) {
+#if Q_SHADOWS == 0
+  return 1.0;
+#else
   float ndl = max(dot(n, uSun), 0.0);
   float in0, in1;
   float s0 = cascade(uShadow0, uShadowMat0, world, n, uShadowTexel.x, ndl, in0);
   if (in0 >= 1.0) return s0;
   float s1 = cascade(uShadow1, uShadowMat1, world, n, uShadowTexel.y, ndl, in1);
   return mix(mix(1.0, s1, in1), s0, in0);
+#endif
 }
 
 // ---- material ----------------------------------------------------------
@@ -387,7 +405,11 @@ vec3 shade(vec3 albedo, vec3 n, vec3 world, float shadow,
   vec3 Fenv = F0 + (max(vec3(gl), F0) - F0) * fv;
   // A rough surface's lobe is wider than a cloud, so it sees the gradient
   // and skips the three noise lookups; anything glossy reflects the clouds.
+#if Q_DETAIL == 0
+  vec3 sky = skyGradient(r);
+#else
   vec3 sky = rough < 0.5 ? skyRadiance(r) : skyGradient(r);
+#endif
   vec3 env = mix(sky, amb, rough * rough);
   c += env * Fenv * (1.0 - 0.5 * rough);
 
@@ -569,7 +591,13 @@ void main() {
   // Every octave is faded by its own footprint (see anoise), to its mean, so
   // the average albedo -- and therefore the exposure -- is the same near and
   // far; only the sparkle goes.
+#if Q_DETAIL == 0
+  // The 64/m octave held at its mean, so the speckle keeps its contrast
+  // instead of the coarse octave taking the whole weight.
+  float fine = anoise(p, 22.0, px) * 0.55 + 0.5 * 0.45;
+#else
   float fine = anoise(p, 22.0, px) * 0.55 + anoise(p, 64.0, px) * 0.45;
+#endif
   float wear = afbm(p, 0.09, px);
   float seam = lotHeight(p, px);
   vec3 asphalt = vec3(0.27, 0.275, 0.285);
@@ -729,7 +757,11 @@ void main() {
   // The same relief as the lot around it, so the glare is continuous across
   // the ribbon's edge; the shadow lookup keeps the true plane.
   vec3 up = vec3(0.0, 1.0, 0.0);
+#if Q_DETAIL == 0
+  vec3 n = up;
+#else
   vec3 n = lotNormal(p, px, lotHeight(p, px));
+#endif
   float sh = shadowAt(vWorld, up);
   // Contact darkening once, on the whole result (see GROUND_FS).
   float ao = contactAO(p);
@@ -993,9 +1025,15 @@ function poleMesh() {
 // ---------------------------------------------------------------- renderer ---
 
 export class Renderer {
-  constructor(canvas) {
+  /**
+   * @param canvas
+   * @param quality a preset from quality.js (`resolvePreset`); High if omitted.
+   *   Its `msaa` is fixed here for the life of the context; `setQuality`
+   *   changes everything else live.
+   */
+  constructor(canvas, quality = { id: "high", ...PRESETS.high }) {
     const gl = canvas.getContext("webgl2", {
-      antialias: true, alpha: false, depth: true, powerPreference: "high-performance",
+      antialias: !!quality.msaa, alpha: false, depth: true, powerPreference: "high-performance",
     });
     if (!gl) throw new Error("WebGL2 is required and is not available in this browser.");
     this.gl = gl;
@@ -1018,33 +1056,11 @@ export class Renderer {
     // winding depends on which side you view them from, so culling them
     // globally makes the world disappear from half the approaches.
 
-    this.progSky = program(gl, SKY_VS, SKY_FS);
-    this.progGround = program(gl, GROUND_VS, GROUND_FS);
-    this.progRibbon = program(gl, RIBBON_VS, RIBBON_FS);
-    this.progSkid = program(gl, SKID_VS, SKID_FS);
-    this.progProp = program(gl, PROP_VS, PROP_FS);
-    this.progCar = program(gl, CAR_VS, CAR_FS);
-    this.progScreen = program(gl, SCREEN_VS, SCREEN_FS);
-    this.progDepthCar = program(gl, DEPTH_CAR_VS, DEPTH_FS);
-    this.progDepthProp = program(gl, DEPTH_PROP_VS, DEPTH_FS);
-
-    // Uniform locations, looked up once: getUniformLocation every frame is
-    // both slow and a string allocation per call.
-    this.u = {};
-    for (const [name, prog] of Object.entries({
-      sky: this.progSky, ground: this.progGround, ribbon: this.progRibbon,
-      prop: this.progProp, car: this.progCar, depthCar: this.progDepthCar, depthProp: this.progDepthProp,
-      skid: this.progSkid,
-    })) {
-      const map = {};
-      const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
-      for (let i = 0; i < n; i++) {
-        const info = gl.getActiveUniform(prog, i);
-        const base = info.name.replace(/\[0\]$/, "");
-        map[base] = gl.getUniformLocation(prog, info.name);
-      }
-      this.u[name] = map;
-    }
+    /** Whether the context was created multisampled; see `setQuality`. */
+    this.msaa = !!quality.msaa;
+    this.quality = null;
+    this.shadow = [];
+    this.setQuality(quality);
 
     this.quad = quadVao(gl);
     this.groundQuad = quadVao(gl);
@@ -1054,7 +1070,6 @@ export class Renderer {
     this.post = this.makeInstanced(boxMesh(0.12, 2.1, 0.12, [0.85, 0.85, 0.88]), 8);
     this.pole = this.makeInstanced(poleMesh(), 64);
 
-    this.shadow = [this.makeShadowMap(SHADOW_SIZE), this.makeShadowMap(SHADOW_SIZE)];
     /** Scene exposure: linear radiance is scaled by this before the filmic
      *  curve. 0.55: at 0.45 the sunlit lot sat at display 0.45 and the whole
      *  frame read as overcast under a clear sky. */
@@ -1493,6 +1508,58 @@ export class Renderer {
     };
   }
 
+  /**
+   * Apply a graphics preset (quality.js). Live, except MSAA, which belongs to
+   * the context: a change there is kept in `quality` and takes effect on the
+   * next load. Recompiles the programs only when a shader define changed and
+   * reallocates the shadow maps only when their size did.
+   */
+  setQuality(q) {
+    const gl = this.gl;
+    const old = this.quality;
+    this.quality = { ...q };
+    if (!old || old.shadows !== q.shadows || old.detail !== q.detail || old.shadowSize !== q.shadowSize) {
+      const defs = `#define Q_SHADOWS ${q.shadows}\n#define Q_DETAIL ${q.detail}\n#define SHADOW_RES ${q.shadowSize}.0\n`;
+      const progs = {
+        sky: [SKY_VS, SKY_FS], ground: [GROUND_VS, GROUND_FS], ribbon: [RIBBON_VS, RIBBON_FS],
+        skid: [SKID_VS, SKID_FS], prop: [PROP_VS, PROP_FS], car: [CAR_VS, CAR_FS],
+        screen: [SCREEN_VS, SCREEN_FS], depthCar: [DEPTH_CAR_VS, DEPTH_FS], depthProp: [DEPTH_PROP_VS, DEPTH_FS],
+      };
+      const built = {};
+      for (const [name, [vs, fs]] of Object.entries(progs)) built[name] = program(gl, vs, withDefines(fs, defs));
+      // Only once every program has compiled: a failure above leaves the
+      // previous set drawing rather than half of each.
+      for (const p of [this.progSky, this.progGround, this.progRibbon, this.progSkid, this.progProp,
+        this.progCar, this.progScreen, this.progDepthCar, this.progDepthProp]) if (p) gl.deleteProgram(p);
+      this.progSky = built.sky; this.progGround = built.ground; this.progRibbon = built.ribbon;
+      this.progSkid = built.skid; this.progProp = built.prop; this.progCar = built.car;
+      this.progScreen = built.screen; this.progDepthCar = built.depthCar; this.progDepthProp = built.depthProp;
+      this._screenU = null; // the dash screen's lazily cached locations belong to the old program
+
+      // Uniform locations, looked up once: getUniformLocation every frame is
+      // both slow and a string allocation per call.
+      this.u = {};
+      for (const [name, prog] of Object.entries({
+        sky: this.progSky, ground: this.progGround, ribbon: this.progRibbon,
+        prop: this.progProp, car: this.progCar, depthCar: this.progDepthCar, depthProp: this.progDepthProp,
+        skid: this.progSkid,
+      })) {
+        const map = {};
+        const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+        for (let i = 0; i < n; i++) {
+          const info = gl.getActiveUniform(prog, i);
+          const base = info.name.replace(/\[0\]$/, "");
+          map[base] = gl.getUniformLocation(prog, info.name);
+        }
+        this.u[name] = map;
+      }
+    }
+    if (!old || old.shadowSize !== q.shadowSize) {
+      for (const sm of this.shadow) { gl.deleteTexture(sm.tex); gl.deleteFramebuffer(sm.fbo); }
+      this.shadow = [this.makeShadowMap(q.shadowSize), this.makeShadowMap(q.shadowSize)];
+    }
+  }
+
   /** Depth texture plus framebuffer for the sun's shadow map. */
   makeShadowMap(size) {
     const gl = this.gl;
@@ -1621,7 +1688,10 @@ export class Renderer {
   }
 
   resize() {
-    const dpr = Math.min(devicePixelRatio || 1, 2);
+    // The preset's render scale, on top of a cap on the display's pixel
+    // ratio; the canvas is stretched to the window by CSS either way.
+    const q = this.quality;
+    const dpr = Math.min(devicePixelRatio || 1, q.maxDpr) * q.scale;
     // A hidden or not-yet-laid-out canvas reports zero client size. Sizing the
     // drawing buffer to zero makes the projection divide by an aspect of 0 and
     // the whole frame silently vanishes, so fall back to a sane default.
@@ -2206,6 +2276,8 @@ export class Renderer {
     this.fillPoints(this.post, this.gatePosts);
     this.fillPoints(this.pole, this.poles);
     this.stats.cones = this.cone.n;
+    // Shadows off: the instances above are all the main pass needs.
+    if (this.quality.shadows === 0) return;
 
     // Light view with the eye at the origin: only the ortho window moves,
     // which is what makes the texel snap possible.
@@ -2213,7 +2285,7 @@ export class Renderer {
     const c = transformPoint(this.lightView, [cam.x, 0.3, -cam.y]);
     for (let i = 0; i < 2; i++) {
       const half = SHADOW_HALF[i];
-      const texel = (2 * half) / SHADOW_SIZE;
+      const texel = (2 * half) / this.quality.shadowSize;
       this.shadowTexel[i] = texel;
       const sx = Math.round(c[0] / texel) * texel;
       const sy = Math.round(c[1] / texel) * texel;
@@ -2648,6 +2720,12 @@ function compile(gl, type, src) {
     throw new Error(`shader: ${gl.getShaderInfoLog(sh)}\n${src}`);
   }
   return sh;
+}
+
+/** Insert `#define` lines straight after the `#version` line, which must stay first. */
+function withDefines(src, defs) {
+  const nl = src.indexOf("\n");
+  return src.slice(0, nl + 1) + defs + src.slice(nl + 1);
 }
 
 function program(gl, vs, fs) {

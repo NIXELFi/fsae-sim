@@ -859,7 +859,10 @@
         <button id="pauseTc" class="secondary" type="button"><span>Traction control</span><b>-</b><kbd data-key="traction">T</kbd></button>
         <!-- Keeps a laptop GPU from dropping its clocks between frames, which
              is what makes one frame in forty land late at 144 Hz. -->
-        <button id="pauseGpuHold" class="secondary" type="button"><span>GPU clock hold<small>smoother on laptops</small></span><b>-</b></button>
+        <!-- High / Medium / Low, or Auto from the GPU's name. Live, except the
+             antialiasing, which is set when the page loads. -->
+        <button id="pauseGraphics" class="secondary" type="button"><span>Graphics<small id="pauseGraphicsNote"></small></span><b>-</b></button>
+        <button id="pauseGpuHold"class="secondary" type="button"><span>GPU clock hold<small>smoother on laptops</small></span><b>-</b></button>
         <label class="pause-volume"><span>Volume</span><input id="pauseVolume" type="range" min="0" max="1" step="0.05"><b>-</b></label>
       </div>
       <button id="pauseHome" class="secondary" type="button"><span>Home screen<small>ends this recording</small></span><kbd data-key="home">H</kbd></button>

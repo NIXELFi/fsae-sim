@@ -12,6 +12,7 @@ import { generatedTrackId, parseGeneratedId, randomSeed, normaliseSeed, describe
 import { loadVenue } from "./track/venue.js";
 import { Renderer } from "./render/renderer.js";
 import { GpuHold } from "./render/gpuHold.js";
+import { PRESET_ORDER,loadGraphicsChoice, saveGraphicsChoice, probeGpuName, resolvePreset } from "./render/quality.js";
 import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
@@ -137,7 +138,11 @@ const WALKAROUND = CAMERAS[3];
 class Game {
   constructor(dom) {
     this.dom = dom;
-    this.renderer = new Renderer(dom.gl);
+    // Graphics preset: resolved before the context exists, because MSAA is
+    // fixed when it is made. "Auto" goes by the GPU's name; see quality.js.
+    this.gpuName = probeGpuName();
+    this.graphicsChoice = loadGraphicsChoice();
+    this.renderer = new Renderer(dom.gl, resolvePreset(this.graphicsChoice, this.gpuName));
     // Pads the GPU frame out so a laptop card holds its clocks; see gpuHold.js.
     // Desktop only by default: in a browser tab the page shares the GPU with
     // everything else and should not be the one keeping it awake.
@@ -3272,6 +3277,14 @@ async function boot() {
     set("pauseDash", DASH_LABELS[game.hud.dashMode] ?? game.hud.dashMode);
     set("pauseTc", game.assists.traction ? "on" : "off");
     set("pauseGpuHold", !game.gpuHold.supported ? "n/a" : game.gpuHold.enabled ? "on" : "off");
+    const q = game.renderer.quality;
+    set("pauseGraphics", game.graphicsChoice === "auto" ? `auto (${q.label})` : q.label);
+    const note = pauseEl("pauseGraphicsNote");
+    if (note) {
+      note.textContent = q.msaa !== game.renderer.msaa
+        ? `antialiasing ${q.msaa ? "on" : "off"} from next start`
+        : `${Math.round(q.scale * 100)}% resolution`;
+    }
     const vol = pauseEl("pauseVolume");
     if (vol) {
       vol.value = String(game.audio.mix.master);
@@ -3302,6 +3315,13 @@ async function boot() {
     if (!game.gpuHold.supported) return;
     game.gpuHold.enabled = !game.gpuHold.enabled;
     saveGpuHold(game.gpuHold.enabled);
+    refreshPauseCard();
+  });
+  pauseEl("pauseGraphics")?.addEventListener("click", () => {
+    const i = PRESET_ORDER.indexOf(game.graphicsChoice);
+    game.graphicsChoice = PRESET_ORDER[(i + 1) % PRESET_ORDER.length];
+    saveGraphicsChoice(game.graphicsChoice);
+    game.renderer.setQuality(resolvePreset(game.graphicsChoice, game.gpuName));
     refreshPauseCard();
   });
   pauseEl("pauseVolume").addEventListener("input", () => {

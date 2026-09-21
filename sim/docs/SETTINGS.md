@@ -34,6 +34,7 @@ aids, chasing his best".
 | Throttle (ETC) map | **Sim** | `fsae-sim.etc` |
 | Audio mix | **Sim** | `fsae-sim.audio.v1` |
 | Camera FOV, eye height, vibration | **Sim** | `fsae-sim.params` |
+| Graphics preset (Auto / High / Medium / Low) | **Sim** | `fsae-sim.graphics`; see `src/render/quality.js` |
 | Live vehicle parameters | **Sim** (live) | `fsae-sim.params`, and stamped into every run manifest |
 | Driver name | **Helios** when it launches, **sim** otherwise | `fsae-sim.driver` is the rig's default |
 | Session label | same | `fsae-sim.session` |
