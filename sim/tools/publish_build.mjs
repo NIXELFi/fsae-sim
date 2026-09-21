@@ -1,16 +1,30 @@
 // Publish a simulator build so Helios can offer it as a download.
 //
 //   node sim/tools/publish_build.mjs --version 0.2.0 [--notes "..."] [--dry-run]
-//                                    [--platform macos --exe path/to/fsae-sim]
+//        --build windows=path/to/fsae-sim.exe --build macos=path/to/fsae-sim
+//        [--no-notify]
+//
+//   (or, one platform: [--platform macos --exe path/to/fsae-sim])
 //
 // Needs, in the environment:
 //   SUPABASE_URL          https://<ref>.supabase.co
 //   SUPABASE_SERVICE_KEY  a service-role key (storage writes are not public)
 //
 // What it does, in order:
-//   1. hashes the built executable
-//   2. uploads it to  sim/<platform>/<version>/fsae-sim.exe
-//   3. rewrites  sim/feed.json  to point at it
+//   1. hashes each built executable
+//   2. uploads it to  sim/<platform>/<version>/fsae-sim[.exe]
+//   3. rewrites  sim/feed.json  ONCE, with every platform given
+//   4. reads the feed back fresh until it says exactly that
+//   5. broadcasts `published` on the `sim-releases` realtime channel, so every
+//      running Helios checks the feed within seconds instead of at its next
+//      five-minute check (skip with --no-notify)
+//
+// Publish every platform in ONE run. Two runs a few minutes apart -- Windows,
+// then macOS -- had the second read a feed from before the first and put the
+// first platform back to its previous build, on every release from 0.6.7 to
+// 0.6.10. Once Helios acts on a broadcast within seconds, that window would
+// roll every Windows rig back until somebody noticed, so one run writes one
+// feed, and nothing is announced until it reads back right.
 //
 // The feed is what Helios reads. It is deliberately a plain public JSON file
 // with a SHA-256 in it rather than anything cleverer: Helios verifies the hash
@@ -37,12 +51,19 @@ const arg = (name, dflt = null) => {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : dflt;
 };
+/** Every value given for a repeatable flag. */
+const args = (name) => argv.flatMap((a, i) =>
+  a === `--${name}` && argv[i + 1] && !argv[i + 1].startsWith("--") ? [argv[i + 1]] : []);
 const has = (name) => argv.includes(`--${name}`);
 
 const VERSION = arg("version");
 const NOTES = arg("notes", "");
 const DRY = has("dry-run");
+const NOTIFY = !has("no-notify");
 const BUCKET = arg("bucket", "sim");
+/** The realtime channel Helios listens on; see useSimReleaseSignal.ts in Helios. */
+const RELEASE_CHANNEL = "sim-releases";
+const RELEASE_EVENT = "published";
 
 if (!VERSION) {
   console.error("publish_build: --version is required (e.g. --version 0.2.0)");
@@ -53,90 +74,106 @@ if (!/^[A-Za-z0-9._-]{1,64}$/.test(VERSION)) {
   process.exit(1);
 }
 
-// Only Windows is built here today; the field exists so the feed can carry
-// more than one platform when there is one.
-// `--platform` publishes for another platform than the one this runs on, and
-// `--exe` names the file to publish -- together they let a build that the
-// `build` workflow produced on a GitHub macOS runner be put on the feed from
-// the maintainer's Windows machine, which is the only one with the key.
-const PLATFORM = arg("platform") ?? (process.platform === "win32" ? "windows"
-  : process.platform === "darwin" ? "macos" : "linux");
-if (!["windows", "macos", "linux"].includes(PLATFORM)) {
-  console.error(`publish_build: --platform must be windows, macos or linux, not "${PLATFORM}"`);
-  process.exit(1);
-}
-const EXE_NAME = PLATFORM === "windows" ? "fsae-sim.exe" : "fsae-sim";
-const exePath = arg("exe")
-  ? path.resolve(arg("exe"))
-  : path.join(REPO, "sim", "src-tauri", "target", "release", EXE_NAME);
-
-if (!fs.existsSync(exePath)) {
-  console.error(`publish_build: no build at ${exePath}`);
-  console.error("  cargo build --release --manifest-path sim/src-tauri/Cargo.toml");
-  process.exit(1);
-}
-
-const bytes = fs.statSync(exePath).size;
-const sha256 = crypto.createHash("sha256").update(fs.readFileSync(exePath)).digest("hex");
-
-// The version in the feed has to be the version the BINARY calls itself.
-//
-// Helios decides whether an update is available by running the installed
-// executable with --version and comparing that against the feed. Publish a
-// 0.1.0 binary as "0.2.0" and every rig that takes the update goes on being
-// told 0.2.0 is available, forever, because the thing it just installed
-// still says 0.1.0. Nothing downstream can detect that; only here, where
-// both numbers are in the same room, can it be caught.
+// Which builds to publish: `--build <platform>=<path>`, as many as there are
+// platforms, or the one-platform `--platform` / `--exe` form. `--platform`
+// publishes for another platform than the one this runs on, which is how a
+// build the `build` workflow produced on a GitHub macOS runner gets onto the
+// feed from the maintainer's Windows machine, the only one with the key.
 const HOST = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
-if (PLATFORM !== HOST) {
-  // A macOS binary cannot answer `--version` on Windows. The build workflow
-  // prints it in the job log, and that is where the number on the command
-  // line has to come from -- say so, loudly, rather than pretend to check.
-  console.log(`version ${VERSION} (NOT checked: a ${PLATFORM} build cannot run here; take it from the build job's log)`);
-} else {
-  const out = spawnSync(exePath, ["--version"], { encoding: "utf8", timeout: 15000 });
-  const said = (out.stdout || "").trim().split(/\s+/).pop();
-  if (!said) {
-    console.error(`publish_build: ${EXE_NAME} --version printed nothing; cannot check the version`);
+const exeName = (platform) => (platform === "windows" ? "fsae-sim.exe" : "fsae-sim");
+const requested = args("build").length
+  ? args("build").map((spec) => {
+    const eq = spec.indexOf("=");
+    if (eq <= 0) {
+      console.error(`publish_build: --build wants <platform>=<path>, not "${spec}"`);
+      process.exit(1);
+    }
+    return { platform: spec.slice(0, eq), exe: spec.slice(eq + 1) };
+  })
+  : [{ platform: arg("platform") ?? HOST, exe: arg("exe") }];
+
+const seenPlatforms = new Set();
+for (const r of requested) {
+  if (!["windows", "macos", "linux"].includes(r.platform)) {
+    console.error(`publish_build: platform must be windows, macos or linux, not "${r.platform}"`);
     process.exit(1);
   }
-  if (said !== VERSION) {
-    console.error(
-      `publish_build: the build calls itself ${said}, but you asked to publish it as ${VERSION}.\n` +
-      `  Helios compares the feed's version against what the executable prints, so these\n` +
-      `  must agree -- otherwise everyone who installs ${VERSION} is told forever that\n` +
-      `  ${VERSION} is available.\n` +
-      `  Fix sim/src-tauri/Cargo.toml (and sim/package.json) and rebuild.`,
-    );
+  if (seenPlatforms.has(r.platform)) {
+    console.error(`publish_build: ${r.platform} was given twice`);
     process.exit(1);
   }
-  console.log(`version ${said} (the build agrees)`);
+  seenPlatforms.add(r.platform);
 }
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const KEY = process.env.SUPABASE_SERVICE_KEY || "";
 
-const objectPath = `${PLATFORM}/${VERSION}/${EXE_NAME}`;
-const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${objectPath}`;
+const builds = requested.map(({ platform, exe }) => {
+  const EXE_NAME = exeName(platform);
+  const exePath = exe
+    ? path.resolve(exe)
+    : path.join(REPO, "sim", "src-tauri", "target", "release", EXE_NAME);
+  if (!fs.existsSync(exePath)) {
+    console.error(`publish_build: no ${platform} build at ${exePath}`);
+    console.error("  cargo build --release --manifest-path sim/src-tauri/Cargo.toml");
+    process.exit(1);
+  }
+  const body = fs.readFileSync(exePath);
+  const bytes = body.length;
+  const sha256 = crypto.createHash("sha256").update(body).digest("hex");
 
-const entry = {
-  version: VERSION,
-  platform: PLATFORM,
-  url: publicUrl,
-  sha256,
-  bytes,
-  notes: NOTES || null,
-  published: new Date().toISOString(),
-};
+  // The version in the feed has to be the version the BINARY calls itself.
+  //
+  // Helios decides whether an update is available by running the installed
+  // executable with --version and comparing that against the feed. Publish a
+  // 0.1.0 binary as "0.2.0" and every rig that takes the update goes on being
+  // told 0.2.0 is available, forever, because the thing it just installed
+  // still says 0.1.0. Nothing downstream can detect that; only here, where
+  // both numbers are in the same room, can it be caught.
+  if (platform !== HOST) {
+    // A macOS binary cannot answer `--version` on Windows. The build workflow
+    // prints it in the job log, and that is where the number on the command
+    // line has to come from -- say so, loudly, rather than pretend to check.
+    console.log(`${platform.padEnd(8)}version ${VERSION} (NOT checked: a ${platform} build cannot run here; take it from the build job's log)`);
+  } else {
+    const out = spawnSync(exePath, ["--version"], { encoding: "utf8", timeout: 15000 });
+    const said = (out.stdout || "").trim().split(/\s+/).pop();
+    if (!said) {
+      console.error(`publish_build: ${EXE_NAME} --version printed nothing; cannot check the version`);
+      process.exit(1);
+    }
+    if (said !== VERSION) {
+      console.error(
+        `publish_build: the ${platform} build calls itself ${said}, but you asked to publish it as ${VERSION}.\n` +
+        `  Helios compares the feed's version against what the executable prints, so these\n` +
+        `  must agree -- otherwise everyone who installs ${VERSION} is told forever that\n` +
+        `  ${VERSION} is available.\n` +
+        `  Fix sim/src-tauri/Cargo.toml (and sim/package.json) and rebuild.`,
+      );
+      process.exit(1);
+    }
+    console.log(`${platform.padEnd(8)}version ${said} (the build agrees)`);
+  }
 
-console.log(`build   ${exePath}`);
-console.log(`size    ${(bytes / 1048576).toFixed(2)} MB`);
-console.log(`sha256  ${sha256}`);
-console.log(`target  ${BUCKET}/${objectPath}`);
+  const objectPath = `${platform}/${VERSION}/${EXE_NAME}`;
+  const entry = {
+    version: VERSION,
+    platform,
+    url: `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${objectPath}`,
+    sha256,
+    bytes,
+    notes: NOTES || null,
+    published: new Date().toISOString(),
+  };
+  console.log(`${platform.padEnd(8)}${exePath}`);
+  console.log(`        ${(bytes / 1048576).toFixed(2)} MB  sha256 ${sha256}`);
+  console.log(`        -> ${BUCKET}/${objectPath}`);
+  return { platform, exePath, body, objectPath, entry };
+});
 
 if (DRY) {
-  console.log("\n--dry-run: nothing uploaded. The feed entry would be:");
-  console.log(JSON.stringify({ builds: [entry] }, null, 2));
+  console.log("\n--dry-run: nothing uploaded. The feed entries would be:");
+  console.log(JSON.stringify({ builds: builds.map((b) => b.entry) }, null, 2));
   process.exit(0);
 }
 
@@ -252,17 +289,18 @@ async function upload(objPath, body, contentType, cacheControl) {
  * brand-new bucket look like a read failure, and refuse itself. The body is
  * where the real answer is; the status is a wrapper.
  *
- * It is read through the AUTHENTICATED object route, not the public one. The
- * public URL is served from the CDN, and two publishes a few seconds apart --
- * Windows, then macOS, which is the normal release -- had the second read the
- * edge's copy from before the first: 0.6.6 went out for macOS and quietly put
- * Windows back to 0.6.4. The authenticated route answers from the origin.
+ * It is read through the public url with a cache-busting query, the same way
+ * Helios reads it. The CDN served the second of two publishes the edge's copy
+ * from before the first -- 0.6.6 went out for macOS and quietly put Windows
+ * back to 0.6.4 -- and the AUTHENTICATED route that replaced the plain read
+ * came back just as stale on 0.6.7 through 0.6.10. A query the edge has never
+ * seen is the read that has come back current every time.
  */
 async function readFeed() {
   let res;
   try {
-    res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${BUCKET}/feed.json`, {
-      headers: { Authorization: `Bearer ${KEY}`, apikey: KEY },
+    res = await fetch(`${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/feed.json?cb=${crypto.randomUUID()}`, {
+      headers: { "Cache-Control": "no-cache" },
       cache: "no-store",
     });
   } catch (err) {
@@ -313,41 +351,91 @@ if (read.fresh) console.log("feed    none yet -- this will create it");
 else if (!read.error) console.log(`feed    ${feed.builds.length} existing build(s)`);
 // One entry per platform: Helios asks "what is there for me", not "what is
 // there". History lives in the bucket, which keeps every version's object.
-const carried = feed.builds.filter((b) => b.platform !== PLATFORM);
+const carried = feed.builds.filter((b) => !seenPlatforms.has(b.platform));
 for (const b of carried) console.log(`        carrying over ${b.platform} ${b.version}`);
-feed.builds = [entry, ...carried];
+feed.builds = [...builds.map((b) => b.entry), ...carried];
 
-console.log("\nuploading the executable...");
-// Immutable: the version is in the path, so this object can never change.
-await upload(objectPath, fs.readFileSync(exePath), "application/octet-stream",
-  "public, max-age=31536000, immutable");
+for (const b of builds) {
+  console.log(`\nuploading the ${b.platform} executable...`);
+  // Immutable: the version is in the path, so this object can never change.
+  await upload(b.objectPath, b.body, "application/octet-stream", "public, max-age=31536000, immutable");
+}
 console.log("uploading the feed...");
 // Mutable, and the whole point of it is to be read after it changes.
-await upload("feed.json", JSON.stringify(feed, null, 2), "application/json",
-  "no-cache, max-age=0");
+const written = JSON.stringify(feed, null, 2);
+await upload("feed.json", written, "application/json", "no-cache, max-age=0");
 
-// Read it back through the public url the way Helios will, and say so if the
-// CDN has not caught up -- the upload succeeding is not the same as the feed
-// being visible, which is the distinction that cost an afternoon.
-{
-  const url = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/feed.json`;
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    const live = await res.json();
-    const seen = live?.builds?.find((b) => b.platform === PLATFORM)?.version;
-    if (seen !== VERSION) {
-      console.warn(
-        `\nWARNING: the public feed still reads ${seen ?? "nothing"} for ${PLATFORM}.\n` +
-        `  The upload went through -- this is the CDN edge serving the old copy.\n` +
-        `  Helios busts the cache when it reads the feed, so it will see ${VERSION};\n` +
-        `  a plain browser may not for a while.`,
-      );
-    }
-  } catch {
-    console.warn("\n(could not read the feed back to check it; the upload succeeded)");
+/**
+ * Read the feed back the way Helios does until it says exactly what was
+ * written -- every platform published here at this version and hash, every
+ * carried-over platform unchanged. The upload succeeding is not the same as
+ * the feed being visible, which is the distinction that cost an afternoon;
+ * and since the broadcast below sends every running Helios to read it, a feed
+ * that is not yet right must not be announced.
+ */
+async function verifyFeed() {
+  let last = "";
+  for (let attempt = 0; attempt < 8; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 1500));
+    const back = await readFeed();
+    if (back.error) { last = back.error; continue; }
+    const live = back.feed.builds;
+    const wrong = feed.builds.filter((want) => {
+      const got = live.find((b) => b.platform === want.platform);
+      return !got || got.version !== want.version || got.sha256 !== want.sha256;
+    });
+    if (!wrong.length && live.length === feed.builds.length) return null;
+    last = wrong.length
+      ? `still reads ${wrong.map((w) => `${w.platform} ${live.find((b) => b.platform === w.platform)?.version ?? "nothing"}`).join(", ")}`
+      : `has ${live.length} builds, expected ${feed.builds.length}`;
   }
+  return last;
 }
 
-console.log(`\npublished ${VERSION} for ${PLATFORM}`);
+/**
+ * Tell every running Helios to look at the feed now, instead of at its next
+ * five-minute check. A realtime broadcast on a public channel: Helios treats
+ * it as a hint only -- it re-reads the feed and installs only what the feed
+ * names, verified by hash -- so the message carries nothing it has to trust.
+ */
+async function announce() {
+  const res = await fetch(`${SUPABASE_URL}/realtime/v1/api/broadcast`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${KEY}`, apikey: KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [{
+        topic: RELEASE_CHANNEL,
+        event: RELEASE_EVENT,
+        payload: { version: VERSION, platforms: builds.map((b) => b.platform) },
+      }],
+    }),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+}
+
+const problem = await verifyFeed();
+const platforms = builds.map((b) => b.platform).join(" + ");
+if (problem) {
+  console.error(
+    `\npublish_build: the uploads went through, but the feed ${problem}.\n` +
+    `  NOT announcing: every running Helios would read a feed that is not yet right.\n` +
+    `  Check it with a cache-busted read of\n` +
+    `    ${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/feed.json?cb=<anything>\n` +
+    `  and re-run this when it is correct (the uploads are idempotent).`,
+  );
+  process.exit(1);
+}
+console.log(`\npublished ${VERSION} for ${platforms} (feed verified)`);
 console.log(`feed: ${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/feed.json`);
-console.log("Helios will offer it the next time somebody opens the Sim module without one installed.");
+if (!NOTIFY) {
+  console.log("--no-notify: not announced. Running Helios apps pick it up at their next five-minute check.");
+} else {
+  try {
+    await announce();
+    console.log(`announced on realtime channel "${RELEASE_CHANNEL}": running Helios apps update within seconds.`);
+  } catch (err) {
+    // The feed is right; the nudge is an optimisation. Rigs still find it on
+    // their own timer, so this is a warning, not a failed publish.
+    console.warn(`could not announce (${err?.message ?? err}); Helios apps pick it up at their next five-minute check.`);
+  }
+}
