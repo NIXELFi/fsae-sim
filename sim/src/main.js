@@ -82,7 +82,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.6.9";
+export let SIM_VERSION = "0.6.10";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
