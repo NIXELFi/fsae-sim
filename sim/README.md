@@ -1209,7 +1209,24 @@ sitting next to it. Nothing is re-simulated.
 ```bash
 fsae-sim --replay <runId>              # watch it back
 fsae-sim --replay <runId> --ghost <id> # with another run alongside
+
+# One sector of one lap, against one lap of the ghost -- how Helios opens a
+# team sector record. All three are 1-based; N and M are `laps[].lap`.
+fsae-sim --replay <runId> --replay-lap N --ghost <id> --ghost-lap M --sector I
 ```
+
+`--replay-lap N` opens on that lap. Add `--sector I` and it opens 1.5 s before
+the car enters sector I, **paused** (a launch takes a few seconds to bring the
+window up, and a replay that played on its own would have run through the
+approach before anyone was looking), with the ghost **synchronised at the
+sector entry**: both cars cross the boundary at the same instant, so the gap
+only moves with what happens inside the sector. A banner says what is being
+compared, shows the running in-sector gap, and once the car leaves the sector
+shows the sector delta on scored times (2 s per cone in that sector).
+`--ghost-lap M` compares against that lap of the ghost instead of its best.
+`--sector` without `--replay-lap` is ignored, and a value that is not a
+positive integer in range is dropped on its own -- the replay still opens. In
+the browser build the same options are `?replayLap=&ghostLap=&sector=`.
 
 Space plays and pauses, the arrows step a second (hold shift for a tenth), up and
 down change speed, `L` jumps to the best lap, `C` changes camera, and the bar at

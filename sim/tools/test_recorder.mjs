@@ -173,6 +173,59 @@ section("A split that spans two sectors is not a sector best");
   ok("so the theoretical best is 10 + 12 + 8.5", st.theoreticalBestS === 30.5, String(st.theoreticalBestS));
 }
 
+section("Sector bests carry the cones hit in that sector (formatVersion 4)");
+{
+  // Helios folds `stats.bestSectors` into team SECTOR records. With raw splits
+  // there, the slalom's record went to whoever flattened the slalom.
+  const rec = openRecorder();
+  const ctx = makeContext();
+  rec.markLine();
+  for (let i = 0; i < 400; i++) rec.tick(0.01, ctx);
+  // Clean: 10 / 12 / 9.
+  rec.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true }, [10, 12, 9], [0, 0, 0]);
+  // A cone in S2 only, and S2 a second quicker raw: 11 + 2 = 13, not a best.
+  rec.recordLap({ lap: 2, raw: 30, cones: 1, off: 0, total: 32, valid: true }, [10, 11, 9], [0, 1, 0]);
+  // A cone in S3, three seconds quicker raw: 6 + 2 = 8, which IS a best.
+  rec.recordLap({ lap: 3, raw: 29.5, cones: 1, off: 0, total: 31.5, valid: true }, [11, 12.5, 6], [0, 0, 1]);
+  // Untimed S2: its cone count is null, not 0 -- nothing to charge it to.
+  rec.recordLap({ lap: 4, raw: 33, cones: 1, off: 0, total: 35, valid: true }, [10, null, 23], [0, 1, 0]);
+  rec.finish();
+  const m = rec.toManifest();
+  ok("formatVersion is 4", m.formatVersion === 4, String(m.formatVersion));
+  const l2 = m.laps[1];
+  ok("sectorCones is filed beside sectors", JSON.stringify(l2.sectorCones) === "[0,1,0]",
+     JSON.stringify(l2.sectorCones));
+  ok("and the same length", l2.sectorCones.length === l2.sectors.length);
+  ok("the timed sectors' cones add up to the lap's",
+     m.laps.slice(0, 3).every((l) => l.sectorCones.reduce((a, b) => a + b, 0) === l.cones));
+  ok("an untimed sector's cone count is null", m.laps[3].sectorCones[1] === null,
+     JSON.stringify(m.laps[3].sectorCones));
+  ok("the split itself stays raw", l2.sectors[1] === 11, String(l2.sectors[1]));
+  const st = m.stats;
+  ok("a coned S2 that is quicker raw but slower scored is not the best", st.bestSectors[1] === 12,
+     String(st.bestSectors[1]));
+  ok("a coned S3 quick enough to survive the penalty is, at its scored time", st.bestSectors[2] === 8,
+     String(st.bestSectors[2]));
+  ok("theoretical best follows: 10 + 12 + 8", st.theoreticalBestS === 30, String(st.theoreticalBestS));
+
+  // A caller that gives no breakdown gets zeros for timed sectors -- the
+  // shape is always complete.
+  const r2 = openRecorder();
+  r2.recordLap({ lap: 1, raw: 4, cones: 0, off: 0, total: 4, valid: true }, [2, null, 2]);
+  ok("no breakdown given: zeros, with null where untimed",
+     JSON.stringify(r2.laps[0].sectorCones) === "[0,null,0]", JSON.stringify(r2.laps[0].sectorCones));
+}
+
+section("An off-course lap's clean sector is still not a best");
+{
+  const rec = openRecorder();
+  rec.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true }, [10, 12, 9], [0, 0, 0]);
+  rec.recordLap({ lap: 2, raw: 25, cones: 0, off: 1, total: 25, valid: false }, [8, 9, 8], [0, 0, 0]);
+  const st = rec.stats();
+  ok("the invalid lap's sectors are ignored", JSON.stringify(st.bestSectors) === "[10,12,9]",
+     JSON.stringify(st.bestSectors));
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
   console.error(`${failures} FAILED`);

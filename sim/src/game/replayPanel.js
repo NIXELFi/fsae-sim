@@ -7,6 +7,7 @@
 // the panels refresh at 20 Hz, which is faster than anyone reads.
 
 import { fmt } from "./timing.js";
+import { inSyncWindow, sectorCompareAt, sectorBanner } from "./sectorSync.js";
 
 const REFRESH_HZ = 20;
 
@@ -153,19 +154,46 @@ export class ReplayPanel {
     this.replay = replay;
     this.actions = actions;
     this.ghost = null;
+    // The ghost lap a launcher asked for (`--ghost-lap`), or null for the
+    // ghost's best lap as before.
+    this.ghostLap = null;
+    // Sector mode (`--sector`): see sectorSync.js. Null otherwise.
+    this.sync = null;
+    this.syncNote = null;
     this.lastPaint = 0;
     this.scrubbing = false;
     this.build();
     this.paint(0, true);
   }
 
-  setGhost(ghost) {
+  /**
+   * @param ghost  the ghost Replay, or null
+   * @param lap    the lap of it to compare against, or null for its best
+   */
+  setGhost(ghost, { lap = null } = {}) {
     this.ghost = ghost;
+    this.ghostLap = ghost ? lap : null;
+    const shown = this.ghostLap ?? ghost?.bestLap ?? null;
     this.el.ghostName.textContent = ghost
-      ? `${ghost.manifest.driver ?? "Ghost"} ${ghost.bestLap ? fmt(ghost.bestLap.total) : ""}`.trim()
+      ? `${ghost.manifest.driver ?? "Ghost"}${this.ghostLap ? ` L${this.ghostLap.lap}` : ""} ${shown ? fmt(shown.total) : ""}`.trim()
       : "none";
     this.el.root.classList.toggle("has-ghost", !!ghost);
     if (this.el.ghostPick) this.el.ghostPick.value = ghost?.runId ?? "";
+    this.paint(0, true);
+  }
+
+  /**
+   * Put the panel into sector mode, or take it out (`sync` null).
+   *
+   * `note` is anything a launcher asked for that could not be honoured -- a
+   * lap the run does not have, a ghost lap with no time for that sector --
+   * shown in the same banner, because a replay that silently opened
+   * somewhere other than where Helios pointed it reads as a broken link.
+   */
+  setSectorSync(sync, note = null) {
+    this.sync = sync;
+    this.syncNote = note;
+    this.paint(0, true);
   }
 
   /** Name the camera on its button, so cycling it is not a guess. */
@@ -223,6 +251,11 @@ export class ReplayPanel {
             <button data-act="exit" class="secondary" title="Back to the launch screen (Esc)">Close</button>
           </div>
         </header>
+
+        <div class="rp-sector" data-sector hidden>
+          <b data-sectortitle></b>
+          <span data-sectorstatus></span>
+        </div>
 
         <aside class="rp-side rp-left" data-panel="left">
           <div class="rp-side-head">
@@ -310,6 +343,9 @@ export class ReplayPanel {
       ghostName: q("[data-ghostname]"),
       ghostGap: q("[data-ghostgap]"),
       ghostPick: q("[data-ghostpick]"),
+      sector: q("[data-sector]"),
+      sectorTitle: q("[data-sectortitle]"),
+      sectorStatus: q("[data-sectorstatus]"),
       pedals: q("[data-pedals]"),
       throttle: q("[data-bar='throttle']"),
       brake: q("[data-bar='brake']"),
@@ -510,7 +546,7 @@ export class ReplayPanel {
         <span class="n">L${l.lap}</span>
         <span class="t">${fmt(l.total)}</span>
         <span class="g">${gap == null ? (isBest ? "best" : "") : `+${gap.toFixed(3)}`}</span>
-        <span class="s">${l.sectors.map((s) => s.toFixed(2)).join(" / ") || ""}</span>
+        <span class="s">${(l.sectors ?? []).map((s) => (s == null ? "--" : s.toFixed(2))).join(" / ")}</span>
         ${l.cones ? `<span class="p">${l.cones}c</span>` : ""}
         ${l.off ? `<span class="p">OFF - no time</span>` : ""}
       </button>`;
@@ -908,10 +944,15 @@ export class ReplayPanel {
     }
 
     if (this.ghost) {
-      const gap = ghostGap(r, this.ghost);
+      // Against the same anchor the ghost is drawn on: the sector entry in
+      // sector mode, the lap start otherwise -- a gap number measured from
+      // one place beside a car placed from another would disagree on screen.
+      const gap = ghostGap(r, this.ghost, { lap: this.ghostLap, sync: this.sync });
       this.el.ghostGap.textContent = gap == null ? "" : `${gap >= 0 ? "+" : ""}${gap.toFixed(3)} s`;
       this.el.ghostGap.className = gap == null ? "" : gap <= 0 ? "up" : "down";
     }
+
+    this.paintSector();
 
     const evs = r.eventsNear(8, 0.5);
     this.el.events.innerHTML = evs.length
@@ -920,6 +961,37 @@ export class ReplayPanel {
           <span class="k">${esc(EVENT_LABEL[e.kind] ?? e.kind)}</span>
           <span class="d">${esc(eventDetail(e))}</span></div>`).join("")
       : `<p class="rp-empty">nothing in the last few seconds</p>`;
+  }
+
+  /**
+   * The sector-mode banner: what is being compared, how the ghost is
+   * synchronised, and -- while the car is in the sector -- the running
+   * in-sector gap, then the sector's scored delta once it has left.
+   *
+   * Shown even with the rest of the UI hidden: it is the answer to the
+   * question the replay was opened to ask.
+   */
+  paintSector() {
+    const el = this.el.sector;
+    if (!el) return;
+    if (!this.sync && !this.syncNote) { el.hidden = true; return; }
+    el.hidden = false;
+    if (!this.sync) {
+      this.el.sectorTitle.textContent = this.syncNote;
+      this.el.sectorStatus.textContent = "";
+      el.className = "rp-sector";
+      return;
+    }
+    const cmp = this.sync.error ? null : sectorCompareAt(this.sync, this.replay, this.ghost);
+    const banner = sectorBanner(this.sync, cmp, {
+      ghostName: this.ghost?.manifest?.driver ?? null,
+      fallbackNote: this.syncNote,
+      playing: this.replay.playing,
+    });
+    this.el.sectorTitle.textContent = banner.title;
+    this.el.sectorStatus.textContent = banner.status;
+    const v = cmp?.phase === "done" ? cmp.delta : cmp?.phase === "in" ? cmp.gap : null;
+    el.className = `rp-sector${v == null ? "" : v <= 0 ? " up" : " down"}`;
   }
 
   destroy() {
@@ -939,11 +1011,22 @@ export class ReplayPanel {
 /**
  * How far ahead or behind the ghost is, in seconds, at the same point on the
  * course. Positive means the run being watched is behind its ghost.
+ *
+ * `lap` is the ghost lap to measure against (a launcher's `--ghost-lap`);
+ * without one it is the ghost's best, as it always was. `sync` is sector
+ * mode: inside its window the gap is measured from the SECTOR ENTRY on both
+ * laps rather than from the lap start, so it is zero at the boundary and
+ * only moves with what happens inside the sector (`sectorCompareAt`).
+ * Outside the window, or when the sector could not be anchored, it is the
+ * ordinary lap-start gap against the same ghost lap.
  */
-export function ghostGap(replay, ghost) {
+export function ghostGap(replay, ghost, { lap = null, sync = null } = {}) {
+  if (sync && !sync.error && inSyncWindow(sync, replay.t)) {
+    return sectorCompareAt(sync, replay, ghost).gap;
+  }
   const s = replay.value("sim.track_s_m");
   const cur = replay.lapAt();
-  const gLap = ghost.bestLap ?? ghost.lapAt(ghost.t);
+  const gLap = lap ?? ghost.bestLap ?? ghost.lapAt(ghost.t);
   if (!cur || !gLap) return null;
   const mine = replay.t - (cur.startedAtS ?? 0);
   const theirs = ghost.timeAtDistanceInLap(gLap, s);

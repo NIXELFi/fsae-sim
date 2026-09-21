@@ -125,7 +125,7 @@ function driveACircle({ dt = DT, laps = LAPS } = {}) {
     if (t - lapStart >= lapDur - dt * 0.5) {
       const entry = { lap: lapIndex + 1, raw: lapDur, cones: lapIndex === 2 ? 1 : 0, off: 0,
                       total: lapDur + (lapIndex === 2 ? 2 : 0) };
-      rec.recordLap(entry, [lapDur / 3, (2 * lapDur) / 3]);
+      rec.recordLap(entry, [lapDur / 3, (2 * lapDur) / 3], [0, entry.cones]);
       scored.push(entry);
       lapStart = t;
       lapIndex++;
@@ -495,7 +495,7 @@ section("The raw time belongs to the lap it was set on");
   // lap wins on raw, the tidy one wins on score, and the board shows Best
   // beside Raw as though they were one lap -- so they had better be.
   const rec = new Recorder({ runId: "raws", track: "autocross", datum: datumFor("autocross") });
-  rec.recordLap({ lap: 1, raw: 40.0, cones: 5, off: 0, total: 50.0 }, [20.0, 20.0]);
+  rec.recordLap({ lap: 1, raw: 40.0, cones: 5, off: 0, total: 50.0 }, [20.0, 20.0], [2, 3]);
   rec.recordLap({ lap: 2, raw: 44.0, cones: 0, off: 0, total: 44.0 }, [22.0, 22.0]);
   const st = rec.stats();
   near("the best lap is the best SCORED lap", st.bestLapS, 44.0, 1e-9, " s");

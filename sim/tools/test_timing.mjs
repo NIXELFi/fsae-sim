@@ -148,6 +148,108 @@ section("cones are a penalty");
   near(lap.total - lap.raw, 2 * CONE_PENALTY_S, 1e-6, "the score is the raw time plus 2 s a cone");
 }
 
+section("a cone is charged to the sector it was hit in");
+{
+  // Helios builds team SECTOR records out of `stats.bestSectors`, so a sector
+  // has to carry its own cones: otherwise the slalom's record goes to whoever
+  // flattened the slalom.
+  const t = new Timing(axTrack());
+  let filedCones = null;
+  let filedSplits = null;
+  t.onLap = (_entry, sectors, cones) => { filedSplits = sectors.slice(); filedCones = cones.slice(); };
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(t, 0, 200, 20);                    // S1 clean, 10 s
+  drive(t, 200, 400, 10, { cones: 1 });    // S2 with a cone, 20 s raw
+  drive(t, 400, 600, 20);                  // S3 clean
+  ok(JSON.stringify(filedCones) === "[0,1,0]", `sectorCones is [0,1,0] (got ${JSON.stringify(filedCones)})`);
+  ok(filedCones.length === filedSplits.length, "one count per sector, aligned with the splits");
+  near(filedSplits[1], 20, 0.2, "the split itself stays RAW");
+  near(t.bestSectors[1], filedSplits[1] + CONE_PENALTY_S, 1e-9, "but the sector best is the split plus 2 s");
+  near(t.bestSectors[0], filedSplits[0], 1e-9, "and a clean sector's best is its split");
+  const sum = filedCones.reduce((a, b) => a + (b ?? 0), 0);
+  ok(sum === t.laps[0].cones, `the sectors' cones add up to the lap's (${sum} vs ${t.laps[0].cones})`);
+}
+
+section("a cone on the frame that crosses a boundary belongs to the sector being left");
+{
+  // Detected against the pose at the END of the frame, which is already past
+  // the line -- but the split being closed on that frame is the one that has
+  // to carry it, or the split toast would score the sector a cone light and
+  // the next sector would inherit a cone it never saw.
+  const t = new Timing(axTrack());
+  let filedCones = null;
+  t.onLap = (_entry, _sectors, cones) => { filedCones = cones.slice(); };
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(t, 0, 199.9, 20);
+  t.update(DT, { s: 200.1, onTrack: true }, 20, 1);    // crosses AND hits a cone
+  ok(t.sectorIndex === 1, "the boundary was crossed");
+  ok(t.message.includes("1 cone"), `the split toast is scored with it (got "${t.message}")`);
+  drive(t, 200.1, 400, 20);
+  // And one on the finish line itself: in the lap, and in the final sector.
+  // The flag falls 3 m short of the course length (`update`).
+  drive(t, 400, 596.9, 20);
+  t.update(DT, { s: 597.1, onTrack: true }, 20, 2);
+  ok(t.state === "finished", "the run finished");
+  ok(JSON.stringify(filedCones) === "[1,0,2]", `[1,0,2] (got ${JSON.stringify(filedCones)})`);
+  ok(t.laps[0].cones === 3, `the lap has all three (got ${t.laps[0].cones})`);
+  // Rolling out through the finish gate charges nothing more.
+  t.update(DT, { s: 605, onTrack: true }, 20, 4);
+  ok(t.laps[0].cones === 3 && t.cones === 0 && t.sectorCones.length === 0,
+     "cones after the flag are not charged");
+}
+
+section("a coned sector only beats a clean one if it is quicker after the penalty");
+{
+  const t = new Timing(axTrack());
+  const lap = (s2Speed, s2Cones) => {
+    t.reset({ keepBest: true });
+    t.update(DT, { s: 0, onTrack: true }, 1, 0);
+    drive(t, 0, 200, 20);
+    drive(t, 200, 400, s2Speed, { cones: s2Cones });
+    drive(t, 400, 600, 20);
+    return t.laps[0];
+  };
+  lap(10, 0);                                         // S2 = 20 s, clean
+  const cleanS2 = t.bestSectors[1];
+  near(cleanS2, 20, 0.2, "the clean S2 is the best");
+
+  // 1 s quicker raw, one cone: 19 + 2 = 21 s. Not a best.
+  lap(200 / 19, 1);
+  near(t.bestSectors[1], cleanS2, 1e-9, "19 s with a cone does not beat a clean 20 s");
+
+  // 3 s quicker raw, one cone: 17 + 2 = 19 s. That IS a best, at 19.
+  lap(200 / 17, 1);
+  near(t.bestSectors[1], 19, 0.2, "17 s with a cone does beat it, at its penalised 19 s");
+  ok(t.bestSectors[1] < cleanS2, "and it is below the clean one");
+}
+
+section("the split toast is scored against a scored best");
+{
+  const t = new Timing(axTrack());
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(t, 0, 200, 20); drive(t, 200, 400, 10); drive(t, 400, 600, 20);   // S2 20 s clean
+  t.reset({ keepBest: true });
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(t, 0, 200, 20);
+  drive(t, 200, 399.9, 200 / 19, { cones: 1 });
+  t.update(DT, { s: 400.1, onTrack: true }, 20, 0);   // close S2: ~19 s raw
+  ok(t.lastSplitDelta > 0.5, `19 s + a cone reads about +1 s against a clean 20 s (got ${t.lastSplitDelta})`);
+}
+
+section("on a closed course a cone on the line is the closing lap's, in its final sector");
+{
+  const t = new Timing({ closed: true, length: 1000, sectors: [500], resetCones() {} });
+  const filed = [];
+  t.onLap = (entry, _sectors, cones) => { filed.push({ cones: entry.cones, sectorCones: cones.slice() }); };
+  t.update(DT, { s: 0, onTrack: true }, 1, 0);
+  drive(t, 0, 999, 50);
+  t.update(DT, { s: 2, onTrack: true }, 50, 1);       // wrap and a cone on the same frame
+  ok(filed.length === 1, "the lap closed");
+  ok(filed[0].cones === 1, "the cone is in the lap that closed");
+  ok(JSON.stringify(filed[0].sectorCones) === "[0,1]", `in its final sector (got ${JSON.stringify(filed[0].sectorCones)})`);
+  ok(t.cones === 0 && t.sectorCones.length === 0, "and lap 2 starts clean");
+}
+
 section("leaving the course throws the lap away");
 {
   // Stricter than FSAE, which scores +20 s and KEEPS the time. See the note

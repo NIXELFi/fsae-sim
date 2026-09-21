@@ -15,7 +15,8 @@ import { GpuHold } from "./render/gpuHold.js";
 import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
-import { Timing, fmt, sectorVerdict, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
+import { Timing, fmt, sectorVerdict, penalisedSector, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
+import { planReplayLaunch, buildSectorSync, ghostClockAt, sectorLaunchOptions } from "./game/sectorSync.js";
 import { keyLabel, buttonLabel, buttonSlot, ACTIONS, ACTION_GROUPS } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
@@ -288,6 +289,12 @@ class Game {
     this.recorder = null;
     this.replay = null;      // a Replay while watching a recorded run
     this.ghost = null;       // a second Replay drawn alongside it
+    // Where a launcher pointed the replay (`enterReplay`'s `focus`), the
+    // ghost lap it named, and the sector sync built from them. All null for
+    // a replay opened without `--replay-lap` / `--ghost-lap` / `--sector`.
+    this.replayFocus = null;
+    this.ghostLapChoice = null;
+    this.sectorSync = null;
     this.replayPanel = null;
     this.recording = true;
     this.driverName = "";
@@ -534,14 +541,15 @@ class Game {
    */
   installLapHooks() {
     if (!this.timing) return;
-    this.timing.onLap = (entry, sectors) => {
-      this.recorder?.recordLap(entry, sectors);
+    this.timing.onLap = (entry, sectors, sectorCones) => {
+      this.recorder?.recordLap(entry, sectors, sectorCones);
       // Kept for the end-of-run card, and it has to be taken HERE: this hook
       // is the last moment the splits exist. `completeLap` clears them for
       // the next lap before it returns, so reading them back in
       // `onRunFinished` -- which runs after `Timing.update` has returned --
       // found an empty array every time.
       this.lapSectors = sectors.slice();
+      this.lapSectorCones = (sectorCones ?? []).slice();
       // ...and the bests as they stood BEFORE this lap folded into them, so
       // a sector can be compared against something other than itself.
       this.prevBestSectors = this.bestSectorsBefore ?? [];
@@ -1391,18 +1399,36 @@ class Game {
     return sk;
   }
 
-  /** What the dash's sector strip shows for the lap under way. */
+  /**
+   * What the dash's sector strip shows for the lap under way.
+   *
+   * Every time on it is SCORED -- split plus 2 s a cone in that sector --
+   * because the bests it is coloured against are (`Timing.foldSectorBests`).
+   * A raw split beside a penalised best would read green for a sector the
+   * board is about to rank behind the clean one. The running sector gets its
+   * cones too, the same way `provisionalTotal` carries the lap's.
+   */
   liveSectors() {
     const t = this.timing;
     const bounds = this.track?.sectors?.length ?? 0;
     if (!t || bounds === 0) return null;
+    const running = t.state === "running";
+    // Reused: this runs every frame, and the dash is not worth a fresh array
+    // sixty times a second.
+    const splits = this._liveSplits ?? (this._liveSplits = []);
+    splits.length = 0;
+    for (let i = 0; i < t.sectorSplits.length; i++) {
+      splits.push(penalisedSector(t.sectorSplits[i], t.sectorCones[i]));
+    }
     return {
       count: bounds + 1,
-      splits: t.sectorSplits,
+      splits,
       best: t.bestSectors,
       index: t.sectorIndex,
-      running: t.state === "running",
-      elapsed: t.state === "running" ? t.lapTime - t.sectorStart : 0,
+      running,
+      elapsed: running
+        ? penalisedSector(t.lapTime - t.sectorStart, t.sectorCones[t.sectorIndex])
+        : 0,
     };
   }
 
@@ -1414,12 +1440,22 @@ class Game {
     const lap = r.lapAt();
     const sectorNow = Math.max(0, Math.round(r.valueAt("sim.sector")) - 1);
     const done = lap?.sectors ?? [];
+    const cones = lap?.sectorCones ?? [];
     const splits = [];
-    for (let i = 0; i < bounds + 1; i++) splits.push(i < sectorNow && done[i] != null ? done[i] : null);
+    // Scored, as the live strip is, against bests that are scored too (a
+    // v4 run's `stats.bestSectors`). A run from before `sectorCones` existed
+    // has neither, and its raw splits against its raw bests are at least
+    // consistent with each other.
+    for (let i = 0; i < bounds + 1; i++) {
+      splits.push(i < sectorNow && done[i] != null ? penalisedSector(done[i], cones[i]) : null);
+    }
     // Against the run's own best sectors, which is what the driver was seeing.
     const best = r.manifest?.stats?.bestSectors ?? [];
     const tIntoLap = lap ? r.t - (lap.startedAtS ?? 0) : 0;
-    const startOfSector = splits.slice(0, sectorNow).reduce((a, b) => a + (b ?? 0), 0);
+    // From the RAW splits: this is where on the clock the current sector
+    // began, and the cones are not time the car spent driving.
+    let startOfSector = 0;
+    for (let i = 0; i < sectorNow; i++) startOfSector += done[i] ?? 0;
     return {
       count: bounds + 1, splits, best, index: sectorNow, running: !!lap,
       elapsed: Math.max(0, tIntoLap - startOfSector),
@@ -1498,8 +1534,16 @@ class Game {
    * The course is loaded first, because a replay is only meaningful against
    * the geometry it was set on -- and because the renderer needs the track it
    * is about to draw the car around. Any live run is banked before the switch.
+   *
+   * `focus` is a launcher pointing at one place in the run -- Helios opening
+   * a team sector record -- already validated (`sectorLaunchOptions`):
+   *   replayLap  open on this lap (`laps[].lap`)
+   *   sector     ...at this sector of it, with the ghost synchronised at the
+   *              sector entry (see sectorSync.js)
+   *   ghostLap   compare against this lap of the ghost, not its best
+   * All null is the replay exactly as it always opened.
    */
-  async enterReplay(runId, ghostId = null) {
+  async enterReplay(runId, ghostId = null, focus = {}) {
     this.endRun("replay-opened");
     this.hideFinishMenu();
     const { manifest, telemetry } = await loadRun(runId);
@@ -1545,7 +1589,33 @@ class Game {
       onGhost: (id) => { if (id) void this.loadGhost(id); else this.clearGhost(); },
     });
     this.replayPanel.setCameraName(CAMERAS[this.cameraIndex].name);
+
+    // Where a targeted launch lands. Decided before the ghost loads, because
+    // the ghost's synchronisation is built against the lap chosen here.
+    //
+    // It lands PAUSED, SECTOR_LEAD_IN_S before the sector entry. A launch
+    // from Helios takes a few seconds to bring the window up and load the
+    // course, and a replay that started playing on its own would have run
+    // through a second and a half of lead-in -- the whole approach to the
+    // sector -- before the driver had even found the window. Paused, the
+    // first thing they see is the car about to arrive, both cars lined up,
+    // and pressing space is the start of the comparison. A lap without a
+    // sector lands paused on the lap's start for the same reason.
+    const plan = planReplayLaunch(replay.laps, focus);
+    this.replayFocus = {
+      lap: plan.lap,
+      sector: plan.entryS != null ? focus.sector : null,
+      ghostLap: focus.ghostLap ?? null,
+      ghostRunId: ghostId,
+      note: plan.note,
+    };
+    this.sectorSync = null;
+    if (plan.seekS != null) {
+      replay.seek(plan.seekS);
+      replay.pause();
+    }
     if (ghostId) await this.loadGhost(ghostId);
+    else this.rebuildSectorSync();
     this.applyReplayFrame();
     // The other runs on this course, for the ghost picker. Not awaited: the
     // replay is already playing and the list can arrive when it arrives.
@@ -1563,6 +1633,51 @@ class Game {
   clearGhost() {
     this.ghost = null;
     this.replayPanel?.setGhost(null);
+    this.rebuildSectorSync();
+  }
+
+  /**
+   * The lap of the ghost to compare against, and why not the one asked for.
+   *
+   * `--ghost-lap` names a lap of the run passed as `--ghost`, so it only
+   * applies to THAT run: a ghost picked afterwards from the panel is compared
+   * on its best lap as it always was. A lap number the ghost does not have
+   * falls back to its best too, and says so.
+   *
+   * @returns {{ lap: object|null, note: string|null }}  `lap` null means the
+   *          default (the ghost's best)
+   */
+  chosenGhostLap() {
+    const g = this.ghost;
+    const f = this.replayFocus;
+    if (!g || !f || f.ghostLap == null || g.runId !== f.ghostRunId) return { lap: null, note: null };
+    const lap = g.laps.find((l) => l.lap === f.ghostLap) ?? null;
+    return lap ? { lap, note: null } : { lap: null, note: `ghost has no lap ${f.ghostLap}, using its best` };
+  }
+
+  /**
+   * (Re)build sector mode against whatever ghost is loaded now: on entering
+   * the replay, and whenever the ghost changes, since the sync is a pairing
+   * of one watched lap with one ghost lap.
+   */
+  rebuildSectorSync() {
+    const f = this.replayFocus;
+    const { lap: picked, note: ghostNote } = this.chosenGhostLap();
+    const g = this.ghost;
+    const ghostLap = g ? (picked ?? g.bestLap ?? g.laps[0] ?? null) : null;
+    this.ghostLapChoice = picked;
+    if (g) this.replayPanel?.setGhost(g, { lap: picked });
+    if (!f?.lap || f.sector == null) {
+      this.sectorSync = null;
+      this.replayPanel?.setSectorSync(null, f?.note ?? ghostNote ?? null);
+      return;
+    }
+    this.sectorSync = buildSectorSync(f.lap, ghostLap, f.sector);
+    // An unusable ghost lap -- no time for this sector -- still leaves a
+    // sector replay worth watching: the ghost goes back to lap-start sync
+    // and the banner says why.
+    const note = this.sectorSync.error ? "ghost synced at lap start" : ghostNote;
+    this.replayPanel?.setSectorSync(this.sectorSync, note);
   }
 
   /**
@@ -1610,11 +1725,13 @@ class Game {
       if (!g.rows) throw new Error("the ghost run has no telemetry");
       g.runId = runId;
       this.ghost = g;
-      this.replayPanel?.setGhost(g);
+      // Names the ghost on the panel, with the lap it is compared on.
+      this.rebuildSectorSync();
     } catch (err) {
       console.error("could not load the ghost", err);
       this.ghost = null;
       this.replayPanel?.setGhost(null);
+      this.rebuildSectorSync();
       this.timing?.say("GHOST NOT LOADED", 2.5);
     }
   }
@@ -1638,6 +1755,9 @@ class Game {
     }
     this.replay = null;
     this.ghost = null;
+    this.replayFocus = null;
+    this.sectorSync = null;
+    this.ghostLapChoice = null;
     this.replayPanel?.destroy();
     this.replayPanel = null;
     this.dom.replayOverlay.hidden = true;
@@ -1767,8 +1887,15 @@ class Game {
     const g = this.ghost;
     const r = this.replay;
     if (!g || !r) return null;
+    // Sector mode: both cars cross the sector boundary at the same instant,
+    // so what the ghost does from there is what happened inside the sector
+    // and not what the sectors before it were worth. Only inside the sync
+    // window; everywhere else it is placed from the lap start as below.
+    const synced = ghostClockAt(this.sectorSync, r.t);
+    if (synced != null) return this.ghostPoseAt(g, synced);
     const mine = r.lapAt();
-    const theirs = g.bestLap ?? g.laps[0];
+    // The lap a launcher named (`--ghost-lap`), else the best as always.
+    const theirs = this.ghostLapChoice ?? g.bestLap ?? g.laps[0];
     // `lapAt` is null in two places, and the absolute replay clock is wrong in
     // both. During STAGING -- however long the driver sat waiting for green --
     // it put the ghost that many seconds into its own lap, so it drove off
@@ -1785,6 +1912,11 @@ class Game {
     else into = this._lastGhostInto ?? 0;
     this._lastGhostInto = into;
     const t = theirs ? (theirs.startedAtS ?? 0) + into : into;
+    return this.ghostPoseAt(g, t);
+  }
+
+  /** The ghost drawn at its own run time `t`. */
+  ghostPoseAt(g, t) {
     if (t > g.duration + 0.5) return null;   // the ghost's run has ended
     g.seek(Math.min(t, g.duration));
     const gs = g.readSample();
@@ -1819,6 +1951,7 @@ class Game {
     this.finishRun = this.timing.laps[this.timing.laps.length - 1] ?? null;
     // Captured by the lap hook a moment ago; see `installLapHooks`.
     this.finishSectors = this.lapSectors ?? [];
+    this.finishSectorCones = this.lapSectorCones ?? [];
     this.finishBestBefore = this.prevBestSectors ?? [];
     // The save itself -- `finishSave`, `notSavedNote` -- is set at the end of
     // `update`, once the log has its finishing row. Nothing reads either
@@ -1890,13 +2023,18 @@ class Game {
           // Against the best as it stood BEFORE this lap: a sector that just
           // set the best is its own reference and would always read +0.000.
           // And "best" only on a lap that counted -- see `sectorVerdict`.
-          const verdict = sectorVerdict(v, this.finishBestBefore[i], entry.valid !== false);
+          // Scored, cones included, because the bests are: the time shown is
+          // the one the sector competes with, and the cones say why.
+          const hit = this.finishSectorCones?.[i] ?? 0;
+          const scored = penalisedSector(v, hit);
+          const verdict = sectorVerdict(scored, this.finishBestBefore[i], entry.valid !== false);
           let tag;
           if (verdict.best) tag = '<span class="v" style="color:var(--gold)">best</span>';
           else if (verdict.delta == null) tag = '<span class="v"></span>';
           else if (verdict.delta > 0) tag = `<span class="v pen">+${verdict.delta.toFixed(3)}</span>`;
           else tag = `<span class="v">${verdict.delta.toFixed(3)}</span>`;
-          rows.push(`<span class="k">S${i + 1}  ${fmt(v)}</span>${tag}`);
+          const coneNote = hit > 0 ? `  (${hit} cone${hit === 1 ? "" : "s"})` : "";
+          rows.push(`<span class="k">S${i + 1}  ${fmt(scored)}${coneNote}</span>${tag}`);
         }
       }
       const best = this.timing.best;
@@ -3319,7 +3457,10 @@ async function boot() {
       // screen they never asked for -- they came from Helios's Runs table and
       // that is where "Close" should put them back.
       game.launchedForReplay = true;
-      await openReplay(o.replay, o.ghost ?? null);
+      // `--replay-lap`, `--ghost-lap`, `--sector`: where in the run to open.
+      // Each is validated on its own and a bad one is dropped rather than
+      // failing the launch -- see sectorSync.js for the contract.
+      await openReplay(o.replay, o.ghost ?? null, sectorLaunchOptions(o));
       return;
     }
     // A lap to chase, loaded before the drive starts so the delta is live
@@ -3338,6 +3479,11 @@ async function boot() {
       driver: q.get("driver"), driverId: q.get("driverId"), session: q.get("session"),
       noRecord: onOff(q.get("record")) === false ? true : onOff(q.get("norecord")),
       replay: q.get("replay"), ghost: q.get("ghost"), reference: q.get("reference"),
+      // The same names the desktop shell serialises (`replayLap` ...), and the
+      // command line's own spelling, so a link can be copied from either.
+      replayLap: q.get("replayLap") ?? q.get("replay-lap"),
+      ghostLap: q.get("ghostLap") ?? q.get("ghost-lap"),
+      sector: q.get("sector"),
       setup: q.get("setup"),
       autostart: onOff(q.get("autostart")) === true, fullscreen: onOff(q.get("fullscreen")) === true,
     };
@@ -3516,12 +3662,12 @@ async function chaseRun(runId) {
  * Open a replay, reporting anywhere it can fail. Called from the Runs tab, a
  * `--replay` launch, and the `replay=` query string in the browser build.
  */
-async function openReplay(runId, ghostId = null) {
+async function openReplay(runId, ghostId = null, focus = {}) {
   if (!game || !runId) return;
   try {
     dom.loadNote.classList.remove("error");
     dom.loadNote.textContent = "Loading run...";
-    await game.enterReplay(runId, ghostId);
+    await game.enterReplay(runId, ghostId, focus);
     dom.loadNote.textContent = "";
   } catch (err) {
     console.error("could not open the replay", err);

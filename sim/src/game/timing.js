@@ -42,6 +42,21 @@
 export const CONE_PENALTY_S = 2.0;
 
 /**
+ * A sector's SCORED time: the split plus 2 s for every cone hit while the car
+ * was in that sector. Null stays null -- an untimed sector is not a 2 s one.
+ *
+ * This is what every sector best is decided on, in `Timing`, in the run's
+ * `stats.bestSectors` and so in Helios's team sector records. A lap's score
+ * already carries its cones; a sector's used not to, so a run that ploughed
+ * through the slalom could hold the slalom sector's record on raw pace alone
+ * -- the one place on the board where knocking cones over was free.
+ */
+export function penalisedSector(split, cones) {
+  if (split == null) return null;
+  return split + (cones ?? 0) * CONE_PENALTY_S;
+}
+
+/**
  * What FSAE would add for an off course. Not applied -- see above -- and kept
  * so the UI can say what the lap would have scored under the rulebook.
  */
@@ -125,6 +140,9 @@ export class Timing {
     this.prevS = 0;
     this.sectorIndex = 0;
     this.sectorSplits = [];
+    // Cones hit in each sector of this lap, by the same index as
+    // `sectorSplits`. Sparse until the flag -- see `completeLap`.
+    this.sectorCones = [];
     // Time into the lap when the current sector began. Sector times are
     // DURATIONS, not cumulative splits -- see `update`.
     this.sectorStart = 0;
@@ -195,6 +213,25 @@ export class Timing {
 
     if (newCones > 0) {
       this.cones += newCones;
+      // Charged to the sector the car is IN, which is the one whose split has
+      // not been closed yet. And deliberately before the boundary test below,
+      // so a cone struck on the very frame that crosses a boundary belongs to
+      // the sector being left. The strike is detected against the car's pose
+      // at the END of the frame, which may already be a few centimetres into
+      // the next sector -- but either answer is within one frame's travel of
+      // the line, and this one has a property the other does not: when a
+      // split is filed its cone count is already final, so the dash and the
+      // split toast can score the sector the instant it closes rather than
+      // revising it a frame later. The same holds at the finish line and at
+      // the wrap of a closed course: the flag is tested after this, so a cone
+      // on that frame is in the lap's `cones` and in its final sector, and
+      // the two always agree.
+      //
+      // Before the green flag and after the finish nothing reaches here --
+      // both return above -- so a staged car nudging a cone, or one rolling
+      // out through the finish gate, charges no sector and no lap.
+      const i = this.sectorIndex;
+      this.sectorCones[i] = (this.sectorCones[i] ?? 0) + newCones;
       this.say(`CONE +${(newCones * CONE_PENALTY_S).toFixed(0)}s`, 1.6);
     }
 
@@ -280,16 +317,24 @@ export class Timing {
       // Reported against the best so far, but NOT folded into it. Sector
       // bests are decided at the flag, in `completeLap`, once it is known
       // whether the lap counted -- see the note there.
+      //
+      // And reported as SCORED, cones included, because that is what the
+      // best it is being measured against is: a sector with a cone in it
+      // that reads green on raw pace would be telling the driver they had
+      // gained time that the board is about to take off them.
       const prevBest = this.bestSectors[this.sectorIndex];
       const n = this.sectorIndex + 1;
+      const hit = this.sectorCones[this.sectorIndex] ?? 0;
+      const scored = penalisedSector(split, hit);
+      const coneNote = hit > 0 ? `  (${hit} cone${hit === 1 ? "" : "s"})` : "";
       if (prevBest == null) {
         this.lastSplitDelta = null;
-        this.say(`S${n} ${fmt(split)}`, 2);
+        this.say(`S${n} ${fmt(scored)}${coneNote}`, 2);
         this.onCue?.("sector");
       } else {
-        this.lastSplitDelta = split - prevBest;
-        const d = split - prevBest;
-        this.say(`S${n} ${fmt(split)}  ${d < 0 ? "" : "+"}${d.toFixed(2)}`, 2);
+        const d = scored - prevBest;
+        this.lastSplitDelta = d;
+        this.say(`S${n} ${fmt(scored)}  ${d < 0 ? "" : "+"}${d.toFixed(2)}${coneNote}`, 2);
         this.onCue?.(d < 0 ? "sectorUp" : "sectorDown");
       }
       this.sectorIndex++;
@@ -331,15 +376,34 @@ export class Timing {
    * split spans more than one sector. Only the immediate predecessor matters
    * -- once a boundary is crossed again the following split is measured from
    * it and is honest.
+   *
+   * The bests are SCORED times: a sector's split plus 2 s for each cone hit
+   * in it (`penalisedSector`). The same rule as `Recorder.stats`, which is
+   * what Helios folds into the team records -- the two folds are one rule.
    */
   foldSectorBests() {
     for (let i = 0; i < this.sectorSplits.length; i++) {
-      const v = this.sectorSplits[i];
+      const v = penalisedSector(this.sectorSplits[i], this.sectorCones[i]);
       if (v == null) continue;
       if (i > 0 && this.sectorSplits[i - 1] == null) continue;
       const prev = this.bestSectors[i];
       if (prev == null || v < prev) this.bestSectors[i] = v;
     }
+  }
+
+  /**
+   * This lap's cones per sector, aligned with `sectorSplits`: a count for
+   * every timed sector (0 when clean) and null for an untimed one, exactly
+   * the shape `run.json` files as `laps[].sectorCones`.
+   *
+   * A cone charged to a sector that ended up untimed -- the car's course
+   * distance jumped, or the lap never reached a boundary -- is in the lap's
+   * `cones` but in no sector. That is the only way the two can disagree, and
+   * it is the right way round: the lap's score keeps the penalty, and no
+   * sector time is invented to carry it.
+   */
+  sectorConesFiled() {
+    return this.sectorSplits.map((v, i) => (v == null ? null : (this.sectorCones[i] ?? 0)));
   }
 
   completeLap() {
@@ -374,9 +438,10 @@ export class Timing {
       if (this.bestRaw == null || raw < this.bestRaw) this.bestRaw = raw;
       this.foldSectorBests();
     }
-    // Before the reset below wipes the splits this lap was scored on.
+    // Before the reset below wipes the splits this lap was scored on. The
+    // third argument is the per-sector cone count, aligned with the splits.
     if (this.onLap) {
-      try { this.onLap(entry, this.sectorSplits.slice()); }
+      try { this.onLap(entry, this.sectorSplits.slice(), this.sectorConesFiled()); }
       catch (err) { console.error("lap listener", err); }
     }
 
@@ -404,6 +469,7 @@ export class Timing {
     this.gatesCharged = new Set();
     this.sectorIndex = 0;
     this.sectorSplits = [];
+    this.sectorCones = [];
     this.sectorStart = 0;
     this.track.resetCones();
   }
@@ -420,6 +486,11 @@ export class Timing {
  * nowhere and is the best of nothing. It is still reported against the
  * previous best: the driver wants to know it was quicker, they just do not
  * get to keep it.
+ *
+ * `split` must be the SCORED split -- `penalisedSector(raw, cones)` -- since
+ * `prevBest` is one: comparing a raw split against a penalised best would
+ * call a sector with two cones in it quicker than the clean one that holds
+ * the record.
  *
  * @returns {{ best: boolean, delta: number|null }}  `delta` is the gap to the
  *          previous best, or null when there was none to compare against

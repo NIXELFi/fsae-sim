@@ -27,7 +27,7 @@
 // guarantee -- at most one row is written per simulation step, so a machine
 // rendering at 60 fps logs at 60 Hz. `stats` carries the rate achieved.
 
-import { CONE_PENALTY_S } from "./timing.js";
+import { CONE_PENALTY_S, penalisedSector } from "./timing.js";
 import { SDM26, rimFromRoadDeg } from "../vehicle/params.js";
 
 export const SAMPLE_HZ = 100;
@@ -541,9 +541,18 @@ export class Recorder {
     this.samples++;
   }
 
-  /** Record a completed lap exactly as the Timing module scored it. */
-  recordLap(entry, sectorSplits) {
+  /**
+   * Record a completed lap exactly as the Timing module scored it.
+   *
+   * `sectorCones` is `Timing.sectorConesFiled()`: cones hit in each sector,
+   * aligned with `sectorSplits`. Timing always supplies it. A caller that
+   * does not (a test fixture writing laps by hand) gets 0 for every timed
+   * sector, which is only honest when the lap has no cones -- so a lap with
+   * cones and no breakdown is the caller's bug, not something to guess at.
+   */
+  recordLap(entry, sectorSplits, sectorCones = null) {
     this.markLine();
+    const sectors = (sectorSplits ?? []).map((s) => (s == null ? null : round(s, 3)));
     this.laps.push({
       lap: entry.lap,
       raw: round(entry.raw, 3),
@@ -559,7 +568,20 @@ export class Recorder {
       // `null` for a sector that was never timed -- the car's course distance
       // jumped over the boundary. `round` turns a null into 0, and a 0.000 s
       // sector is a far worse answer than an admitted gap.
-      sectors: (sectorSplits ?? []).map((s) => (s == null ? null : round(s, 3))),
+      sectors,
+      // Cones hit in each sector, by the same index as `sectors`: a count for
+      // every timed sector, null where the sector is null. So a reader can
+      // score a sector the way the lap is scored -- `sectors[i] + 2 *
+      // sectorCones[i]` -- and a sector record cannot be held by a run that
+      // went through the cones to get it. Whenever every sector is timed the
+      // counts add up to `cones`; a cone charged to a sector that was never
+      // timed stays in `cones` and in no sector (see
+      // `Timing.sectorConesFiled`).
+      sectorCones: sectors.map((s, i) => {
+        if (s == null) return null;
+        const n = sectorCones?.[i];
+        return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+      }),
       // `now`, not `simTime`: the lap ended during THIS frame, and the rows
       // are stamped with the clock after the frame is applied.
       startedAtS: round(this.now - entry.raw, 3),
@@ -649,6 +671,14 @@ export class Recorder {
     // Theoretical best: the quickest each sector was ever driven, added up.
     // It is the number that tells a driver what the car already did, in
     // pieces, on a lap nobody has yet put together.
+    //
+    // Each candidate is the SCORED sector: its split plus 2 s for every cone
+    // hit in it, exactly as the lap's own total carries its cones. Raw splits
+    // made the one place on the board where cones were free -- a run that
+    // took the slalom flat and flattened it could hold the slalom's sector
+    // record, and the theoretical best built on it was a lap nobody could
+    // score. Helios folds these into the team sector records, so the rule is
+    // here, where the record comes from, not in each reader.
     const nSectors = this.laps.reduce((m, l) => Math.max(m, l.sectors.length), 0);
     const bestSectors = [];
     for (let i = 0; i < nSectors; i++) {
@@ -667,7 +697,8 @@ export class Recorder {
         // it -- and Helios folds `bestSectors` into the team records. The
         // two folds are one rule and have to stay one rule.
         if (i > 0 && l.sectors[i - 1] == null) continue;
-        if (best == null || v < best) best = v;
+        const scored = penalisedSector(v, l.sectorCones?.[i]);
+        if (best == null || scored < best) best = scored;
       }
       bestSectors.push(best);
     }
@@ -714,6 +745,18 @@ export class Recorder {
 
   toManifest() {
     return {
+      // 4: `laps[].sectorCones`, and `stats.bestSectors` include 2 s per cone
+      // hit in that sector (so `theoreticalBestS` does too). `sectorCones` is
+      // aligned with `sectors`: a count for every timed sector, null where the
+      // sector is null.
+      //
+      // Version 3's sector bests are RAW splits, cones or not, so one of them
+      // can belong to a sector driven through the cones -- and, like every
+      // other change here, it looks exactly like a legitimate time. A v3 run
+      // also cannot be re-scored: it never said which sector a cone was in.
+      // A reader building sector records from mixed versions has to know
+      // which kind of best it is holding.
+      //
       // 3: a lap that left the course has NO TIME. `laps[].valid` says so,
       // and `bestLapS`, `bestLapRawS`, `bestSectors` and `theoreticalBestS`
       // are computed from the valid laps only.
@@ -735,7 +778,7 @@ export class Recorder {
       // reasonable and are wrong, so a reader has to be able to tell the two
       // formats apart rather than trusting the fields. Helios hides the
       // affected columns on a version 1 run instead of drawing a lie.
-      formatVersion: 3,
+      formatVersion: 4,
       producer: "fsae-sim",
       ...this.meta,
       startedAt: new Date(this.startedAtMs).toISOString(),

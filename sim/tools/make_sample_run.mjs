@@ -274,8 +274,8 @@ const rec = new Recorder({
 // course the first lap becomes the reference and the second is measured
 // against it, which is exactly what happens on the rig.
 const deltaTimer = new DeltaTimer(track.length);
-timing.onLap = (entry, sectors) => {
-  rec.recordLap(entry, sectors);
+timing.onLap = (entry, sectors, sectorCones) => {
+  rec.recordLap(entry, sectors, sectorCones);
   if (deltaTimer.completeLap(entry.raw)) rec.setReference(deltaTimer.describeReference());
 };
 

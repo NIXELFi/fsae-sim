@@ -22,6 +22,7 @@ mod wheel;
 /// fsae-sim [--track autocross|endurance|mis|gen-ax-SEED|gen-en-SEED] [--profile keyboard|gamepad-xbox|gamepad-ps|wheel]
 ///          [--tc on|off] [--abs on|off] [--auto-shift on|off]
 ///          [--driver NAME] [--driver-id ID] [--replay RUN] [--ghost RUN]
+///          [--replay-lap N] [--ghost-lap M] [--sector I]
 ///          [--reference RUN]
 ///          [--setup FILE.hset]
 ///          [--no-record]
@@ -29,6 +30,14 @@ mod wheel;
 ///
 /// A bare argument ending in `.hset` is a setup file too: that is what the
 /// shell passes when somebody double-clicks a file associated with the app.
+///
+/// `--replay-lap`, `--ghost-lap` and `--sector` are 1-based integers and only
+/// mean anything beside `--replay`: open the replay on lap N of that run
+/// (`laps[].lap` in its run.json), at sector I of that lap with the ghost
+/// synchronised at the sector entry, comparing against lap M of the ghost
+/// instead of its best. That is how Helios opens a team sector record. A
+/// value that is not a positive integer in range is dropped and reported in
+/// `unknown`; the rest of the launch still happens.
 ///
 /// By default the window comes up borderless and filling the screen (the
 /// game window most people expect); `--windowed` keeps a decorated 1600x900
@@ -59,6 +68,13 @@ struct LaunchOptions {
     replay: Option<String>,
     /// A second run to draw alongside the replay as a ghost.
     ghost: Option<String>,
+    /// The lap of the replay run to open on (1-based, `laps[].lap`).
+    replay_lap: Option<u32>,
+    /// The lap of the ghost run to compare against, instead of its best.
+    ghost_lap: Option<u32>,
+    /// A sector of `replay_lap` (1-based) to open at, with the ghost
+    /// synchronised at that sector's entry.
+    sector: Option<u32>,
     /// A recorded run whose best lap becomes the live delta's reference, so
     /// the driver is chasing a real lap from the first corner instead of
     /// waiting for lap two.
@@ -91,6 +107,41 @@ fn on_off(v: Option<&String>) -> Option<bool> {
     }
 }
 
+/// Bounds on the replay-position integers. The page checks the same numbers
+/// (`MAX_LAUNCH_LAP`, `MAX_LAUNCH_SECTOR` in `sectorSync.js`); they only stop
+/// a nonsense value from being carried about as though it meant something.
+const MAX_LAUNCH_LAP: u32 = 999;
+const MAX_LAUNCH_SECTOR: u32 = 99;
+
+/// A 1-based integer flag. Digits only -- no sign, no fraction, no
+/// surrounding junk -- because `"2abc"` or `"-1"` selecting lap 2 or wrapping
+/// round to something large is exactly the silent wrong answer a launch
+/// contract should not have. A value that fails is reported beside the
+/// unknown arguments (so a launcher's typo shows up in the log) and the flag
+/// is left unset.
+fn index_flag(key: &str, value: Option<String>, max: u32, unknown: &mut Vec<String>) -> Option<u32> {
+    let raw = match value {
+        Some(v) => v,
+        None => {
+            unknown.push(key.to_string());
+            return None;
+        }
+    };
+    let s = raw.trim();
+    let parsed = if !s.is_empty() && s.len() <= 6 && s.bytes().all(|b| b.is_ascii_digit()) {
+        s.parse::<u32>().ok()
+    } else {
+        None
+    };
+    match parsed {
+        Some(n) if n >= 1 && n <= max => Some(n),
+        _ => {
+            unknown.push(format!("{key}={raw}"));
+            None
+        }
+    }
+}
+
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> LaunchOptions {
     let args: Vec<String> = args.into_iter().collect();
     let mut o = LaunchOptions::default();
@@ -119,6 +170,9 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> LaunchOptions {
             "--driver-id" => o.driver_id = take(),
             "--replay" => o.replay = take(),
             "--ghost" => o.ghost = take(),
+            "--replay-lap" => o.replay_lap = index_flag(key, take(), MAX_LAUNCH_LAP, &mut o.unknown),
+            "--ghost-lap" => o.ghost_lap = index_flag(key, take(), MAX_LAUNCH_LAP, &mut o.unknown),
+            "--sector" => o.sector = index_flag(key, take(), MAX_LAUNCH_SECTOR, &mut o.unknown),
             "--reference" | "--ref" => o.reference = take(),
             "--session" => o.session = take(),
             "--setup" => o.setup = take(),
@@ -369,6 +423,68 @@ mod tests {
         assert_eq!(o.replay.as_deref(), Some("20260918-142233-autocross-9f3a"));
         assert_eq!(o.ghost.as_deref(), Some("other-run"));
         assert!(o.unknown.is_empty());
+    }
+
+    #[test]
+    fn a_replay_launch_without_position_flags_is_unchanged() {
+        let o = parse_args(args("--replay run-a --ghost run-b"));
+        assert_eq!(o.replay_lap, None);
+        assert_eq!(o.ghost_lap, None);
+        assert_eq!(o.sector, None);
+    }
+
+    #[test]
+    fn parses_a_sector_replay_launch() {
+        // What Helios sends for "watch this sector record against my lap".
+        let o = parse_args(args(
+            "--replay mine --replay-lap 3 --ghost record --ghost-lap 7 --sector 2",
+        ));
+        assert_eq!(o.replay.as_deref(), Some("mine"));
+        assert_eq!(o.ghost.as_deref(), Some("record"));
+        assert_eq!(o.replay_lap, Some(3));
+        assert_eq!(o.ghost_lap, Some(7));
+        assert_eq!(o.sector, Some(2));
+        assert!(o.unknown.is_empty(), "unexpected leftovers: {:?}", o.unknown);
+        // `--key=value` works for these like every other flag.
+        let o = parse_args(args("--replay mine --replay-lap=4 --sector=1"));
+        assert_eq!(o.replay_lap, Some(4));
+        assert_eq!(o.sector, Some(1));
+    }
+
+    #[test]
+    fn bad_position_flags_are_dropped_not_fatal() {
+        let o = parse_args(args(
+            "--replay mine --replay-lap 0 --ghost-lap -1 --sector 2abc --track autocross",
+        ));
+        assert_eq!(o.replay.as_deref(), Some("mine"), "the replay itself still opens");
+        assert_eq!(o.replay_lap, None, "laps are 1-based");
+        assert_eq!(o.ghost_lap, None, "no sign");
+        assert_eq!(o.sector, None, "digits only");
+        assert_eq!(o.track.as_deref(), Some("autocross"), "and parsing carried on past them");
+        assert_eq!(
+            o.unknown,
+            vec!["--replay-lap=0".to_string(), "--ghost-lap=-1".to_string(), "--sector=2abc".to_string()],
+        );
+        // Out of range, fractional, blank.
+        let o = parse_args(args("--replay-lap 1000 --sector 100 --ghost-lap 2.5"));
+        assert_eq!((o.replay_lap, o.sector, o.ghost_lap), (None, None, None));
+        let o = parse_args(args("--replay-lap 999 --sector 99"));
+        assert_eq!((o.replay_lap, o.sector), (Some(999), Some(99)));
+        // A trailing flag with no value is reported, not a panic.
+        let o = parse_args(args("--sector"));
+        assert_eq!(o.sector, None);
+        assert_eq!(o.unknown, vec!["--sector".to_string()]);
+    }
+
+    #[test]
+    fn position_flags_serialise_in_camel_case_for_the_page() {
+        // The page reads `replayLap` / `ghostLap` / `sector` (main.js
+        // `sectorLaunchOptions`); a rename here would silently drop them.
+        let o = parse_args(args("--replay r --replay-lap 3 --ghost-lap 5 --sector 2"));
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["replayLap"], 3);
+        assert_eq!(v["ghostLap"], 5);
+        assert_eq!(v["sector"], 2);
     }
 
     #[test]
