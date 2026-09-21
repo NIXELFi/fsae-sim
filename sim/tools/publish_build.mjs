@@ -139,19 +139,24 @@ const entry = {
   published: new Date().toISOString(),
 };
 
-console.log(`build   ${exePath}`);
-console.log(`size    ${(bytes / 1048576).toFixed(2)} MB`);
-console.log(`sha256  ${sha256}`);
-console.log(`target  ${BUCKET}/${objectPath}`);
+if (!PRUNE_ONLY) {
+  console.log(`build   ${exePath}`);
+  console.log(`size    ${(bytes / 1048576).toFixed(2)} MB`);
+  console.log(`sha256  ${sha256}`);
+  console.log(`target  ${BUCKET}/${objectPath}`);
+}
 
-if (DRY) {
+// `--prune-only --dry-run` means "show me what would be retired", not "show me
+// the feed entry you would write" -- there is no feed entry.
+if (DRY && !PRUNE_ONLY) {
   console.log("\n--dry-run: nothing uploaded. The feed entry would be:");
   console.log(JSON.stringify({ builds: [entry] }, null, 2));
   process.exit(0);
 }
 
 if (!SUPABASE_URL || !KEY) {
-  console.error("\npublish_build: set SUPABASE_URL and SUPABASE_SERVICE_KEY, or pass --dry-run");
+  // A prune needs the key even to LOOK: the list API is not public.
+  console.error(`\npublish_build: set SUPABASE_URL and SUPABASE_SERVICE_KEY${PRUNE_ONLY ? "" : ", or pass --dry-run"}`);
   process.exit(1);
 }
 
