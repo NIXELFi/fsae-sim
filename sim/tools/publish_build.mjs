@@ -251,11 +251,20 @@ async function upload(objPath, body, contentType, cacheControl) {
  * body -- so testing the HTTP status alone made the very first publish into a
  * brand-new bucket look like a read failure, and refuse itself. The body is
  * where the real answer is; the status is a wrapper.
+ *
+ * It is read through the AUTHENTICATED object route, not the public one. The
+ * public URL is served from the CDN, and two publishes a few seconds apart --
+ * Windows, then macOS, which is the normal release -- had the second read the
+ * edge's copy from before the first: 0.6.6 went out for macOS and quietly put
+ * Windows back to 0.6.4. The authenticated route answers from the origin.
  */
 async function readFeed() {
   let res;
   try {
-    res = await fetch(`${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/feed.json`);
+    res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/${BUCKET}/feed.json`, {
+      headers: { Authorization: `Bearer ${KEY}`, apikey: KEY },
+      cache: "no-store",
+    });
   } catch (err) {
     return { error: `could not reach storage: ${err?.message ?? err}` };
   }
