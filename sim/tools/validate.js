@@ -1354,8 +1354,9 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
     // Every cone, not a sample: one stale cone is one cone in the road. The
     // edge is the LOCAL width -- the corridor opens into a pen through each
     // slalom -- and a slalom cone (side 2) is on the line, not the edge.
-    let worst = 0, worstSlalom = 0, slalomCones = 0;
+    let worst = 0, worstSlalom = 0, slalomCones = 0, pointers = 0;
     for (const [cx, cy, side] of t.cones) {
+      if (side === 3) { pointers++; continue; } // a pointer lies beside its slalom cone
       let bi = 0, bd = Infinity;
       for (let i = 0; i < t.centerline.length; i++) {
         const dx = cx - t.centerline[i][0], dy = cy - t.centerline[i][1];
@@ -1370,7 +1371,8 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
     }
     check(`${event} cones sit on the edge of that width`, worst, 0, 0.02, " m");
     check(`${event} slalom cones sit on the line`, worstSlalom, 0, 0.05, " m");
-    check(`${event} has its slaloms from the course map`, slalomCones, 9, 12, " cones");
+    check(`${event} has its slaloms from the course map`, slalomCones, 9, 18, " cones");
+    check(`${event} every slalom cone has its pointer`, pointers, slalomCones, slalomCones, " cones");
   }
 }
 

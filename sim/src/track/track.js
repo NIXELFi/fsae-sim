@@ -77,11 +77,23 @@ export class Track {
     // when it passes -- `pass` +1 for the left, -1 for the right -- plus the
     // slalom it belongs to. `along` is the gate's own state: where the car
     // was relative to the cone's plane last frame. See `checkGates`.
+    //
+    // Side 3 is a POINTER: a cone laid on its side beside a slalom cone with
+    // its tip pointing the way the car must go, as a real course marks it.
+    // It is born down and stays down -- `resetCones` leaves it, a strike
+    // never counts it (a down cone is skipped), and the renderer draws it
+    // lying along its tip direction exactly as it draws a struck cone.
     this.cones = data.cones.map((c) => {
       const [x, y, side] = c;
       const cone = { x, y, side, down: false };
       if (side === 2 && c.length >= 7) {
         cone.gate = { dx: c[3], dy: c[4], pass: c[5], group: c[6], along: null };
+      }
+      if (side === 3) {
+        cone.pointer = true;
+        cone.down = true;
+        cone.downAt = null;
+        cone.downDir = Math.atan2(c[4] ?? 0, c[3] ?? 1);
       }
       return cone;
     });
@@ -254,7 +266,10 @@ export class Track {
   }
 
   resetCones() {
-    for (const c of this.cones) { c.down = false; c.downAt = null; }
+    for (const c of this.cones) {
+      if (c.pointer) continue; // lies there by design
+      c.down = false; c.downAt = null;
+    }
     this.resetGates();
   }
 

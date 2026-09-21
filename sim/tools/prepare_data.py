@@ -68,10 +68,12 @@ TRACK_WIDTH_M = {"autocross": 3.5, "endurance": 4.5}
 #   cone marks, and the return leg at 1030-1180 ft with 40 ft (12.19 m)
 #   marks. The bigger waves at 1200-1450 ft on both legs are 60-70 ft apart:
 #   esses, not a slalom.
-#   Endurance: two dashed pens on the bottom straight, 1171-1360 ft and
-#   -25-165 ft (both ~58 m, six cone marks at ~11 m), which is where the car is
-#   already heading west along the pit-side straight. The dense double row
-#   on the top straight past driver change is a chute, not a slalom.
+#   Endurance: three dashed pens. Two on the pit-side (bottom) straight,
+#   1171-1360 ft and -25-165 ft (both ~58 m, six cone marks at ~11 m), heading
+#   west; and one on the top straight past driver change, 295-473 ft (~54 m),
+#   heading east, which at first read looked like a chute -- the dashed line
+#   inside the double row is the slalom's. The wobbles up the east side with
+#   a pair of cone marks at each are offset gates, not a slalom.
 SLALOMS = {
     "autocross": [
         {"x": (-84.0, -47.0), "leg": "east", "spacing": 7.62, "n": 5, "map": "850-950 ft, outbound"},
@@ -80,6 +82,7 @@ SLALOMS = {
     "endurance": [
         {"x": (207.0, 265.0), "leg": "west", "spacing": 11.0, "n": 6, "map": "-25-165 ft pen, bottom straight"},
         {"x": (-158.0, -100.0), "leg": "west", "spacing": 11.0, "n": 6, "map": "1171-1360 ft pen, bottom straight"},
+        {"x": (113.0, 167.0), "leg": "east", "spacing": 10.5, "n": 6, "map": "295-473 ft pen, top straight"},
     ],
 }
 
@@ -87,6 +90,12 @@ SLALOMS = {
 # this, tapering over the lead-in and lead-out. Mirrors SLALOM_ROOM_M in
 # src/track/generate.js.
 SLALOM_ROOM_M = 3.0
+
+# A pointer cone lies on its side beside each slalom cone, on the side the
+# car must pass, tip pointing that way -- how a real course tells a driver
+# which way through. Its base sits this far from the standing cone. Mirrors
+# POINTER_OFFSET_M in src/track/generate.js.
+POINTER_OFFSET_M = 0.45
 
 
 def resample(points, closed, step):
@@ -211,6 +220,10 @@ def place_slaloms(center, heading, curv, s, closed, event, width):
                 cx, cy = center[j]
             passes = first * (1 if k % 2 == 0 else -1)
             cones.append([round(cx, 3), round(cy, 3), 2, round(dx, 5), round(dy, 5), passes, group])
+            # Its pointer: [x, y, 3, tipX, tipY], lying on the pass side.
+            px, py = -dy * passes, dx * passes
+            cones.append([round(cx + px * POINTER_OFFSET_M, 3), round(cy + py * POINTER_OFFSET_M, 3), 3,
+                          round(px, 5), round(py, 5)])
         # The pen: open between the first and last cone, tapering over one
         # lead-in / lead-out of three quarters of a spacing.
         lead = 0.75 * spec["spacing"]

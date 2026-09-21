@@ -105,6 +105,10 @@ const CLEARANCE_EXTRA_M = 4.0;
 const SLALOM_ROOM_M = 3.0;
 const SLALOM_AMPLITUDE_M = { autocross: 1.35, endurance: 1.5 };
 
+/** A pointer cone lies on its side beside each slalom cone, on the side the
+ *  car must pass, tip pointing that way; its base sits this far out. */
+const POINTER_OFFSET_M = 0.45;
+
 /** A passing zone is a second lane: the course opens to twice its width. */
 const PASSING_WIDTH_FACTOR = 2.0;
 const PASSING_TAPER_M = 10;
@@ -925,6 +929,9 @@ function finish(ev, chain, seed, attemptNo) {
       const [x, y] = shift([e.poseIn.x + c * along, e.poseIn.y + sn * along]);
       const pass = e.dir * (i % 2 === 0 ? 1 : -1);
       cones.push([r3(x), r3(y), 2, r3(c), r3(sn), pass, group]);
+      // Its pointer: [x, y, 3, tipX, tipY], lying on the pass side.
+      const px = -sn * pass, py = c * pass;
+      cones.push([r3(x + px * POINTER_OFFSET_M), r3(y + py * POINTER_OFFSET_M), 3, r3(px), r3(py)]);
     });
   });
 

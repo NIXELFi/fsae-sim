@@ -168,6 +168,7 @@ function checkCourse(ev, data, seed) {
   let edgeBad = 0, slalomN = 0, edgeN = 0;
   for (const cone of t.cones) {
     if (cone.side === 2) { slalomN++; continue; }
+    if (cone.side === 3) continue; // a pointer, beside its slalom cone
     edgeN++;
     let onEdge = false, inside = false;
     for (let k = 0; k < c.length; k++) {
@@ -199,6 +200,8 @@ function checkCourse(ev, data, seed) {
   // line at the rule spacing.
   const gates = t.cones.filter((cone) => cone.gate);
   ok(gates.length === slalomN && gates.length > 0, `${tag}: every slalom cone has a gate`);
+  const pointers = t.cones.filter((cone) => cone.pointer);
+  ok(pointers.length === gates.length, `${tag}: a pointer beside every slalom cone`);
   for (let grp = 0; grp < g.stats.slaloms; grp++) {
     const run = gates.filter((cone) => cone.gate.group === grp);
     ok(run.length >= 3, `${tag}: slalom ${grp} has ${run.length} cones`);

@@ -135,7 +135,7 @@ section("the traced 2026 courses carry their slaloms");
   const { fileURLToPath } = await import("node:url");
   const { dirname, join } = await import("node:path");
   const here = dirname(fileURLToPath(import.meta.url));
-  for (const [id, want] of [["autocross", 2], ["endurance", 2]]) {
+  for (const [id, want] of [["autocross", 2], ["endurance", 3]]) {
     const data = JSON.parse(readFileSync(join(here, "..", "data", `track-${id}.json`), "utf8"));
     const t = new Track(data);
     ok(t.slaloms === want, `${id}: ${want} slaloms from the published map (got ${t.slaloms})`);
@@ -154,6 +154,26 @@ section("the traced 2026 courses carry their slaloms");
     }
     ok(onLine === gates.length, `${id}: slalom cones are on the line (${onLine}/${gates.length})`);
     ok(alternate, `${id}: gate sides alternate along each slalom`);
+    // Pointers: one per slalom cone, lying on the pass side, tip pointing
+    // that way, never standing up and never scoring.
+    const pointers = t.cones.filter((c) => c.pointer);
+    ok(pointers.length === gates.length, `${id}: a pointer beside every slalom cone (${pointers.length}/${gates.length})`);
+    ok(pointers.every((c) => c.down && c.side === 3), `${id}: pointers are down`);
+    t.resetCones();
+    ok(pointers.every((c) => c.down), `${id}: pointers stay down through a reset`);
+    let onPassSide = 0;
+    for (const g of gates) {
+      const near = pointers.find((p) => Math.hypot(p.x - g.x, p.y - g.y) < 0.6);
+      if (!near) continue;
+      const lat = -g.gate.dy * (near.x - g.x) + g.gate.dx * (near.y - g.y);
+      const tip = Math.cos(near.downDir) * -g.gate.dy + Math.sin(near.downDir) * g.gate.dx;
+      if (Math.sign(lat) === g.gate.pass && Math.sign(tip) === g.gate.pass) onPassSide++;
+    }
+    ok(onPassSide === gates.length, `${id}: pointers lie on the pass side and point that way (${onPassSide}/${gates.length})`);
+    // A pointer is never struck: drive the box straight over one.
+    const p0 = pointers[0];
+    const hits = t.strikeCones({ x: p0.x, y: p0.y, psi: 0 }, { front: 0.5, rear: 0.5, halfWidth: 0.5 });
+    ok(hits === 0 || !p0.downAt, `${id}: driving over a pointer scores nothing new for it`);
   }
 }
 
