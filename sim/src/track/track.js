@@ -17,6 +17,18 @@ const CELL = 12; // m, spatial hash cell size
  *  one the car is passing. */
 const GATE_RANGE = 24;
 
+/**
+ * How far to the side of a slalom cone the car can be and still be passing
+ * it. A slalom's pen is the course width plus 3 m, so its half is 3.25 m on
+ * autocross and 3.75 m on endurance; a car further out than this is not
+ * running the slalom at all -- it is on a neighbouring stretch of the
+ * course, which on a generated course can run within GATE_RANGE. Judging
+ * those crossings called missed gates on cars that were nowhere near the
+ * cones. Wider than the pen by a car, so a driver hanging a wheel over the
+ * pen's edge is still judged (and is off course anyway).
+ */
+const GATE_JUDGE_LATERAL_M = 5.0;
+
 // Cell keys are a single number, not a "cx,cy" string. The renderer asks for
 // every cone within 280 m each frame, which is a 49 x 49 block of cells;
 // building 2401 template-literal keys for that was over half of all the
@@ -293,9 +305,11 @@ export class Track {
    * Each slalom cone is judged the moment the car's CG crosses the plane
    * through the cone perpendicular to the slalom's line, going forward. On
    * the wrong side of the line at that moment is a missed gate. Crossing
-   * backwards is ignored, and a cone the car never gets near is not judged
-   * -- which is fine, because a car that far from the line is off course
-   * by the width rule anyway.
+   * backwards is ignored, and a cone the car never gets near -- along the
+   * line or, past GATE_JUDGE_LATERAL_M, beside it -- is not judged, which
+   * is fine, because a car that far from the line is off course by the
+   * width rule anyway if it is on this stretch, and on another stretch of
+   * the course if it is not.
    *
    * @param pose {x, y}
    * @returns the slalom ids whose gate was just missed, one per cone
@@ -312,6 +326,7 @@ export class Track {
       g.along = along;
       if (prev == null || !(prev < 0 && along >= 0)) continue;
       const lateral = -g.dy * rx + g.dx * ry; // left of the line is positive
+      if (Math.abs(lateral) > GATE_JUDGE_LATERAL_M) continue; // not this slalom's car
       if ((lateral >= 0 ? 1 : -1) !== g.pass) missed.push(g.group);
     }
     return missed;

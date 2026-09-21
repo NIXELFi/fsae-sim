@@ -110,6 +110,19 @@ section("slalom gates: a cone passed on the wrong side is a missed gate");
   const backwards = Array.from({ length: 100 }, (_, i) => [99 - i, 0.3]);
   ok(drive(backwards).length === 0, "crossing a cone's plane backwards is not judged");
 
+  // A car on a neighbouring stretch of the course crosses these planes too,
+  // 8 m to the side, and is not running this slalom: not judged. On a
+  // generated course that is exactly what a parallel corridor does.
+  t.resetGates();
+  const beside = Array.from({ length: 100 }, (_, i) => [i, 8]);
+  ok(drive(beside).length === 0, "crossing the planes 8 m to the side is another stretch of course, not a miss");
+  t.resetGates();
+  // At y = -4.5 the car is right of the line: the three pass-left cones
+  // (1, 3 in slalom 0; 5 in slalom 1) are missed, inside the judging band.
+  const edge = Array.from({ length: 100 }, (_, i) => [i, -4.5]);
+  const e = drive(edge);
+  ok(e.length === 3 && e[0] === 0 && e[2] === 1, `a car 4.5 m out on the wrong side is still judged (got [${e}])`);
+
   // A jump (respawn / recover) across a cone must not read as a pass.
   t.resetGates();
   t.checkGates({ x: 28, y: 0.3 });
