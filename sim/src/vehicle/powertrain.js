@@ -29,7 +29,7 @@ function toWheel(crankNm, n, eff) {
 
 function clamp(x, lo, hi) { return x < lo ? lo : x > hi ? hi : x; }
 
-/** Width of the soft rev limiter, rpm below the limit. */
+/** How far under the limiter the auto-blip on a downshift lands the engine. */
 const LIMITER_BAND_RPM = 300;
 /**
  * How long the clutch stays dumped after launch control is released, s.
@@ -230,16 +230,24 @@ export class Powertrain {
     const plate = this.platePosition(rpm, throttle);
     let t = plate * (wot + drag) - drag;
 
-    // Soft limiter. A hard cut with 350 rpm of hysteresis bounced the car
-    // between full torque and full motoring drag at ~8 Hz whenever a gear
-    // was held on the limiter, and that pulse went straight into the pitch
-    // camera. Over the last LIMITER_BAND_RPM the net torque blends toward
-    // pure drag, so the engine settles where torque meets load instead of
-    // cycling. At the limit itself it is the same full cut as before.
-    const soft = clamp((rpm - (this.limitRpm() - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM, 0, 1);
-    if (soft > 0) t -= soft * (t + drag);
-    // For the audio: the ignition is being cut once we are deep in the band.
-    this.limiterCut = soft >= 0.5;
+    // Hard-cut limiter with hysteresis: the ignition is cut AT the limit and
+    // comes back `hyst` under it, so the engine bounces, which is what the
+    // real one does -- a little on the rev limiter, hard on launch control.
+    //
+    // History: a hard cut with 350 rpm of hysteresis once surged the car at
+    // ~8 Hz in a held gear and shook the pitch camera, and it was replaced by
+    // a soft band that settled dead flat -- which drivers said felt nothing
+    // like the car. 150 rpm on the main limiter measures (sim-core, 1 kHz) as
+    // a ~200 rpm buzz at 30-40 Hz with +-0.13 g, which the camera's 1.4 Hz
+    // attitude filter takes out; launch control's 400 rpm, with the clutch
+    // in and only the crank to spin, bounces ~440 rpm at ~15 Hz.
+    const limit = this.limitRpm();
+    const hyst = this.launchHeld
+      ? (this.v.launchHystRpm ?? 400)
+      : (this.v.revLimitHystRpm ?? 150);
+    if (rpm >= limit) this.limiterCut = true;
+    else if (rpm <= limit - hyst) this.limiterCut = false;
+    if (this.limiterCut) t = -drag;
     // Coming back from a shift: blend from the cut's value to the full one.
     const f = this.reintroFraction();
     if (f < 1) {

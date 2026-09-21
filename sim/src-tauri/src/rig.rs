@@ -387,6 +387,8 @@ pub struct ParamSet {
     pub idle_rpm: Option<f64>,
     pub idle_throttle_frac: Option<f64>,
     pub launch_rpm: Option<f64>,
+    pub rev_limit_hyst_rpm: Option<f64>,
+    pub launch_hyst_rpm: Option<f64>,
     pub shift_time_s: Option<f64>,
     pub shift_reintro_s: Option<f64>,
     pub engine_inertia_kg_m2: Option<f64>,
@@ -490,6 +492,8 @@ pub struct PowertrainOut {
     pub downshift_safe: bool,
     pub indicated_torque_nm: f64,
     pub plate: f64,
+    /// The rev limiter or launch control has the ignition cut, for the audio.
+    pub limiter_cut: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -1138,6 +1142,8 @@ impl Loop {
             if let Some(x) = p.idle_rpm { e.idle_rpm = x; }
             if let Some(x) = p.idle_throttle_frac { e.idle_throttle_frac = x; }
             if let Some(x) = p.launch_rpm { e.launch_rpm = x; }
+            if let Some(x) = p.rev_limit_hyst_rpm { e.rev_limit_hyst_rpm = x.max(0.0); }
+            if let Some(x) = p.launch_hyst_rpm { e.launch_hyst_rpm = x.max(0.0); }
             if let Some(x) = p.shift_time_s { e.shift_time_s = x; }
             if let Some(x) = p.shift_reintro_s { e.shift_reintro_s = x; }
             if let Some(x) = p.engine_inertia_kg_m2 { e.crank_inertia_kg_m2 = x; }
@@ -1360,6 +1366,7 @@ impl Loop {
             downshift_safe: ptm.downshift_safe(tel.wheel_omega_rear),
             indicated_torque_nm: if ptt.shifting { 0.0 } else { ptm.indicated_torque_nm(ptt.engine_rpm, throttle) },
             plate: if ptt.shifting { 0.0 } else { ptm.plate_position(ptt.engine_rpm, throttle) },
+            limiter_cut: ptt.limiter_cut,
         };
 
         let fz_f = tel.fz[FL] + tel.fz[FR];

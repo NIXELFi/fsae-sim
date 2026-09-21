@@ -170,6 +170,7 @@ export class NativeCar {
       drivetrainEff: p.drivetrainEff, revLimitRpm: p.revLimitRpm, idleRpm: p.idleRpm,
       idleThrottleFrac: p.idleThrottleFrac, launchRpm: p.launchRpm, shiftTimeS: p.shiftTimeS,
       shiftReintroS: p.shiftReintroS,
+      revLimitHystRpm: p.revLimitHystRpm, launchHystRpm: p.launchHystRpm,
       engineInertiaKgM2: p.engineInertiaKgM2, gearboxInertiaKgM2: p.gearboxInertiaKgM2,
     });
     this.refresh();
@@ -353,6 +354,7 @@ class NativePowertrainProxy {
     this._downshiftSafe = false;
     this.indicatedTorqueNm = 0;
     this.plate = 0;
+    this.limiterCut = false;
     this.slipping = true;
   }
 
@@ -368,6 +370,8 @@ class NativePowertrainProxy {
     this._downshiftSafe = p.downshiftSafe;
     this.indicatedTorqueNm = p.indicatedTorqueNm;
     this.plate = p.plate;
+    // Undefined from a rig older than the hard-cut limiter; see liveAudioState.
+    this.limiterCut = p.limiterCut;
   }
 
   get engineRpm() { return this.js.engineRpm; }

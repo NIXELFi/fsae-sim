@@ -1050,9 +1050,13 @@ class Game {
     const shifting = pt.shiftTimer > 0;
     const plate = this.car.native ? pt.plate : pt.platePosition(rpm, throttle);
     let torque = this.car.native ? pt.indicatedTorqueNm : pt.indicatedTorque(rpm, throttle);
-    // The rig does not report its limiter; the signature is unmistakable.
+    // The rig reports its limiter -- the main one and launch control's. A
+    // rig too old to say falls back to the signature, which only ever knew
+    // the main limiter.
     const cut = this.car.native
-      ? (!shifting && plate > 0.3 && torque <= 0 && rpm > SDM26.revLimitRpm - 300)
+      ? (typeof pt.limiterCut === "boolean"
+        ? !shifting && pt.limiterCut
+        : (!shifting && plate > 0.3 && torque <= 0 && rpm > SDM26.revLimitRpm - 300))
       : !!pt.limiterCut;
     if (cut) torque = plate * (pt.wotTorque(rpm) + pt.motoringTorque(rpm));
     const lock = Math.max(0, -Math.min(tel.kappaF, tel.kappaR) - 0.2) * 2.5;

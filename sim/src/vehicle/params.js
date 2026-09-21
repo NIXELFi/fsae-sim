@@ -124,6 +124,11 @@ export const SDM26 = {
   primaryReduction: 2.111, // 76/36
   finalDrive: 3.0,
   revLimitRpm: 14500,
+  // ESTIMATE, tuned by feel: the drivers report the real limiter as a hard
+  // cut that "bounces a little". Ignition cut at revLimitRpm, back on this
+  // far under it. The ECU's actual control range is worth reading off the
+  // Link tune and putting here.
+  revLimitHystRpm: 150,
   // Measured on the car (Daniel): the engine idles near 2000 rpm with the
   // throttle plate held at about 14%. Those two numbers are very nearly
   // self-consistent through the CFD torque curve and the friction model, which
@@ -136,6 +141,9 @@ export const SDM26 = {
   // 8500 -- so it is a driveability choice rather than a torque one.
   // Nothing above walking pace reads it.
   launchRpm: 7000,
+  // ESTIMATE, tuned by feel: launch control "bounces hard" on the real car,
+  // so its hysteresis is much wider than the main limiter's.
+  launchHystRpm: 400,
   /** Throttle plate position the ETC holds at idle, 0..1. */
   // Re-solved for the measured torque curve: the real engine makes far less
   // below 4000 rpm than the CFD sweep predicted, so the idle plate has to sit

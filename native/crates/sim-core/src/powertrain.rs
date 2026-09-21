@@ -7,10 +7,14 @@
 
 use crate::vehicle::VehicleParams;
 
-/// Width of the soft rev limiter, rpm below the limit.
+/// How far under the limiter the auto-blip on a downshift lands the engine.
 const LIMITER_BAND_RPM: f64 = 300.0;
 /// How long the clutch stays dumped after launch control is released, s.
 const LAUNCH_DUMP_S: f64 = 0.8;
+/// Rev limiter hysteresis, rpm; see `GearedEngine::rev_limit_hyst_rpm`.
+pub const REV_LIMIT_HYST_RPM: f64 = 150.0;
+/// Launch control hysteresis, rpm; see `GearedEngine::launch_hyst_rpm`.
+pub const LAUNCH_HYST_RPM: f64 = 400.0;
 
 /// Crank torque to wheel torque through the ratio and the driveline
 /// efficiency. Losses always oppose motion: drive is reduced by them, engine
@@ -37,6 +41,8 @@ pub struct PowertrainTelemetry {
     pub gear: usize,
     pub shifting: bool,
     pub slipping: bool,
+    /// The rev limiter (or launch control's) has the ignition cut right now.
+    pub limiter_cut: bool,
 }
 
 pub trait PowertrainModel: Send + Sync {
@@ -269,10 +275,16 @@ pub struct GearedEngine {
     pub final_drive: f64,
     pub efficiency: f64,
     pub rev_limit_rpm: f64,
+    /// Rev limiter hysteresis: the ignition is cut AT the limit and comes
+    /// back this far under it. See `engine_torque`.
+    pub rev_limit_hyst_rpm: f64,
     pub idle_rpm: f64,
     /// Crank speed a driver holds on the clutch off the line, and what launch
     /// control limits the engine to while it is held.
     pub launch_rpm: f64,
+    /// Launch control's hysteresis: wider than the main limiter's, so the
+    /// engine bounces hard on it, as the real one does.
+    pub launch_hyst_rpm: f64,
     /// Launch control: driver holding it, and the window after they drop it
     /// during which the clutch is dumped rather than fed in.
     pub launch_held: bool,
@@ -310,8 +322,10 @@ impl GearedEngine {
             final_drive: 3.0,
             efficiency: 0.85,
             rev_limit_rpm: 14_500.0,
+            rev_limit_hyst_rpm: REV_LIMIT_HYST_RPM,
             idle_rpm: 2000.0,
             launch_rpm: 7000.0,
+            launch_hyst_rpm: LAUNCH_HYST_RPM,
             launch_held: false,
             launch_dump_s: 0.0,
             // Re-solved for the measured curve; see params.js. The real
@@ -509,13 +523,19 @@ impl GearedEngine {
         // 2005 rpm against a real idle of about 2000.
         let plate = self.plate_position(rpm, throttle);
         let mut t = plate * (wot + drag) - drag;
-        // Soft limiter (see powertrain.js): blend to pure drag over the last
-        // LIMITER_BAND_RPM so a held gear settles instead of bouncing.
-        let soft = ((rpm - (self.limit_rpm() - LIMITER_BAND_RPM)) / LIMITER_BAND_RPM).clamp(0.0, 1.0);
-        if soft > 0.0 {
-            t -= soft * (t + drag);
+        // Hard-cut limiter with hysteresis (see powertrain.js): the ignition
+        // is cut at the limit and comes back `hyst` under it, so the engine
+        // bounces -- a little on the rev limiter, hard on launch control.
+        let limit = self.limit_rpm();
+        let hyst = if self.launch_held { self.launch_hyst_rpm } else { self.rev_limit_hyst_rpm };
+        if rpm >= limit {
+            self.limiter_cut = true;
+        } else if rpm <= limit - hyst {
+            self.limiter_cut = false;
         }
-        self.limiter_cut = soft >= 0.5;
+        if self.limiter_cut {
+            t = -drag;
+        }
         // Coming back from a shift: blend from the cut's value to the full one.
         let f = self.reintro_fraction();
         if f < 1.0 {
@@ -795,6 +815,7 @@ impl PowertrainModel for GearedEngine {
             gear: self.gear,
             shifting: self.shift_timer > 0.0,
             slipping: self.slipping,
+            limiter_cut: self.limiter_cut,
         }
     }
 }

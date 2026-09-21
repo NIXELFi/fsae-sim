@@ -235,14 +235,40 @@ console.log("\nPOWERTRAIN  (from the Helios CFD sweep)");
     const { car, pt } = fresh();
     car.respawn(0, 0, 0, 0);
     pt.setLaunch(true);
-    for (let i = 0; i < 1500; i++) car.step(1 / 500, { steer: 0, throttle: 1, brake: 0 });
-    check("launch control holds the engine", pt.engineRpm, SDM26.launchRpm - 200, SDM26.launchRpm + 50, " rpm");
+    // It is a hard cut with wide hysteresis, so the engine BOUNCES on it, as
+    // the real one does: judged over the last second, not one sample.
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 1500; i++) {
+      car.step(1 / 500, { steer: 0, throttle: 1, brake: 0 });
+      if (i >= 1000) { lo = Math.min(lo, pt.engineRpm); hi = Math.max(hi, pt.engineRpm); }
+    }
+    check("launch control holds the engine (top of the bounce)", hi, SDM26.launchRpm - 50, SDM26.launchRpm + 150, " rpm");
+    check("launch control bottom of the bounce", lo, SDM26.launchRpm - SDM26.launchHystRpm - 150, SDM26.launchRpm - 200, " rpm");
     check("and the car has not moved", car.X, 0, 0.05, " m");
     const capHeld = pt.clutchCapacity(1, 0, 0);
     pt.setLaunch(false);
     const capDumped = pt.clutchCapacity(1, 0, 0);
     check("clutch passes nothing while held", capHeld, 0, 0, " N.m");
     check("and is dumped when dropped", capDumped, 200, 260, " N.m");
+  }
+  {
+    // The rev limiter: a held gear at full throttle bounces a little on it --
+    // a hard cut, not the dead-flat soft band it used to be, and not a surge.
+    const { car, pt } = fresh();
+    car.respawn(0, 0, 0, 5);
+    pt.gear = 1;
+    let lo = Infinity, hi = -Infinity, on = 0, axLo = Infinity, axHi = -Infinity;
+    for (let i = 0; i < 6000 && on < 1000; i++) {
+      car.step(1 / 500, { steer: 0, throttle: 1, brake: 0 });
+      if (pt.engineRpm > SDM26.revLimitRpm - 150) on++;
+      if (on > 250) {
+        lo = Math.min(lo, pt.engineRpm); hi = Math.max(hi, pt.engineRpm);
+        axLo = Math.min(axLo, car.telemetry.axG); axHi = Math.max(axHi, car.telemetry.axG);
+      }
+    }
+    check("rev limiter: never far over the limit", hi, SDM26.revLimitRpm - 50, SDM26.revLimitRpm + 100, " rpm");
+    check("rev limiter: bounces a little (swing)", hi - lo, 80, 400, " rpm");
+    check("rev limiter: no surge through the car (ax swing)", axHi - axLo, 0, 0.6, " g");
   }
   check("geared top speed", vmax * 3.6, 110, 150, " km/h");
   console.log(`  motoring drag @ 10k rpm: ${pt.motoringTorque(10000).toFixed(1)} N.m`);
