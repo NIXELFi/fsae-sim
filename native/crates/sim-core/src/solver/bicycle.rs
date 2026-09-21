@@ -27,6 +27,10 @@ pub struct BicycleSolver {
     s: ChassisState,
     /// Front axle speed (rad/s).
     w_f: f64,
+    /// Front wheel speeds (rad/s), used only with `split_front_wheels`; kept
+    /// equal to `w_f` otherwise.
+    w_fl: f64,
+    w_fr: f64,
     /// Rear wheel speeds (rad/s). Two of them, because a differential is the
     /// only thing between them and it is what decides the car's balance on
     /// the throttle. The front axle stays a single unit: there is nothing
@@ -52,6 +56,8 @@ impl BicycleSolver {
             c,
             s: ChassisState::default(),
             w_f: 0.0,
+            w_fl: 0.0,
+            w_fr: 0.0,
             w_rl: 0.0,
             w_rr: 0.0,
             t_lock_last: 0.0,
@@ -85,7 +91,12 @@ impl BicycleSolver {
     }
 
     /// Sum the two contact patches of an axle at their own loads.
-    fn axle_forces(&self, slip: Slip, fz_axle: f64, d_fz: f64) -> AxleForces {
+    ///
+    /// Each wheel gets its own slip ratio. With the front axle as one rotor
+    /// (the default) both are the same number and this is operation for
+    /// operation what it always was; `split_front_wheels` gives each front
+    /// its own wheel speed, so the unloaded inside tyre can lock first.
+    fn axle_forces(&self, alpha: f64, kappa_l: f64, kappa_r: f64, fz_axle: f64, d_fz: f64) -> AxleForces {
         if fz_axle <= 1.0 {
             return AxleForces::default();
         }
@@ -93,9 +104,20 @@ impl BicycleSolver {
         let shift = d_fz.abs().min(half); // the inner tyre lifts, it does not go negative
         let outer = half + shift;
         let inner = half - shift;
-        let fo = self.c.tyre.forces(slip, outer);
-        let fi = self.c.tyre.forces(slip, inner);
+        // Positive transfer (positive ay, a left turn) loads the RIGHT tyre.
+        let right_outer = d_fz >= 0.0;
+        let (kappa_o, kappa_i) = if right_outer { (kappa_r, kappa_l) } else { (kappa_l, kappa_r) };
+        let fo = self.c.tyre.forces(Slip { alpha, kappa: kappa_o }, outer);
+        let fi = self.c.tyre.forces(Slip { alpha, kappa: kappa_i }, inner);
+        let (l, r) = if right_outer { (&fi, &fo) } else { (&fo, &fi) };
+        let (fz_l, fz_r) = if right_outer { (inner, outer) } else { (outer, inner) };
         AxleForces {
+            fx_left: l.fx,
+            fx_right: r.fx,
+            fz_left: fz_l,
+            fz_right: fz_r,
+            util_left: l.utilisation,
+            util_right: r.utilisation,
             fx: fo.fx + fi.fx,
             fy: fo.fy + fi.fy,
             utilisation: fo.utilisation.max(fi.utilisation),
@@ -114,12 +136,9 @@ impl BicycleSolver {
             // -y*Fx, so the pair sums to scrub * (Fx_right - Fx_left). The
             // transfer is signed with ay, and positive ay (a left turn) loads
             // the right-hand tyre, so the outer patch is the right one then.
-            // Both fronts share one slip ratio here, so the split is by load
-            // alone -- the inside wheel cannot lock ahead of the outside one.
-            scrub_nm: {
-                let (fx_r, fx_l) = if d_fz >= 0.0 { (fo.fx, fi.fx) } else { (fi.fx, fo.fx) };
-                self.c.params.steering.scrub_m * (fx_r - fx_l)
-            },
+            // With one front rotor the split is by load alone; with
+            // `split_front_wheels` a locking inside wheel changes it too.
+            scrub_nm: self.c.params.steering.scrub_m * (r.fx - l.fx),
         }
     }
 }
@@ -136,6 +155,13 @@ struct AxleForces {
     trail_m: f64,
     /// Fx through the scrub radius, for the v2 steering-torque model only.
     scrub_nm: f64,
+    /// Per-side values (left is +y), for the split front axle.
+    fx_left: f64,
+    fx_right: f64,
+    fz_left: f64,
+    fz_right: f64,
+    util_left: f64,
+    util_right: f64,
 }
 
 impl Solver for BicycleSolver {
@@ -175,6 +201,8 @@ impl Solver for BicycleSolver {
         let gear = self.c.powertrain.telemetry().gear;
         self.s = ChassisState { u: speed, v: 0.0, r: 0.0, x, y, psi };
         self.w_f = speed / self.c.params.tyre_radius_m;
+        self.w_fl = self.w_f;
+        self.w_fr = self.w_f;
         self.w_rl = self.w_f;
         self.w_rr = self.w_f;
         self.a_f = 0.0;
@@ -266,6 +294,19 @@ impl BicycleSolver {
         let k_den = u.abs().max(2.0);
         let radius = self.c.params.tyre_radius_m;
         let k_f = (self.w_f * radius - u) / k_den;
+        // Split front axle (FFB model v2.1): each front wheel its own speed
+        // state and its own forward speed, u - r*y with left positive, exactly
+        // as the rear. Otherwise both fronts share the one rotor's slip ratio.
+        let split = self.c.params.split_front_wheels;
+        let half_track_f = self.c.params.track_front_m * 0.5;
+        let (k_fl, k_fr) = if split {
+            (
+                (self.w_fl * radius - (u - r * half_track_f)) / k_den,
+                (self.w_fr * radius - (u + r * half_track_f)) / k_den,
+            )
+        } else {
+            (k_f, k_f)
+        };
 
         // ---- the rear axle, one wheel at a time -------------------------
         // Each rear wheel carries its own load, its own forward speed and so
@@ -289,7 +330,7 @@ impl BicycleSolver {
         let mut f_rl = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rl }, fz_rl);
         let mut f_rr = self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rr }, fz_rr);
 
-        let mut af = self.axle_forces(Slip { alpha: self.a_f, kappa: k_f }, fz_f, d_fz_f);
+        let mut af = self.axle_forces(self.a_f, k_fl, k_fr, fz_f, d_fz_f);
         // The low-speed fade (see `u_kin`), lateral only, before the grip
         // factor -- the same order as the JS build.
         af.fy *= low_speed;
@@ -304,7 +345,7 @@ impl BicycleSolver {
             outer_fz: outer_r,
             align_nm: 0.0,
             trail_m: 0.0,
-            scrub_nm: 0.0,
+            ..AxleForces::default()
         };
         // Front lateral peak relative to the rear (`front_grip_factor`). The
         // fitted curve is linear in mu at a given slip, so scaling the force is
@@ -337,10 +378,15 @@ impl BicycleSolver {
         // wheel, which is what steadies the rear instead of letting it come
         // round. With one rear rotor both of those are exactly zero.
         let n_diff = half_track_r * (f_rr.fx - f_rl.fx);
+        // The same across the FRONT track, once the fronts are two wheels:
+        // braking in a corner the loaded outside front drags harder, which
+        // yaws the car out of the turn. With one front rotor the solver has
+        // always left this out, so it stays out there (bit-identical).
+        let n_front = if split { half_track_f * (af.fx_right - af.fx_left) * cd } else { 0.0 };
 
         let du = (fx_fb + fx_r - drag - roll_res) / m + v * r;
         let dv = (fy_fb + fy_r) / m - u * r;
-        let dr = (p_a * fy_fb - p_b * fy_r + n_diff) / self.c.params.izz_kg_m2;
+        let dr = (p_a * fy_fb - p_b * fy_r + n_diff + n_front) / self.c.params.izz_kg_m2;
 
         // Driveline. The carrier turns at the mean of the two side gears, so
         // that is the speed the gearbox sees.
@@ -377,13 +423,35 @@ impl BicycleSolver {
         // why (explicit Euler is unstable under ~4.5 m/s at 500 Hz). Same
         // finite difference, same order of operations, so the two stay
         // bit-identical.
-        let dfx_f = ((self.axle_forces(Slip { alpha: self.a_f, kappa: k_f + KAPPA_H }, fz_f, d_fz_f).fx - fx_f) / KAPPA_H).max(0.0);
+        let dfx_f = ((self.axle_forces(self.a_f, k_f + KAPPA_H, k_f + KAPPA_H, fz_f, d_fz_f).fx - fx_f) / KAPPA_H).max(0.0);
         let dfx_rl = ((self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rl + KAPPA_H }, fz_rl).fx - f_rl.fx) / KAPPA_H).max(0.0);
         let dfx_rr = ((self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rr + KAPPA_H }, fz_rr).fx - f_rr.fx) / KAPPA_H).max(0.0);
         let stiff_f = dt * radius * radius * dfx_f / k_den;
         let stiff_rl = dt * radius * radius * dfx_rl / k_den;
         let stiff_rr = dt * radius * radius * dfx_rr / k_den;
         let mut dw_f = (-fx_f * radius - self.w_f.signum() * tb_f) / (iw_f + stiff_f);
+
+        // Split front axle: each front wheel with its own inertia, its own
+        // tyre Fx and HALF the front brake torque -- equal line pressure, so
+        // equal torque, and the unloaded inside tyre reaches its limit first.
+        // Same implicit stiffness term as the rear wheels.
+        let (mut dw_fl, mut dw_fr, tb_f_side) = (0.0, 0.0, 0.5 * tb_f);
+        if split {
+            let iw = self.c.params.wheel_inertia_front_kg_m2;
+            let s_of = |k: f64, fz: f64, fx: f64| {
+                let d = ((self.c.tyre.forces(Slip { alpha: self.a_f, kappa: k + KAPPA_H }, fz).fx - fx) / KAPPA_H).max(0.0);
+                dt * radius * radius * d / k_den
+            };
+            let stiff_fl = s_of(k_fl, af.fz_left, af.fx_left);
+            let stiff_fr = s_of(k_fr, af.fz_right, af.fx_right);
+            dw_fl = (-af.fx_left * radius - self.w_fl.signum() * tb_f_side) / (iw + stiff_fl);
+            dw_fr = (-af.fx_right * radius - self.w_fr.signum() * tb_f_side) / (iw + stiff_fr);
+            for (w, dw) in [(self.w_fl, &mut dw_fl), (self.w_fr, &mut dw_fr)] {
+                if tb_f_side > 0.0 && ((w > 0.0 && w + *dw * dt < 0.0) || (w < 0.0 && w + *dw * dt > 0.0)) {
+                    *dw = -w / dt;
+                }
+            }
+        }
 
         // The two rear wheels, solved together. The driveline's reflected
         // inertia hangs on the CARRIER, which turns at the mean of the two
@@ -458,7 +526,17 @@ impl BicycleSolver {
         self.s.r += dr * dt;
         // Fronts may roll backwards (see bicycle.js); the rear stays
         // non-negative for the driveline behind it.
-        self.w_f += dw_f * dt;
+        if split {
+            self.w_fl += dw_fl * dt;
+            self.w_fr += dw_fr * dt;
+            // The axle figure the rest of the model reads is the mean.
+            self.w_f = 0.5 * (self.w_fl + self.w_fr);
+        } else {
+            self.w_f += dw_f * dt;
+            // Kept in step so switching the split on mid-run starts clean.
+            self.w_fl = self.w_f;
+            self.w_fr = self.w_f;
+        }
         self.w_rl = (self.w_rl + dw_rl * dt).max(0.0);
         self.w_rr = (self.w_rr + dw_rr * dt).max(0.0);
 
@@ -472,6 +550,8 @@ impl BicycleSolver {
             self.s.v = 0.0;
             self.s.r = 0.0;
             self.w_f = 0.0;
+            self.w_fl = 0.0;
+            self.w_fr = 0.0;
             self.w_rl = 0.0;
             self.w_rr = 0.0;
             self.ax = 0.0;
@@ -516,8 +596,12 @@ impl BicycleSolver {
                 self.a_r.to_degrees(),
                 self.a_r.to_degrees(),
             ],
-            kappa: [k_f, k_f, k_rl, k_rr],
-            utilisation: [util_f, util_f, f_rl.utilisation, f_rr.utilisation],
+            kappa: [k_fl, k_fr, k_rl, k_rr],
+            utilisation: if split {
+                [af.util_left, af.util_right, f_rl.utilisation, f_rr.utilisation]
+            } else {
+                [util_f, util_f, f_rl.utilisation, f_rr.utilisation]
+            },
             // Load-weighted across the rear, NOT the worse of the two
             // wheels. With a differential the lightly loaded inner wheel is
             // allowed to spin in a tight corner -- that is the diff doing its

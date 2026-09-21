@@ -286,12 +286,19 @@ pub struct FfbConfig {
     /// 1 -- the tyres' aligning moment only: lateral force through the
     ///      pneumatic and mechanical trails. What every build before this had.
     /// 2 -- adds the front LONGITUDINAL forces through the 25.5 mm scrub
-    ///      radius (`Telemetry::scrub_moment_nm`). Braking in a corner the
-    ///      loaded outside front pulls harder than the inside one, which adds
-    ///      centring torque; this is the term that makes brake balance reach
-    ///      the rim directly rather than only through the tyres' slip.
+    ///      radius (`Telemetry::scrub_moment_nm`). With one front rotor the
+    ///      brake force splits by load, so the loaded outside front pulls
+    ///      harder and adds centring torque. An upper bound: real brakes put
+    ///      equal torque on both sides, and with independent wheels (3) the
+    ///      two forces nearly cancel until the inside front locks.
+    /// 3 -- "v2.1": v2, plus each front wheel its own speed state
+    ///      (`VehicleParams::split_front_wheels`) so the unloaded inside
+    ///      front can lock first, plus the caster/KPI jacking torque kept on
+    ///      at speed. Unlike 1 and 2 this changes the PHYSICS: braking in a
+    ///      corner now has an inside-front lockup and a front brake yaw
+    ///      moment, which the validated single-rotor model does not.
     ///
-    /// The physics is identical either way; only the rim torque changes.
+    /// 1 and 2 have identical physics; only the rim torque changes.
     pub model: u8,
 }
 
@@ -1253,6 +1260,12 @@ impl Loop {
         }
 
         // ---- physics ----
+        // Steering model v2.1 gives each front wheel its own speed state.
+        // Physics, not just feel, so it follows the profile's choice here.
+        let split = self.ffb_cfg.model >= 3;
+        if self.car.params().split_front_wheels != split {
+            self.car.params_mut().split_front_wheels = split;
+        }
         if !input.paused {
             self.car.step(dt, Controls { steer, throttle, brake });
             self.boundary_hit = match self.boundary.as_mut() {
@@ -1304,7 +1317,7 @@ impl Loop {
             // Whichever wheel is most locked, front or either rear: the texture
             // is meant to tell the driver a wheel has stopped turning, and it
             // does not matter which one.
-            lock: ((-tel.kappa[FL].min(tel.kappa[RL]).min(tel.kappa[RR]) - 0.2).max(0.0) * 2.5)
+            lock: ((-tel.kappa[FL].min(tel.kappa[FR]).min(tel.kappa[RL]).min(tel.kappa[RR]) - 0.2).max(0.0) * 2.5)
                 .min(1.0),
             off_track: input.off_track && tel.speed > 2.0,
             cone_hits,
@@ -1494,7 +1507,14 @@ impl FfbMixer {
         let park = 1.0 - fade;
         if park > 1e-3 {
             out.friction -= cfg.park_friction * rated * self.friction_state * park;
-            out.jacking = -feel.jacking_nm * park;
+        }
+        // Steering model v2.1 keeps the caster/KPI jacking at every speed: the
+        // car lifts as the wheels turn whether it is moving or not, and with
+        // front load transfer under braking it grows. Before v2.1 it was
+        // standstill-only, handed over from the tyre torque as that faded.
+        let jack_w = if cfg.model >= 3 { 1.0 } else { park };
+        if jack_w > 1e-3 {
+            out.jacking = -feel.jacking_nm * jack_w;
         }
         // End stops past the car's lock. Held OUT of the compressor and out of
         // the gain below: a stop that scales with a taste setting is not a

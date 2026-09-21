@@ -562,7 +562,10 @@ export const PROFILES = {
        * Steering-torque model, for A/B testing. 1 = the tyres' aligning
        * moment only (lateral force through the trails). 2 = also the front
        * brake forces through the 25.5 mm scrub radius, which is how brake
-       * balance reaches the rim directly. Physics identical either way.
+       * balance reaches the rim directly. Physics identical in 1 and 2.
+       * 3 = "v2.1": v2 plus each front wheel its own speed (the inside front
+       * can lock first) and caster/KPI jacking kept on at speed. 3 changes
+       * the physics, on the native rig only.
        */
       model: 1,
       /** Stiffness of the stop past the car's lock. */

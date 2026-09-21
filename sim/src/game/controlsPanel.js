@@ -343,6 +343,7 @@ export class ControlsPanel {
     for (const [v, text] of [
       [1, "Steering model v1: tyre aligning torque only"],
       [2, "Steering model v2: + brake force through scrub radius"],
+      [3, "Steering model v2.1: v2 + independent front wheels, jacking at speed"],
     ]) {
       const o = document.createElement("option");
       o.value = String(v);
@@ -357,13 +358,20 @@ export class ControlsPanel {
       this.render();
     });
     box.append(model);
-    box.append(el("small", "ctl-hint",
-      (profile.forceFeedback.model ?? 1) === 2
-        ? "v2: braking in a corner, the loaded outside front pulls harder than the inside one through the " +
-          "25.5 mm scrub radius, adding weight to the rim. This is how brake balance reaches your hands " +
-          "directly. The car handles identically in both; only the rim torque differs, and it is logged."
-        : "v1: the rim torque is the front tyres' lateral force through the pneumatic and mechanical trail. " +
-          "Brake balance only reaches the rim through the tyres' slip. Switch to v2 to compare."));
+    const modelHint = {
+      1: "v1: the rim torque is the front tyres' lateral force through the pneumatic and mechanical trail. " +
+        "Brake balance only reaches the rim through the tyres' slip. Switch to v2 to compare.",
+      2: "v2: adds the front brake forces through the 25.5 mm scrub radius. Both fronts share one wheel " +
+        "speed here, so brake force splits by load and the loaded outside front pulls harder, adding weight " +
+        "to the rim. That split is an upper bound: real brakes apply equal torque both sides (see v2.1). " +
+        "The car handles exactly as in v1; only the rim torque differs, and it is logged.",
+      3: "v2.1: v2, and each front wheel gets its own speed. With equal brake torque both sides the scrub " +
+        "moments mostly cancel until the unloaded inside front locks -- then the rim goes light. Plus the " +
+        "caster/KPI return torque at speed. This CHANGES THE CAR, not " +
+        "just the rim: expect an inside-front lock and a little brake yaw on trail-braking entries. " +
+        "Desktop rig only; in a browser it behaves as v2.",
+    };
+    box.append(el("small", "ctl-hint", modelHint[profile.forceFeedback.model ?? 1] ?? modelHint[1]));
 
     const st = this.game?.rigState;
     this.statusEl = el("small", "ctl-hint", this.rigStatusLine());

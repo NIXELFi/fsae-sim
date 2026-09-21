@@ -142,7 +142,9 @@ export class ForceFeedback {
     //    (`scrubRimNm`, from the JS model). The native rig folds it into its
     //    own rim torque instead and does not send `scrubRimNm`, so it cannot
     //    be counted twice.
-    const scrubNm = cfg.model === 2 ? (tel.scrubRimNm ?? 0) : 0;
+    //    v2.1 (model 3) is v2 here: its split front axle lives in the native
+    //    solver only, and its at-speed jacking needs the rig's geometry.
+    const scrubNm = cfg.model >= 2 ? (tel.scrubRimNm ?? 0) : 0;
     out.align = -(tel.rimTorqueNm + scrubNm) * cfg.alignTorqueGain * fade;
 
     // 1b. Understeer effect. The tyre model's own cue is small: with 19 mm

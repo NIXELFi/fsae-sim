@@ -119,9 +119,11 @@ pub struct Telemetry {
     /// The moment the front tyres' LONGITUDINAL forces put on the steering
     /// axis through the scrub radius, both wheels summed (N.m, kingpin level,
     /// left-positive like `kingpin_torque_nm`): scrub x (Fx_right - Fx_left).
-    /// Braking in a corner, the loaded outside front pulls harder than the
-    /// inside one, which steers the pair out of the turn -- toward centre, so
-    /// it adds weight to the rim. NOT part of `kingpin_torque_nm` and never fed
+    /// With one front rotor brake force splits by load, so braking in a corner
+    /// the loaded outside front pulls harder and the pair is steered toward
+    /// centre, adding weight to the rim. With `split_front_wheels` each wheel
+    /// carries equal brake torque, the two forces nearly cancel, and the term
+    /// only grows once the inside front locks. NOT part of `kingpin_torque_nm` and never fed
     /// back into the motion: the rig adds it to the rim torque when the
     /// profile selects the v2 steering-torque model. Zero for solvers that do
     /// not compute steering torque.

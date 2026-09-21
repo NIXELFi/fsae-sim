@@ -199,7 +199,8 @@ export class NativeCar {
       gamma: ffb.gamma ?? 0.75, knee: ffb.knee ?? 0.6,
       parkFriction: ffb.parkFriction ?? 0.10, stopDamping: ffb.stopDamping ?? 0.35,
       understeerEffect: ffb.understeerEffect ?? 0, oversteerEffect: ffb.oversteerEffect ?? 0,
-      model: ffb.model === 2 ? 2 : 1,
+      // 1 = v1, 2 = v2, 3 = v2.1 (see `FfbConfig::model` in rig.rs).
+      model: ffb.model === 2 || ffb.model === 3 ? ffb.model : 1,
     });
     const isWheel = profile.kind === "wheel";
     const w = profile.wheel || {};

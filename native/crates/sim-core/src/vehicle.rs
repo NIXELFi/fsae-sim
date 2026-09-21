@@ -242,6 +242,13 @@ pub struct VehicleParams {
     /// loss on the steered upright, inside-front drag, compliance). Estimate,
     /// pinned together with the tyre's mu_y to the 5.02 s skidpad.
     pub front_grip_factor: f64,
+    /// Give each front wheel its own speed state (and so its own slip ratio,
+    /// brake-torque half and Fx), instead of one front rotor. Lets the
+    /// unloaded inside front lock first under braking in a corner, and adds
+    /// the yaw moment of the front brake-force difference. Off by default --
+    /// the validated, skidpad-pinned model -- and switched on by the rig for
+    /// FFB/steering model v2.1.
+    pub split_front_wheels: bool,
     pub aero: AeroParams,
     pub roll: RollParams,
     pub brakes: BrakeParams,
@@ -317,6 +324,7 @@ pub fn sdm26() -> VehicleParams {
         // number worth ~20 N of phantom drag at every speed.
         crr: 0.015,
         front_grip_factor: 0.80,
+        split_front_wheels: false,
         aero: AeroParams {
             // 2026 full-car CFD ride-height map at nominal ride height
             // ('Ride Height Data (BW)'); see params.js `aeroFrontFrac`.
