@@ -133,9 +133,10 @@ function checkCourse(ev, data, seed) {
     ok(near(data.lengthM, data.s[data.s.length - 1] + gap, 0.01), `${tag}: lengthM includes the closing metre`);
   }
   // Two tiers: stretches within 70 m of each other along the course (the
-  // legs of a hairpin, an ess) may pass at the width plus a metre; anything
-  // further apart is an unrelated crossing and gets the width plus four.
-  const far = ev.widthM + 4.0, nearby = ev.widthM + 1.0;
+  // legs of a hairpin, an ess) may pass as close as the tightest hairpin's
+  // legs; anything further apart is an unrelated crossing and gets the
+  // width plus twelve metres, which is what Michigan's courses leave.
+  const far = ev.widthM + 12.0, nearby = ev.hairpinOutsideDiaM[0] - ev.widthM;
   let minFar = Infinity, minNear = Infinity;
   const n = c.length;
   for (let i = 0; i < n; i += 2) {

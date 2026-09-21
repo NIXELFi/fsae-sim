@@ -41,12 +41,15 @@ export const EVENTS = {
     straightHairpinMaxM: 60,        // a. with hairpins at both ends
     straightWideMaxM: 45,           // b. with wide turns on the ends
     turnDiaM: [23, 45],             // c. constant turns
-    hairpinOutsideDiaM: [9, 15],    // d. 9 m minimum outside diameter
+    // d. says 9 m minimum outside diameter; the 2026 Michigan course's
+    // hairpins fit at 12.3-19.2 m (centreline radius 4.4-7.8 m), so that is
+    // what gets drawn. A 9 m hairpin is legal and nobody builds one.
+    hairpinOutsideDiaM: [12, 19],
     slalomSpacingM: [7.62, 12.19],  // e.
     slalomCones: [3, 6],
     avgSpeedKmh: [40, 48],          // "average speeds should be 40 to 48 km/h"
     topSpeedKmh: null,
-    footprintM: [330, 170],         // the Michigan autocross pad is 350 x 40
+    footprintM: [340, 200],         // the Michigan autocross pad is 350 x 40
     passingZones: [0, 0],
     sectors: 3,
     startStraightM: [30, 45],
@@ -62,12 +65,12 @@ export const EVENTS = {
     straightHairpinMaxM: 77,        // a.
     straightWideMaxM: 61,           // b.
     turnDiaM: [30, 54],             // c.
-    hairpinOutsideDiaM: [9, 18],    // d.
+    hairpinOutsideDiaM: [12.5, 19.5], // d. 9 m minimum; Michigan's fit at 12.4-19.5
     slalomSpacingM: [9, 15],        // e.
     slalomCones: [3, 6],
     avgSpeedKmh: [48, 57],          // "average speed should be 48 to 57 km/h"
     topSpeedKmh: 105,               // "top speeds of approximately 105 km/h"
-    footprintM: [420, 300],
+    footprintM: [500, 340],         // Michigan's endurance pad is 680 x 270
     passingZones: [2, 3],           // h. "designated passing zones at several locations"
     sectors: 4,
     startStraightM: [40, 60],
@@ -80,17 +83,18 @@ export const EVENTS = {
  *
  *  - closer than SELF_GAP_M along: neighbours on the same bend, not a pass;
  *  - up to NEAR_GAP_M along: the two legs of a hairpin, or an ess back on
- *    itself. Their cone rows may all but touch, as a real hairpin's do --
- *    a 9 m outside diameter on a 3.5 m course leaves 2 m between the legs;
- *  - further than that: an unrelated crossing, which gets the width plus
- *    two rows of cones and a car's worth of daylight, so a driver on a
+ *    itself. They may sit as close as the legs of the tightest hairpin
+ *    drawn (its outside diameter less the width), and no closer;
+ *  - further than that: an unrelated crossing. Measured on the 2026
+ *    Michigan courses, stretches that pass each other never come within
+ *    15 m centre to centre (autocross 17.7 m, endurance 15.1 m), which is
+ *    the width plus ten to fourteen metres of open pad -- so a driver on a
  *    course they have never seen is never in doubt about which corridor
- *    is theirs.
+ *    is theirs. CLEARANCE_EXTRA_M is what is added to the width for that.
  */
 const SELF_GAP_M = 24;
 const NEAR_GAP_M = 70;
-const NEAR_EXTRA_M = 1.0;
-const CLEARANCE_EXTRA_M = 4.0;
+const CLEARANCE_EXTRA_M = 12.0;
 
 /**
  * A slalom is a straight line of cones, and the course through it is that
@@ -418,7 +422,7 @@ class Chain {
     this.length = 0;
     this.bounds = new Bounds();
     this.clearance = ev.widthM + CLEARANCE_EXTRA_M;
-    this.nearClearance = ev.widthM + NEAR_EXTRA_M;
+    this.nearClearance = ev.hairpinOutsideDiaM[0] - ev.widthM;
     this.cell = this.clearance; // a 3x3 block of cells covers the clearance
     this.grid = new Map();
   }
@@ -904,7 +908,7 @@ function finish(ev, chain, seed, attemptNo) {
     // the walk allowed for: only a straight with that much room on both
     // sides -- against every stretch that is not its own neighbourhood --
     // can be one.
-    const roomNeeded = (ev.widthM * PASSING_WIDTH_FACTOR) / 2 + ev.widthM / 2 + NEAR_EXTRA_M;
+    const roomNeeded = (ev.widthM * PASSING_WIDTH_FACTOR) / 2 + ev.widthM / 2 + 1.0;
     const hasRoom = (e) => {
       for (let i = 0; i < center.length; i++) {
         if (s[i] < e.s0 - PASSING_TAPER_M || s[i] > e.s1 + PASSING_TAPER_M) continue;
