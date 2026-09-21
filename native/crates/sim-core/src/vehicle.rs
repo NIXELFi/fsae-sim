@@ -129,12 +129,12 @@ pub fn sdm26() -> VehicleParams {
             air_density: 1.162,
         },
         roll: RollParams {
-            rsd_front: 0.512,
+            rsd_front: 0.48,
             roll_arm_m: 0.2626,
             rc_front_m: 0.0186,
             rc_rear_m: 0.0251,
         },
-        brakes: BrakeParams { max_torque_nm: 1500.0, bias_front: 0.62 },
+        brakes: BrakeParams { max_torque_nm: 1500.0, bias_front: 0.65 },
         steering: SteeringParams {
             max_steer_rad: 28.0_f64.to_radians(),
             lag_s: 0.06,

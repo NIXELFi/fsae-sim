@@ -173,7 +173,7 @@ export function parameterGroups() {
 
     rows("Roll balance", [
       p("Roll stiffness distribution, front", v.roll.rsdFront * 100, "%", "team",
-        "From the team's 2026 Anti-Roll Bar Calculator; the with-tyre no-ARB baseline."),
+        "Team setup choice. The 2026 Anti-Roll Bar Calculator's with-tyre no-ARB baseline is 51.2%."),
       p("CG to roll-axis arm", v.roll.hRollArmM * 1000, "mm", "team",
         "Matches the SDM25 RSD test sheet's measured 10.34 in."),
       p("Roll centre, front", v.roll.rcFrontM * 1000, "mm", "team", "", { path: "roll.rcFrontM", min: -60, max: 160, step: 0.5, factor: 1000 }),

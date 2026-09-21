@@ -63,7 +63,9 @@ export const SDM26 = {
 
   // ---- roll balance (Helios SDM26_ROLL, from the team's ARB calculator) ----
   roll: {
-    rsdFront: 0.512,   // roll-stiffness distribution, front share (no ARB baseline)
+    // Team setup choice: 48% front. Deviates from Helios SDM26_ROLL, whose
+    // 0.512 is the ARB calculator's with-tyre no-ARB baseline.
+    rsdFront: 0.48,    // roll-stiffness distribution, front share
     hRollArmM: 0.2626, // sprung-CG to roll-axis arm
     rcFrontM: 0.0186,  // front roll-centre height
     rcRearM: 0.0251,   // rear roll-centre height
@@ -115,7 +117,7 @@ export const SDM26 = {
   // EST: brakes. 1500 N.m total at the wheels is enough to lock all four at
   // low speed (a rules requirement), so threshold braking is a skill.
   brakeTorqueMaxNm: 1500,
-  brakeBiasFront: 0.62,
+  brakeBiasFront: 0.65,
 
   // EST: tyre relaxation length -- the distance the tyre must roll to build
   // slip force. ~0.35 m is right for a 10" slick, and it is what makes the

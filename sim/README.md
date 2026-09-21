@@ -280,7 +280,8 @@ Lifted verbatim from Helios `SDM26_VEHICLE` / `SDM26_ROLL`: mass 267 kg, 48.5%
 front, CG 284.5 mm, wheelbase 1.53 m, tracks 1.207/1.194, tyre radius 0.20 m,
 CdA 1.294 / ClA 3.146 at 55.3% front (2026 CFD aero map), Crr 0.02, driveline
 0.85, CBR600RR ratios with 2.111 primary and SDM's 3.0 final, 14 500 rpm limit,
-100 ms shift, roll-stiffness distribution 0.512 on a 262.6 mm roll arm.
+100 ms shift, and a 262.6 mm roll arm. Roll-stiffness distribution is the
+team's 0.48 setup rather than Helios's 0.512 no-ARB baseline.
 
 **One deliberate deviation.** `muLat` is 1.573 here, not the lap sim's 1.368.
 Helios pins 1.368 at the skidpad in a quasi-steady model that applies load
