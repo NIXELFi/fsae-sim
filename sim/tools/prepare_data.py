@@ -51,6 +51,43 @@ OUT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 # legal at Michigan.
 TRACK_WIDTH_M = {"autocross": 3.5, "endurance": 4.5}
 
+# Where the slaloms are, from the published 2026 course maps (fsaeonline.com
+# MapViewer: Autocross Course 3e2267bf..., Endurance Course 76097adf...),
+# read against the maps' 100 ft grid and converted to this frame with the
+# two points the trace pins -- the autocross start line at map 470 ft and
+# the far end of the pad at ~1640 ft; the endurance pad's 0 ft mark at the
+# east end of the bottom straight, 2000 ft at the west end.
+#
+# The trace follows the slalom LINE through each (the map draws a slalom as
+# a dashed straight line inside a dotted pen), so the centreline here is
+# straight through them and the cones go on it. `x` is the range on the
+# named leg in the output frame; `spacing` is the rulebook's (D.11.1.1.e
+# 7.62-12.19 m, D.12.2.2.e 9-15 m) as the map's cone marks best fit; `n`
+# was counted off the map.
+#   Autocross: the outbound leg weaves at map 850-950 ft with 25 ft (7.62 m)
+#   cone marks, and the return leg at 1030-1180 ft with 40 ft (12.19 m)
+#   marks. The bigger waves at 1200-1450 ft on both legs are 60-70 ft apart:
+#   esses, not a slalom.
+#   Endurance: two dashed pens on the bottom straight, 1171-1360 ft and
+#   -25-165 ft (both ~58 m, six cone marks at ~11 m), which is where the car is
+#   already heading west along the pit-side straight. The dense double row
+#   on the top straight past driver change is a chute, not a slalom.
+SLALOMS = {
+    "autocross": [
+        {"x": (-84.0, -47.0), "leg": "east", "spacing": 7.62, "n": 5, "map": "850-950 ft, outbound"},
+        {"x": (-25.8, 20.0), "leg": "west", "spacing": 12.19, "n": 4, "map": "1030-1180 ft, return"},
+    ],
+    "endurance": [
+        {"x": (207.0, 265.0), "leg": "west", "spacing": 11.0, "n": 6, "map": "-25-165 ft pen, bottom straight"},
+        {"x": (-158.0, -100.0), "leg": "west", "spacing": 11.0, "n": 6, "map": "1171-1360 ft pen, bottom straight"},
+    ],
+}
+
+# Through a slalom the corridor opens up into the pen: the rule width plus
+# this, tapering over the lead-in and lead-out. Mirrors SLALOM_ROOM_M in
+# src/track/generate.js.
+SLALOM_ROOM_M = 3.0
+
 
 def resample(points, closed, step):
     """Arc-length resample a polyline to a uniform `step` (m)."""
@@ -96,9 +133,10 @@ def geometry(center, closed):
     return s, heading, curv
 
 
-def place_cones(center, heading, curv, s, closed, half_width):
+def place_cones(center, heading, curv, s, closed, half_width, widths=None):
     """Cones on both edges. Spacing tightens through corners the way a real
-    course does -- open straights get ~7 m, tight hairpins ~3 m."""
+    course does -- open straights get ~7 m, tight hairpins ~3 m. With a
+    per-point `widths` list the edge follows it (a slalom's pen)."""
     cones, next_s = [], 0.0
     for i, (cx, cy) in enumerate(center):
         if s[i] < next_s:
@@ -107,9 +145,85 @@ def place_cones(center, heading, curv, s, closed, half_width):
         spacing = max(3.0, min(7.0, 1.6 + 0.30 * radius))
         next_s = s[i] + spacing
         nx, ny = -math.sin(heading[i]), math.cos(heading[i])
-        cones.append([round(cx + nx * half_width, 3), round(cy + ny * half_width, 3), 0])
-        cones.append([round(cx - nx * half_width, 3), round(cy - ny * half_width, 3), 1])
+        half = widths[i] / 2 if widths else half_width
+        cones.append([round(cx + nx * half, 3), round(cy + ny * half, 3), 0])
+        cones.append([round(cx - nx * half, 3), round(cy - ny * half, 3), 1])
     return cones
+
+
+def place_slaloms(center, heading, curv, s, closed, event, width):
+    """Slalom cones on the centreline through each span in SLALOMS, with a
+    gate per cone, and the corridor opened into a pen around them.
+
+    Returns (cones, widths). Each cone is [x, y, 2, dx, dy, pass, group]:
+    the slalom line's direction, which side of it the car must be on when
+    it passes (+1 left, -1 right), and the slalom's index on the course.
+    The first cone's side is taken from the corner the car arrives out of --
+    out of a right-hander the car is on the left of the corridor and takes
+    the first cone on its left -- and the sides alternate from there.
+    """
+    n = len(center)
+    widths = [width] * n
+    cones = []
+    for group, spec in enumerate(SLALOMS.get(event, [])):
+        x0, x1 = spec["x"]
+        want = 1.0 if spec["leg"] == "east" else -1.0
+        idx = [i for i in range(n)
+               if x0 <= center[i][0] <= x1 and math.cos(heading[i]) * want > 0.7]
+        if not idx:
+            raise SystemExit(f"{event}: no {spec['leg']}-bound centreline in x {spec['x']}")
+        # The longest contiguous run, in case a different leg clipped the box.
+        runs, cur = [], [idx[0]]
+        for a, b in zip(idx, idx[1:]):
+            if b == a + 1:
+                cur.append(b)
+            else:
+                runs.append(cur)
+                cur = [b]
+        runs.append(cur)
+        run = max(runs, key=len)
+        i0, i1 = run[0], run[-1]
+        span = s[i1] - s[i0]
+        total = (spec["n"] - 1) * spec["spacing"]
+        if total > span:
+            raise SystemExit(f"{event}: slalom {group} needs {total:.1f} m, span is {span:.1f} m")
+        start = s[i0] + (span - total) / 2
+        # The line's direction is the mean heading over the span.
+        hx = sum(math.cos(heading[i]) for i in run) / len(run)
+        hy = sum(math.sin(heading[i]) for i in run) / len(run)
+        hn = math.hypot(hx, hy)
+        dx, dy = hx / hn, hy / hn
+        # Which side first: out of the corner the car arrived from.
+        before = [curv[i] for i in range(max(0, i0 - 25), i0)]
+        k_before = sum(before) / len(before) if before else 0.0
+        first = 1 if k_before <= 0 else -1
+        for k in range(spec["n"]):
+            target = start + k * spec["spacing"]
+            # The centreline point at that distance: interpolate between nodes.
+            j = i0
+            while j + 1 <= i1 and s[j + 1] <= target:
+                j += 1
+            if j + 1 < n and s[j + 1] > s[j]:
+                f = (target - s[j]) / (s[j + 1] - s[j])
+                cx = center[j][0] + f * (center[j + 1][0] - center[j][0])
+                cy = center[j][1] + f * (center[j + 1][1] - center[j][1])
+            else:
+                cx, cy = center[j]
+            passes = first * (1 if k % 2 == 0 else -1)
+            cones.append([round(cx, 3), round(cy, 3), 2, round(dx, 5), round(dy, 5), passes, group])
+        # The pen: open between the first and last cone, tapering over one
+        # lead-in / lead-out of three quarters of a spacing.
+        lead = 0.75 * spec["spacing"]
+        a, b = start, start + total
+        for i in range(n):
+            inner = min(s[i] - a, b - s[i])
+            if inner < -lead:
+                continue
+            fr = max(0.0, min(1.0, (inner + lead) / lead))
+            widths[i] = max(widths[i], round(width + SLALOM_ROOM_M * fr, 3))
+        print(f"  slalom {group}: {spec['n']} cones every {spec['spacing']} m from s={start:.1f} "
+              f"(map {spec['map']}), first cone on the {'left' if first > 0 else 'right'}")
+    return cones, widths
 
 
 def build_track(src, out_name, sector_count, event):
@@ -127,6 +241,7 @@ def build_track(src, out_name, sector_count, event):
     length = s[-1] + (math.dist(center[-1], center[0]) if closed else 0.0)
     width = TRACK_WIDTH_M[event]
     half = width / 2
+    slalom_cones, widths = place_slaloms(center, heading, curv, s, closed, event, width)
 
     track = {
         "name": raw["name"],
@@ -138,9 +253,14 @@ def build_track(src, out_name, sector_count, event):
         "heading": [round(h, 5) for h in heading],
         "curvature": [round(c, 6) for c in curv],
         "s": [round(v, 3) for v in s],
-        "cones": place_cones(center, heading, curv, s, closed, half),
+        "cones": place_cones(center, heading, curv, s, closed, half, widths) + slalom_cones,
         "sectors": [round(length * i / sector_count, 2) for i in range(1, sector_count)],
     }
+    if slalom_cones:
+        track["widths"] = widths
+        track["slaloms"] = [
+            {"cones": sp["n"], "spacingM": sp["spacing"], "map": sp["map"]} for sp in SLALOMS[event]
+        ]
     path = os.path.join(OUT, out_name)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(track, fh, separators=(",", ":"))

@@ -282,10 +282,16 @@ export const TRACK_DATUMS = {
   autocross: { lat: 42.07152, lon: -84.24089, bearingDeg: 0, name: "FSAE Michigan autocross pad" },
   endurance: { lat: 42.06985, lon: -84.24515, bearingDeg: 0, name: "FSAE Michigan endurance pad" },
   mis: { lat: 42.06556, lon: -84.24139, bearingDeg: 0, name: "Michigan International Speedway" },
+  // A generated course exists nowhere. It is placed on the MIS infield so the
+  // GPS channels stay plausible for anything that maps them, and named so
+  // nobody mistakes the fix for a survey.
+  generated: { lat: 42.06700, lon: -84.24300, bearingDeg: 0, name: "Generated course (nominal datum, MIS infield)" },
 };
 
 export function datumFor(trackId) {
-  return TRACK_DATUMS[trackId] ?? TRACK_DATUMS.autocross;
+  if (TRACK_DATUMS[trackId]) return TRACK_DATUMS[trackId];
+  if (/^gen-/.test(String(trackId ?? ""))) return TRACK_DATUMS.generated;
+  return TRACK_DATUMS.autocross;
 }
 
 /**

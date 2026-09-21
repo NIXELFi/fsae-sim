@@ -597,6 +597,69 @@ footprint, not sampled points with a slop radius -- with only 1.05 m of clearanc
 each side of a 1.39 m car in a 3.5 m corridor, slop would eat the usable width
 of the course.
 
+### Generated courses
+
+**Generated autocross** and **Generated endurance** in the course menu lay out a
+course nobody has driven, from a seed. Type any seed (letters and digits, up to
+12) or press **New seed**; the same seed gives the same course on every machine,
+so a seed is something to put in the group chat. The course id is
+`gen-ax-K7Q2` / `gen-en-K7Q2`, and it works everywhere a course id does:
+`--track gen-en-K7Q2` on the command line, the Runs tab, the ghost picker, the
+archive best. Personal bests are per seed.
+
+The generator (`src/track/generate.js`) is the rulebook as a grammar. FSAE Rules
+2021 V1 D.11.1.1 (autocross) and D.12.2.2 (endurance) describe a course as
+straights, constant turns, hairpins, slaloms and "chicanes, multiple turns,
+decreasing radius turns", each with dimensions, so it draws elements from that
+list with the rules' numbers -- 3.5 m / 4.5 m wide; straights no longer than
+45 m / 61 m, or 60 m / 77 m with hairpins at both ends; constant turns 23-45 m /
+30-54 m diameter; hairpins at least 9 m outside diameter; slaloms 7.62-12.19 m /
+9-15 m apart; about 0.8 km per run, 1.15-1.4 km per lap -- and chains them nose
+to tail as arcs and straights. Chains that cross themselves, leave the pad or
+(endurance) cannot be closed back onto the start line with a legal pair of turns
+are thrown away and the seed's next attempt is tried, so the result is
+deterministic and always legal. A quasi-static lap-time estimate holds each
+course to the rulebook's average-speed band (40-48 km/h autocross, 48-57 km/h
+endurance), which is the only thing the rules say about speed. Endurance courses
+also get the rule's designated passing zones: their two or three longest
+straights open to twice the width, cones and ribbon following.
+
+`tools/test_generate.mjs` checks forty seeds per event against every dimension
+above.
+
+### Slaloms and gates
+
+A slalom is a straight line of cones, on the traced courses and the generated
+ones alike. The centreline runs straight through it -- the driver supplies the
+weave -- and the corridor opens up 3 m into a pen around it, cones following,
+so there is room to. Slalom cones are the third kind of cone (`side` 2), on the
+line at the rulebook spacing, and each one carries a **gate**: the line's
+direction and the side the car must pass it on, alternating cone to cone
+(`[x, y, 2, dx, dy, pass, slalom]` in the JSON).
+
+The gates are what stop a driver straightlining a slalom for a tenth, which the
+width test alone cannot see. Each cone is judged the moment the car's CG
+crosses the plane through it perpendicular to the line, going forward; on the
+wrong side of the line at that moment is a missed gate. D.8.1.7.a makes a
+missed gate an off course and D.11.3.2.b scores missing any gates of one slalom
+as ONE off course, so that is exactly what it is here: the lap is invalid, once
+per slalom per lap, logged as a `missed-gate` event. A recover resets the gates,
+so the jump itself never reads as a pass.
+
+The traced 2026 courses carry their slaloms from the published course maps
+(fsaeonline.com, Formula SAE IC 2026 MapViewer), read against the maps' 100 ft
+grid:
+
+- **Autocross** -- outbound leg at 850-950 ft, five cones at 25 ft (7.62 m);
+  return leg at 1030-1180 ft, four cones at 40 ft (12.19 m). The bigger waves
+  at 1200-1450 ft on both legs are 60-70 ft apart: esses, not a slalom.
+- **Endurance** -- two dashed pens on the pit-side (bottom) straight, at
+  1171-1360 ft and -25-165 ft, six cones each at 11 m.
+
+The trace follows the slalom line through each, which is why they read as
+straights in the geometry; `tools/prepare_data.py` places the cones from the
+`SLALOMS` table and opens the pens.
+
 ### Michigan International Speedway
 
 A third entry in the track menu, and a different thing to the two courses: a

@@ -19,7 +19,7 @@ mod wheel;
 /// line. Everything is optional; the launch screen fills in the rest.
 ///
 /// ```text
-/// fsae-sim [--track autocross|endurance|mis] [--profile keyboard|gamepad-xbox|gamepad-ps|wheel]
+/// fsae-sim [--track autocross|endurance|mis|gen-ax-SEED|gen-en-SEED] [--profile keyboard|gamepad-xbox|gamepad-ps|wheel]
 ///          [--tc on|off] [--abs on|off] [--auto-shift on|off]
 ///          [--driver NAME] [--driver-id ID] [--replay RUN] [--ghost RUN]
 ///          [--reference RUN]

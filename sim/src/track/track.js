@@ -8,8 +8,14 @@
 
 import { SDM26 } from "../vehicle/params.js";
 import { bodyBoxFor } from "../render/carmesh.js";
+import { generateTrack, parseGeneratedId, EVENTS as GEN_EVENTS } from "./generate.js";
 
 const CELL = 12; // m, spatial hash cell size
+
+/** How far from the car a slalom cone's gate is watched. Comfortably more
+ *  than a frame's travel, and a cone further away than this cannot be the
+ *  one the car is passing. */
+const GATE_RANGE = 24;
 
 // Cell keys are a single number, not a "cx,cy" string. The renderer asks for
 // every cone within 280 m each frame, which is a 49 x 49 block of cells;
@@ -50,7 +56,13 @@ export class Track {
     this.closed = data.closed;
     this.length = data.lengthM;
     this.width = data.widthM;
+    // Optional per-point width. A generated endurance course opens up
+    // through its passing zones; everywhere else, and on every traced
+    // course, the width is the one number.
+    this.widths = Array.isArray(data.widths) && data.widths.length === data.centerline.length ? data.widths : null;
     this.source = data.source;
+    // What a procedural course was built from, for the menu; null otherwise.
+    this.generated = data.generated ?? null;
     this.center = data.centerline;
     this.heading = data.heading;
     this.curvature = data.curvature;
@@ -59,7 +71,21 @@ export class Track {
 
     // Cones: [x, y, side]. `down` is set when the car knocks one over --
     // FSAE scores a downed-or-displaced cone at +2 s, so we track them.
-    this.cones = data.cones.map(([x, y, side]) => ({ x, y, side, down: false }));
+    //
+    // Side 2 is a slalom cone, and it carries a GATE: the direction of the
+    // slalom's line (dx, dy) and which side of the line the car must be on
+    // when it passes -- `pass` +1 for the left, -1 for the right -- plus the
+    // slalom it belongs to. `along` is the gate's own state: where the car
+    // was relative to the cone's plane last frame. See `checkGates`.
+    this.cones = data.cones.map((c) => {
+      const [x, y, side] = c;
+      const cone = { x, y, side, down: false };
+      if (side === 2 && c.length >= 7) {
+        cone.gate = { dx: c[3], dy: c[4], pass: c[5], group: c[6], along: null };
+      }
+      return cone;
+    });
+    this.slaloms = new Set(this.cones.filter((c) => c.gate).map((c) => c.gate.group)).size;
 
     this.centerGrid = new Grid(CELL);
     for (let i = 0; i < this.center.length; i++) {
@@ -71,6 +97,10 @@ export class Track {
     this.lastIndex = 0;
     this._nearOut = null; // conesNear cache, see below
   }
+
+  /** Course width at centreline index `i`: the nominal width, or the local
+   *  one where the course has been opened up. */
+  widthAt(i) { return this.widths ? this.widths[i] : this.width; }
 
   /** Pose of the starting grid slot: on the centreline, facing down the course. */
   startPose() {
@@ -173,7 +203,7 @@ export class Track {
       index,
       s,
       lateral,
-      onTrack: Math.abs(lateral) <= this.width / 2 + wheelReach,
+      onTrack: Math.abs(lateral) <= this.widthAt(index) / 2 + wheelReach,
       headingErrorRad: he,
       curvature: this.curvature[index],
     };
@@ -223,7 +253,54 @@ export class Track {
     return hits;
   }
 
-  resetCones() { for (const c of this.cones) { c.down = false; c.downAt = null; } }
+  resetCones() {
+    for (const c of this.cones) { c.down = false; c.downAt = null; }
+    this.resetGates();
+  }
+
+  /**
+   * Forget where the car was relative to every gate. After a respawn or a
+   * recover the car has jumped, and a jump across a cone's plane is not a
+   * pass through its gate in either direction: the next frame re-arms the
+   * gates from wherever the car now is, without judging.
+   */
+  resetGates() { for (const c of this.cones) if (c.gate) c.gate.along = null; }
+
+  /**
+   * Slalom gates.
+   *
+   * D.8.1.7.a: an off course is "the vehicle did not pass through a gate in
+   * the required direction", and D.11.3.2 / D.12.12.2 score missing one or
+   * more gates of a slalom as ONE off course. A driver who straightlines a
+   * slalom stays inside the corridor's width, so the edge test never sees
+   * it; this does.
+   *
+   * Each slalom cone is judged the moment the car's CG crosses the plane
+   * through the cone perpendicular to the slalom's line, going forward. On
+   * the wrong side of the line at that moment is a missed gate. Crossing
+   * backwards is ignored, and a cone the car never gets near is not judged
+   * -- which is fine, because a car that far from the line is off course
+   * by the width rule anyway.
+   *
+   * @param pose {x, y}
+   * @returns the slalom ids whose gate was just missed, one per cone
+   */
+  checkGates(pose) {
+    const missed = [];
+    if (!this.slaloms) return missed;
+    for (const cone of this.conesNear(pose.x, pose.y, GATE_RANGE)) {
+      const g = cone.gate;
+      if (!g) continue;
+      const rx = pose.x - cone.x, ry = pose.y - cone.y;
+      const along = rx * g.dx + ry * g.dy;
+      const prev = g.along;
+      g.along = along;
+      if (prev == null || !(prev < 0 && along >= 0)) continue;
+      const lateral = -g.dy * rx + g.dx * ry; // left of the line is positive
+      if ((lateral >= 0 ? 1 : -1) !== g.pass) missed.push(g.group);
+    }
+    return missed;
+  }
 
   /**
    * Cones within `range` metres of (x, y) -- what the renderer needs to draw.
@@ -262,9 +339,38 @@ export async function loadTrack(url) {
   return new Track(await res.json());
 }
 
+/** A procedural course from its id (`gen-ax-K7Q2`), built on the spot. */
+export function generatedTrack(id) {
+  const g = parseGeneratedId(id);
+  if (!g) throw new Error(`not a generated course id: ${id}`);
+  return new Track(generateTrack(g));
+}
+
 export const TRACKS = [
   { id: "autocross", label: "Autocross 2026", url: "./data/track-autocross.json" },
   { id: "endurance", label: "Endurance 2026", url: "./data/track-endurance.json" },
   { id: "mis", label: "Michigan International Speedway", url: "./data/venue-mis.json",
     kind: "venue" },
 ];
+
+/**
+ * What a track id names: one of the TRACKS entries, or a generated course
+ * (`kind: "generated"`, with its event and seed). Null for anything else,
+ * which is how a run manifest from a build that had a course this one
+ * does not is kept off the selector.
+ */
+export function trackSpec(id) {
+  const fixed = TRACKS.find((t) => t.id === id);
+  if (fixed) return fixed;
+  const g = parseGeneratedId(id);
+  if (!g) return null;
+  return {
+    id: `gen-${GEN_EVENTS[g.event].short}-${g.seed}`,
+    label: `${GEN_EVENTS[g.event].label} ${g.seed}`,
+    kind: "generated",
+    event: g.event,
+    seed: g.seed,
+  };
+}
+
+export const isTrackId = (id) => trackSpec(id) !== null;

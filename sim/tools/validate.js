@@ -1351,10 +1351,11 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
   for (const [event, minWidth] of Object.entries(MIN_WIDTH_M)) {
     const t = JSON.parse(readFileSync(join(here, "..", "data", `track-${event}.json`), "utf8"));
     check(`${event} is at least the rules minimum wide`, t.widthM, minWidth, 99, " m");
-    // Every cone, not a sample: one stale cone is one cone in the road.
-    const half = t.widthM / 2;
-    let worst = 0;
-    for (const [cx, cy] of t.cones) {
+    // Every cone, not a sample: one stale cone is one cone in the road. The
+    // edge is the LOCAL width -- the corridor opens into a pen through each
+    // slalom -- and a slalom cone (side 2) is on the line, not the edge.
+    let worst = 0, worstSlalom = 0, slalomCones = 0;
+    for (const [cx, cy, side] of t.cones) {
       let bi = 0, bd = Infinity;
       for (let i = 0; i < t.centerline.length; i++) {
         const dx = cx - t.centerline[i][0], dy = cy - t.centerline[i][1];
@@ -1363,9 +1364,13 @@ console.log("\nCAD IMPORT  (glTF binary loader)");
       }
       const h = t.heading[bi];
       const lat = -(cx - t.centerline[bi][0]) * Math.sin(h) + (cy - t.centerline[bi][1]) * Math.cos(h);
+      if (side === 2) { slalomCones++; worstSlalom = Math.max(worstSlalom, Math.abs(lat)); continue; }
+      const half = (t.widths ? t.widths[bi] : t.widthM) / 2;
       worst = Math.max(worst, Math.abs(Math.abs(lat) - half));
     }
     check(`${event} cones sit on the edge of that width`, worst, 0, 0.02, " m");
+    check(`${event} slalom cones sit on the line`, worstSlalom, 0, 0.05, " m");
+    check(`${event} has its slaloms from the course map`, slalomCones, 9, 12, " cones");
   }
 }
 

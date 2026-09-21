@@ -7,7 +7,8 @@ import { loadCarModel, loadWheelModel, loadBodyModel } from "./render/glbcar.js"
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
-import { loadTrack, TRACKS } from "./track/track.js";
+import { loadTrack, TRACKS, trackSpec, isTrackId, generatedTrack } from "./track/track.js";
+import { generatedTrackId, parseGeneratedId, randomSeed, normaliseSeed, describeGenerated, EVENTS as GEN_EVENTS } from "./track/generate.js";
 import { loadVenue } from "./track/venue.js";
 import { Renderer } from "./render/renderer.js";
 import { GpuHold } from "./render/gpuHold.js";
@@ -79,7 +80,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.5.7";
+export let SIM_VERSION = "0.6.0";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
@@ -366,11 +367,16 @@ class Game {
   async load(trackId) {
     // Loading a course abandons whatever was being driven on the last one.
     this.endRun("track-changed");
-    const spec = TRACKS.find((t) => t.id === trackId) ?? TRACKS[0];
+    const spec = trackSpec(trackId) ?? TRACKS[0];
     this.trackId = spec.id;
     const [curve, track, cadCar, cadWheel, cadBody] = await Promise.all([
       loadTorqueCurve(),
-      spec.kind === "venue" ? loadVenue(spec.url) : loadTrack(spec.url),
+      spec.kind === "venue" ? loadVenue(spec.url)
+        // A procedural course is built here and now from its seed; there is
+        // no file. It takes tens of milliseconds for an autocross and up to
+        // half a second for an endurance lap that was hard to close.
+        : spec.kind === "generated" ? Promise.resolve().then(() => generatedTrack(spec.id))
+        : loadTrack(spec.url),
       // Optional CAD bodywork. Absent is the normal case, not an error, so
       // this resolves to null rather than rejecting and taking the load with
       // it.
@@ -664,6 +670,8 @@ class Game {
       : Math.max(0, loc.index - 6);
     const p = this.track.poseAt(back);
     this.car.respawn(p.x, p.y, p.psi, 0);
+    // The jump must not read as a pass through any slalom gate.
+    this.track.resetGates?.();
     this.audio.reset();
     this.timing.say("RECOVERED", 1.5);
   }
@@ -889,9 +897,17 @@ class Game {
     // ---- course state ----
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
     const hits = this.track.strikeCones(this.pose(), this.carGeometry().box);
+    // Slalom gates: a cone passed on the wrong side is an off course the
+    // width test cannot see. Judged every frame the run is live.
+    const missedGates = this.track.checkGates ? this.track.checkGates(this.pose()) : [];
     const wasStaged = this.timing.state === "staged";
     const wasRunning = this.timing.state === "running";
-    this.timing.update(dt, loc, this.car.speed, hits);
+    this.timing.update(dt, loc, this.car.speed, hits, missedGates);
+    for (const slalom of missedGates) {
+      this.recorder?.event("missed-gate", {
+        lap: this.timing.lap, slalom, x: round3(this.car.X), y: round3(this.car.Y), s: round3(loc.s),
+      });
+    }
     // Autocross ends at the finish line. The card is arranged in
     // `onRunFinished`; the run itself is banked at the bottom of this frame,
     // after the log has taken the finishing step. A closed course never
@@ -1486,7 +1502,7 @@ class Game {
     this.hideFinishMenu();
     const { manifest, telemetry } = await loadRun(runId);
     if (manifest.track && manifest.track !== this.trackId) {
-      this.dom.trackSel.value = manifest.track;
+      selectTrackInMenu(this.dom, manifest.track);
       await this.load(manifest.track);
       drawCoursePlan(this.dom.coursePlan, this.track);
     }
@@ -2102,6 +2118,10 @@ const dom = {
   menu: document.getElementById("menu"),
   startBtn: document.getElementById("start"),
   trackSel: document.getElementById("track"),
+  seedRow: document.getElementById("seedRow"),
+  seed: document.getElementById("seed"),
+  seedNew: document.getElementById("seedNew"),
+  courseNote: document.getElementById("courseNote"),
   tcToggle: document.getElementById("tc"),
   absToggle: document.getElementById("abs"),
   autoToggle: document.getElementById("auto"),
@@ -2615,7 +2635,7 @@ function wireSetupFiles(tabs, onParamChange) {
     const whenText = when && !Number.isNaN(when.getTime())
       ? when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
       : (meta.created || "");
-    const trackName = meta.track ? (TRACKS.find((t) => t.id === meta.track)?.name ?? meta.track) : "";
+    const trackName = meta.track ? (trackSpec(meta.track)?.label ?? meta.track) : "";
     const metaBits = [
       meta.author ? `by ${meta.author}` : "",
       whenText,
@@ -2685,6 +2705,41 @@ let game;
 /** `boot`'s course loader, for the Runs tab's Chase. */
 let loadCourseFromSelect = async () => false;
 
+// ---- the course selector -------------------------------------------------
+//
+// The <select> holds the fixed courses by id and two generated entries,
+// `gen-ax` and `gen-en`, whose actual course id is completed by the seed
+// box: `gen-ax-K7Q2`. Everything that reads or sets the selection goes
+// through these, so a run manifest, a `--track` flag or a replay naming a
+// generated course lands on the right entry with its seed filled in.
+
+const GEN_CHOICE = { autocross: "gen-ax", endurance: "gen-en" };
+const isGeneratedChoice = (v) => v === GEN_CHOICE.autocross || v === GEN_CHOICE.endurance;
+
+/** The course id the menu currently names. */
+function selectedTrackId(dom) {
+  const v = dom.trackSel.value;
+  if (!isGeneratedChoice(v)) return v;
+  const event = v === GEN_CHOICE.autocross ? "autocross" : "endurance";
+  return generatedTrackId(event, dom.seed?.value ?? "");
+}
+
+/** Point the menu at a course id, seed and all. Unknown ids are ignored. */
+function selectTrackInMenu(dom, id) {
+  const g = parseGeneratedId(id);
+  if (g) {
+    dom.trackSel.value = GEN_CHOICE[g.event];
+    if (dom.seed) dom.seed.value = g.seed;
+  } else if (trackSpec(id)) {
+    dom.trackSel.value = id;
+  }
+  syncSeedRow(dom);
+}
+
+function syncSeedRow(dom) {
+  if (dom.seedRow) dom.seedRow.hidden = !isGeneratedChoice(dom.trackSel.value);
+}
+
 async function boot() {
   installDesktopBehaviour();
   if (isDesktop) {
@@ -2732,7 +2787,7 @@ async function boot() {
   dom.loadNote.textContent = "Loading course and engine data...";
   let track, curve;
   try {
-    ({ track, curve } = await game.load(dom.trackSel.value));
+    ({ track, curve } = await game.load(selectedTrackId(dom)));
   } catch (err) {
     // A missing data file used to hang here with the button greyed out and
     // nothing said. Say what is missing; the course selector retries.
@@ -2748,11 +2803,24 @@ async function boot() {
     const geometry = track.kind === "venue"
       ? `<em>${(track.length / 1000).toFixed(2)} km</em> oval, <em>${track.width.toFixed(1)} m</em> wide, infield and apron driveable`
       : `<em>${track.length.toFixed(0)} m</em>, <em>${track.cones.length}</em> cones, <em>${track.width.toFixed(1)} m</em> wide, ${track.closed ? "lapped" : "single run"}`;
+    // A generated course says what it is made of and what it was built to,
+    // because nobody has seen it before -- that is the point of it.
+    const gen = track.generated;
+    const genRows = gen ? `
+      <div><span>Seed</span><b><em>${escHtml(gen.seed)}</em> &middot; id <em>${escHtml(gen.id)}</em> &middot; type the seed on another rig for the same course</b></div>
+      <div><span>Course</span><b>${escHtml(describeGenerated(gen))}</b></div>
+      <div><span>Rules</span><b>Built to ${escHtml(gen.rule)}: estimated <em>${gen.estimate.avgKmh.toFixed(0)} km/h</em> average
+        (rule ${GEN_EVENTS[gen.event].avgSpeedKmh.join("&ndash;")}), about <em>${fmt(gen.estimate.timeS)}</em> a ${track.closed ? "lap" : "run"}</b></div>` : "";
     dom.specs.innerHTML = `
-      <div><span>Layout</span><b>${geometry}</b></div>
+      <div><span>Layout</span><b>${geometry}</b></div>${genRows}
       <div><span>Engine</span><b><em>${pt.peakTorque.torqueNm.toFixed(1)} N.m</em> at ${pt.peakTorque.rpm} rpm,
         <em>${pt.peakPower.powerKW.toFixed(1)} kW</em> at ${pt.peakPower.rpm} rpm</b></div>
       <div><span>Source</span><b>${curve.name}</b></div>`;
+    if (dom.courseNote) {
+      dom.courseNote.textContent = gen
+        ? "A procedural course, laid out to the rulebook from the seed: straights, constant turns, hairpins, slaloms and chicanes with the rules' dimensions. Same seed, same course, on any machine. Cones score +2 s each; leaving the course voids the run (autocross) or the lap (endurance)."
+        : "Traced 2026 Michigan geometry from the Helios lap sim, resampled to 1 m. Cones score +2 s each; leaving the course voids the run (autocross) or the lap (endurance).";
+    }
     drawCoursePlan(dom.coursePlan, track);
     updateSession();
   };
@@ -2768,7 +2836,7 @@ async function boot() {
     dom.loadNote.textContent = "Loading course...";
     dom.loadNote.classList.remove("error");
     try {
-      const loaded = await game.load(dom.trackSel.value);
+      const loaded = await game.load(selectedTrackId(dom));
       if (seq !== loadSeq) return; // a later change won
       showCourse(loaded.track, loaded.curve);
       dom.loadNote.textContent = "";
@@ -2782,7 +2850,23 @@ async function boot() {
     dom.startBtn.disabled = false;
     return true;
   };
-  dom.trackSel.addEventListener("change", loadCourse);
+  // The seed box only means something for a generated course; the selector
+  // shows and hides it, and either a new seed or a new selection reloads.
+  const seedChanged = () => {
+    const clean = normaliseSeed(dom.seed.value);
+    if (!clean) dom.seed.value = randomSeed();
+    else if (clean !== dom.seed.value) dom.seed.value = clean;
+    loadCourse();
+  };
+  dom.trackSel.addEventListener("change", () => {
+    syncSeedRow(dom);
+    if (isGeneratedChoice(dom.trackSel.value) && !normaliseSeed(dom.seed.value)) dom.seed.value = randomSeed();
+    loadCourse();
+  });
+  dom.seed?.addEventListener("change", seedChanged);
+  dom.seed?.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); dom.seed.blur(); } });
+  dom.seedNew?.addEventListener("click", () => { dom.seed.value = randomSeed(); loadCourse(); });
+  syncSeedRow(dom);
   loadCourseFromSelect = loadCourse;
 
   // Losing the window (alt-tab, minimise, another app grabbing focus) pauses
@@ -3189,8 +3273,8 @@ async function boot() {
   const onOff = (v) => (v == null ? undefined : /^(1|on|true|yes)$/i.test(String(v)) ? true : /^(0|off|false|no)$/i.test(String(v)) ? false : undefined);
   const applyLaunch = async (o) => {
     if (!o) return;
-    if (o.track && TRACKS.some((t) => t.id === o.track) && o.track !== dom.trackSel.value) {
-      dom.trackSel.value = o.track;
+    if (o.track && isTrackId(o.track) && trackSpec(o.track).id !== selectedTrackId(dom)) {
+      selectTrackInMenu(dom, o.track);
       if (!(await loadCourse())) return;
     }
     // ---- what a launcher may decide, and what it may not --------------
@@ -3404,8 +3488,8 @@ async function chaseRun(runId) {
   try {
     dom.loadNote.classList.remove("error");
     const { manifest } = await loadRun(runId);
-    if (manifest.track && manifest.track !== game.trackId && TRACKS.some((t) => t.id === manifest.track)) {
-      dom.trackSel.value = manifest.track;
+    if (manifest.track && manifest.track !== game.trackId && isTrackId(manifest.track)) {
+      selectTrackInMenu(dom, manifest.track);
       if (!(await loadCourseFromSelect())) return;
     }
     const ok = await game.loadReference(runId);

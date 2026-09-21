@@ -12,7 +12,9 @@
 //
 // D.8.1.7 defines an off course (OC) as the vehicle having "all four wheels
 // outside the course boundary as indicated by cones, edge marking or the edge
-// of the paved surface", or missing a gate. D.11.3.2 / D.12.12.2 then score
+// of the paved surface", or missing a gate -- and a slalom is gates: missing
+// any of one slalom's gates is one OC (D.11.3.2.b). Track.checkGates judges
+// the slalom cones; the score lands here beside the boundary excursions. D.11.3.2 / D.12.12.2 then score
 // it: "the driver must reenter the track at or prior to the point of exit or
 // receive a 20 second penalty". The time is KEPT. It is not a DNF, and a
 // comment here used to say it was, at +10 s, which was wrong twice over.
@@ -117,6 +119,9 @@ export class Timing {
     // course, and whether it has been charged to the current lap yet.
     this.offTravelM = 0;
     this.offCharged = false;
+    // Slaloms whose gates this lap has already been charged for: missing
+    // one or more gates of a slalom is ONE off course (D.11.3.2.b).
+    this.gatesCharged = new Set();
     this.prevS = 0;
     this.sectorIndex = 0;
     this.sectorSplits = [];
@@ -164,8 +169,10 @@ export class Timing {
    * @param loc       Track.locate() result
    * @param speedMps  how fast the car is actually going
    * @param newCones  cones knocked down since the last call
+   * @param missedGates  slalom ids whose gate the car just missed
+   *                     (Track.checkGates); each slalom is charged once a lap
    */
-  update(dt, loc, speedMps, newCones) {
+  update(dt, loc, speedMps, newCones, missedGates = null) {
     this.clock += dt;
     if (this.clock > this.messageUntil) this.message = "";
     if (this.state === "finished") return;
@@ -211,6 +218,19 @@ export class Timing {
       }
     } else if (this.wasOffCourse) {
       this.wasOffCourse = false;
+    }
+
+    // A missed slalom gate is an off course by definition (D.8.1.7.a), and
+    // is scored exactly as one: the lap is gone. One charge per slalom per
+    // lap, however many of its cones were missed.
+    if (missedGates && missedGates.length) {
+      for (const group of missedGates) {
+        if (this.gatesCharged.has(group)) continue;
+        this.gatesCharged.add(group);
+        this.offCourse++;
+        this.say("MISSED GATE - LAP INVALID", 2.5);
+        this.onCue?.("off");
+      }
     }
 
     // ---- sector times ----
@@ -381,6 +401,7 @@ export class Timing {
     // that began off course counted as clean however far it cut, which is
     // exactly the cheat the rule exists to stop.
     this.offCharged = false;
+    this.gatesCharged = new Set();
     this.sectorIndex = 0;
     this.sectorSplits = [];
     this.sectorStart = 0;

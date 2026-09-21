@@ -1551,8 +1551,11 @@ export class Renderer {
       const [x, y] = track.center[i];
       const h = track.heading[i];
       const nx = -Math.sin(h), ny = Math.cos(h);
+      // The local half width: a generated endurance course opens up through
+      // its passing zones, and the ribbon has to follow the cones out.
+      const hw = track.widthAt ? track.widthAt(i) / 2 : half;
       for (const sgn of [1, -1]) {
-        pos.push(x + nx * half * sgn, 0.012, -(y + ny * half * sgn));
+        pos.push(x + nx * hw * sgn, 0.012, -(y + ny * hw * sgn));
         sArr.push(track.s[i]);
         side.push(sgn);
       }

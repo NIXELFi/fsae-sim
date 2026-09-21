@@ -147,6 +147,10 @@
     width: 100%; aspect-ratio: 16 / 9; max-height: 240px; display: block; border-radius: var(--radius);
     background: var(--panel-2); border: 1px solid var(--line);
   }
+  .seed-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; margin-top: 10px; }
+  .seed-row .field { margin: 0; }
+  .seed-row input[type="text"] { font-family: var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+  .seed-row button.secondary { padding: 7px 12px; white-space: nowrap; }
   #specs { margin-top: 14px; display: grid; gap: 6px; font-size: 12.5px; }
   #specs div { display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: baseline; }
   #specs span { color: var(--dim); }
@@ -892,12 +896,19 @@
                 <option value="autocross">Autocross 2026 - 685 m, single run</option>
                 <option value="endurance">Endurance 2026 - 2.12 km, lapped</option>
                 <option value="mis">Michigan International Speedway - venue, free roam</option>
+                <option value="gen-ax">Generated autocross - a new course from a seed, single run</option>
+                <option value="gen-en">Generated endurance - a new lapped course from a seed</option>
               </select>
+              <div class="seed-row" id="seedRow" hidden>
+                <label class="field" for="seed">Seed</label>
+                <input id="seed" type="text" maxlength="12" placeholder="e.g. K7Q2" autocomplete="off" spellcheck="false">
+                <button type="button" class="secondary" id="seedNew">New seed</button>
+              </div>
               <div id="specs"></div>
             </div>
             <div>
               <canvas class="plan" id="coursePlan" aria-label="Plan view of the selected course"></canvas>
-              <p class="note" style="margin:8px 0 0">
+              <p class="note" style="margin:8px 0 0" id="courseNote">
                 Traced 2026 Michigan geometry from the Helios lap sim, resampled to 1 m.
                 Cones score +2 s each; leaving the course voids the run (autocross) or the lap (endurance).
               </p>
