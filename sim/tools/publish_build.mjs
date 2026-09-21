@@ -2,6 +2,8 @@
 //
 //   node sim/tools/publish_build.mjs --version 0.2.0 [--notes "..."] [--dry-run]
 //                                    [--platform macos --exe path/to/fsae-sim]
+//                                    [--no-prune]
+//   node sim/tools/publish_build.mjs --prune-only [--platform windows] [--dry-run]
 //
 // Needs, in the environment:
 //   SUPABASE_URL          https://<ref>.supabase.co
@@ -11,6 +13,7 @@
 //   1. hashes the built executable
 //   2. uploads it to  sim/<platform>/<version>/fsae-sim.exe
 //   3. rewrites  sim/feed.json  to point at it
+//   4. retires the builds the feed can no longer reach (see KEEP_BUILDS)
 //
 // The feed is what Helios reads. It is deliberately a plain public JSON file
 // with a SHA-256 in it rather than anything cleverer: Helios verifies the hash
@@ -29,6 +32,8 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { buildsToDelete, KEEP_BUILDS } from "./build_retention.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.join(HERE, "..", "..");
 
@@ -44,11 +49,14 @@ const NOTES = arg("notes", "");
 const DRY = has("dry-run");
 const BUCKET = arg("bucket", "sim");
 
-if (!VERSION) {
+// `--prune-only` publishes nothing, so it has no version to be given.
+const PRUNE_ONLY = has("prune-only");
+
+if (!PRUNE_ONLY && !VERSION) {
   console.error("publish_build: --version is required (e.g. --version 0.2.0)");
   process.exit(1);
 }
-if (!/^[A-Za-z0-9._-]{1,64}$/.test(VERSION)) {
+if (!PRUNE_ONLY && !/^[A-Za-z0-9._-]{1,64}$/.test(VERSION)) {
   console.error(`publish_build: "${VERSION}" is not usable as a version (it becomes a directory name)`);
   process.exit(1);
 }
@@ -70,14 +78,14 @@ const exePath = arg("exe")
   ? path.resolve(arg("exe"))
   : path.join(REPO, "sim", "src-tauri", "target", "release", EXE_NAME);
 
-if (!fs.existsSync(exePath)) {
+if (!PRUNE_ONLY && !fs.existsSync(exePath)) {
   console.error(`publish_build: no build at ${exePath}`);
   console.error("  cargo build --release --manifest-path sim/src-tauri/Cargo.toml");
   process.exit(1);
 }
 
-const bytes = fs.statSync(exePath).size;
-const sha256 = crypto.createHash("sha256").update(fs.readFileSync(exePath)).digest("hex");
+const bytes = PRUNE_ONLY ? 0 : fs.statSync(exePath).size;
+const sha256 = PRUNE_ONLY ? "" : crypto.createHash("sha256").update(fs.readFileSync(exePath)).digest("hex");
 
 // The version in the feed has to be the version the BINARY calls itself.
 //
@@ -88,7 +96,9 @@ const sha256 = crypto.createHash("sha256").update(fs.readFileSync(exePath)).dige
 // still says 0.1.0. Nothing downstream can detect that; only here, where
 // both numbers are in the same room, can it be caught.
 const HOST = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
-if (PLATFORM !== HOST) {
+if (PRUNE_ONLY) {
+  // Nothing is being published, so there is no version to agree about.
+} else if (PLATFORM !== HOST) {
   // A macOS binary cannot answer `--version` on Windows. The build workflow
   // prints it in the job log, and that is where the number on the command
   // line has to come from -- say so, loudly, rather than pretend to check.
@@ -235,6 +245,62 @@ async function upload(objPath, body, contentType, cacheControl) {
 }
 
 /**
+ * Everything in the bucket, as full object names.
+ *
+ * The list API returns one level at a time and marks a folder by giving the
+ * row no `id`, so this recurses. A build lives at `<platform>/<version>/<file>`,
+ * which is two levels down.
+ */
+async function listObjects(prefix = "") {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/list/${BUCKET}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${KEY}`, apikey: KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ prefix, limit: 1000, sortBy: { column: "name", order: "asc" } }),
+  });
+  if (!res.ok) throw new Error(`list ${BUCKET}: ${res.status} ${await res.text()}`);
+  const rows = await res.json();
+  const out = [];
+  for (const row of rows) {
+    const name = prefix ? `${prefix}/${row.name}` : row.name;
+    if (row.id == null) out.push(...(await listObjects(name)));
+    else out.push(name);
+  }
+  return out;
+}
+
+/** Remove objects by name. Only ever called with what `buildsToDelete` chose. */
+async function removeObjects(names) {
+  if (!names.length) return;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${KEY}`, apikey: KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ prefixes: names }),
+  });
+  if (!res.ok) throw new Error(`delete from ${BUCKET}: ${res.status} ${await res.text()}`);
+}
+
+/**
+ * Retire the builds the feed can no longer reach. See `KEEP_BUILDS`.
+ *
+ * Never fatal to a publish. A run that put the build up and rewrote the feed
+ * has succeeded, and reporting failure because the tidying afterwards did not
+ * go through would send somebody looking for a broken release that is fine.
+ */
+async function prune() {
+  const stale = buildsToDelete(await listObjects(), PLATFORM);
+  if (!stale.length) {
+    console.log(`prune   nothing to retire (${KEEP_BUILDS} ${PLATFORM} builds kept at most)`);
+    return stale;
+  }
+  console.log(`retiring ${stale.length} old ${PLATFORM} build(s):`);
+  for (const name of stale) console.log(`        ${name}`);
+  if (DRY) { console.log("        --dry-run: nothing deleted"); return stale; }
+  if (has("no-prune")) { console.log("        --no-prune: left in place"); return stale; }
+  await removeObjects(stale);
+  return stale;
+}
+
+/**
  * The feed as it stands, or an explanation of why it could not be read.
  *
  * The distinction matters more than it looks. The feed is REWRITTEN below with
@@ -287,6 +353,16 @@ async function readFeed() {
 // rather than like a missing bucket.
 await ensureBucket();
 
+// `--prune-only`: retire old builds and publish nothing. This is the one-time
+// cleanup, and the way to tidy the bucket without cutting a release.
+if (PRUNE_ONLY) {
+  const stale = await prune();
+  console.log(DRY
+    ? `--dry-run: ${stale.length} object(s) would have been retired.`
+    : `retired ${stale.length} object(s).`);
+  process.exit(0);
+}
+
 const read = await readFeed();
 if (read.error) {
   console.error(`\npublish_build: ${read.error}`);
@@ -337,6 +413,12 @@ await upload("feed.json", JSON.stringify(feed, null, 2), "application/json",
   } catch {
     console.warn("\n(could not read the feed back to check it; the upload succeeded)");
   }
+}
+
+try {
+  await prune();
+} catch (err) {
+  console.warn(`(could not retire old builds: ${err?.message ?? err})`);
 }
 
 console.log(`\npublished ${VERSION} for ${PLATFORM}`);
