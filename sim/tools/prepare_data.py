@@ -92,10 +92,13 @@ SLALOMS = {
 SLALOM_ROOM_M = 3.0
 
 # A pointer cone lies on its side beside each slalom cone, on the side the
-# car must pass, tip pointing that way -- how a real course tells a driver
-# which way through. Its base sits this far from the standing cone. Mirrors
+# car must NOT pass, its tip touching the base of the upright cone and
+# pointing across it to the side the car must go -- how a real course tells
+# a driver which way through. The renderer lays a cone tip-first along its
+# direction from the base edge (0.155 m) over its height (0.46 m), so a
+# base this far behind the upright cone puts the tip against it. Mirrors
 # POINTER_OFFSET_M in src/track/generate.js.
-POINTER_OFFSET_M = 0.45
+POINTER_OFFSET_M = 0.155 + 0.46 + 0.155
 
 
 def resample(points, closed, step):
@@ -220,9 +223,10 @@ def place_slaloms(center, heading, curv, s, closed, event, width):
                 cx, cy = center[j]
             passes = first * (1 if k % 2 == 0 else -1)
             cones.append([round(cx, 3), round(cy, 3), 2, round(dx, 5), round(dy, 5), passes, group])
-            # Its pointer: [x, y, 3, tipX, tipY], lying on the pass side.
+            # Its pointer: [x, y, 3, tipX, tipY], lying on the far side with
+            # its tip at the upright cone, pointing to the pass side.
             px, py = -dy * passes, dx * passes
-            cones.append([round(cx + px * POINTER_OFFSET_M, 3), round(cy + py * POINTER_OFFSET_M, 3), 3,
+            cones.append([round(cx - px * POINTER_OFFSET_M, 3), round(cy - py * POINTER_OFFSET_M, 3), 3,
                           round(px, 5), round(py, 5)])
         # The pen: open between the first and last cone, tapering over one
         # lead-in / lead-out of three quarters of a spacing.

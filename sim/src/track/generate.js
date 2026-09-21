@@ -105,9 +105,15 @@ const CLEARANCE_EXTRA_M = 4.0;
 const SLALOM_ROOM_M = 3.0;
 const SLALOM_AMPLITUDE_M = { autocross: 1.35, endurance: 1.5 };
 
-/** A pointer cone lies on its side beside each slalom cone, on the side the
- *  car must pass, tip pointing that way; its base sits this far out. */
-const POINTER_OFFSET_M = 0.45;
+/**
+ * A pointer cone lies on its side beside each slalom cone, on the side the
+ * car must NOT pass, its tip touching the base of the upright cone and
+ * pointing across it to the side the car must go. The renderer lays a cone
+ * tip-first along its direction from the base edge (0.155 m) over its
+ * height (0.46 m), so a base this far behind the upright puts the tip
+ * against it.
+ */
+const POINTER_OFFSET_M = 0.155 + 0.46 + 0.155;
 
 /** A passing zone is a second lane: the course opens to twice its width. */
 const PASSING_WIDTH_FACTOR = 2.0;
@@ -929,9 +935,10 @@ function finish(ev, chain, seed, attemptNo) {
       const [x, y] = shift([e.poseIn.x + c * along, e.poseIn.y + sn * along]);
       const pass = e.dir * (i % 2 === 0 ? 1 : -1);
       cones.push([r3(x), r3(y), 2, r3(c), r3(sn), pass, group]);
-      // Its pointer: [x, y, 3, tipX, tipY], lying on the pass side.
+      // Its pointer: [x, y, 3, tipX, tipY], lying on the far side with its
+      // tip at the upright cone, pointing to the pass side.
       const px = -sn * pass, py = c * pass;
-      cones.push([r3(x + px * POINTER_OFFSET_M), r3(y + py * POINTER_OFFSET_M), 3, r3(px), r3(py)]);
+      cones.push([r3(x - px * POINTER_OFFSET_M), r3(y - py * POINTER_OFFSET_M), 3, r3(px), r3(py)]);
     });
   });
 

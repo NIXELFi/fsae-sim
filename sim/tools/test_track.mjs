@@ -161,15 +161,20 @@ section("the traced 2026 courses carry their slaloms");
     ok(pointers.every((c) => c.down && c.side === 3), `${id}: pointers are down`);
     t.resetCones();
     ok(pointers.every((c) => c.down), `${id}: pointers stay down through a reset`);
-    let onPassSide = 0;
+    // Each pointer lies on the far side of its upright cone, base 0.77 m
+    // back so the tip (0.155 + 0.46 along its direction) touches the
+    // upright's base edge, and points across to the pass side.
+    let placed = 0;
     for (const g of gates) {
-      const near = pointers.find((p) => Math.hypot(p.x - g.x, p.y - g.y) < 0.6);
+      const near = pointers.find((p) => Math.hypot(p.x - g.x, p.y - g.y) < 1.0);
       if (!near) continue;
       const lat = -g.gate.dy * (near.x - g.x) + g.gate.dx * (near.y - g.y);
       const tip = Math.cos(near.downDir) * -g.gate.dy + Math.sin(near.downDir) * g.gate.dx;
-      if (Math.sign(lat) === g.gate.pass && Math.sign(tip) === g.gate.pass) onPassSide++;
+      const tipX = near.x + Math.cos(near.downDir) * (0.155 + 0.46), tipY = near.y + Math.sin(near.downDir) * (0.155 + 0.46);
+      const touch = Math.abs(Math.hypot(tipX - g.x, tipY - g.y) - 0.155) < 0.02;
+      if (Math.sign(lat) === -g.gate.pass && Math.sign(tip) === g.gate.pass && touch) placed++;
     }
-    ok(onPassSide === gates.length, `${id}: pointers lie on the pass side and point that way (${onPassSide}/${gates.length})`);
+    ok(placed === gates.length, `${id}: pointers lie on the far side, tip on the upright, pointing to the pass side (${placed}/${gates.length})`);
     // A pointer is never struck: drive the box straight over one.
     const p0 = pointers[0];
     const hits = t.strikeCones({ x: p0.x, y: p0.y, psi: 0 }, { front: 0.5, rear: 0.5, halfWidth: 0.5 });
