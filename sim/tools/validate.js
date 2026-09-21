@@ -740,6 +740,30 @@ console.log("\nSTEERING FEEL  (rim torque for force feedback)");
   check("mixer: wheelspin makes texture", spun.textureNm, 0.2, 3, " N.m");
   const inv = new ForceFeedback().update(1 / 60, { ...cfg, invert: true }, gentle, { deg: -20, halfLockDeg: 56 }, feel);
   check("mixer: invert flips the command", inv.command / turned.command, -1.0001, -0.9999, "");
+
+  // The two small-base effects. Off by default, and when off a sliding,
+  // unbalanced car mixes exactly as it did before they existed.
+  const sliding = { ...gentle, utilF: 1.5, utilR: 2.0, slipR: 14, balance: 0.8 };
+  const plain = new ForceFeedback().update(1 / 60, cfg, sliding, { deg: -20, halfLockDeg: 56 }, feel);
+  const asBefore = new ForceFeedback().update(1 / 60, { ...cfg, understeerEffect: 0, oversteerEffect: 0 }, sliding, { deg: -20, halfLockDeg: 56 }, feel);
+  check("effects: off by default leaves the mix alone", Math.abs(plain.command - asBefore.command) + Math.abs(plain.oversteer), 0, 1e-12, "");
+  // Understeer effect: untouched under the front's peak, 40% left once slid,
+  // same sign throughout.
+  const usCfg = { ...cfg, understeerEffect: 0.6 };
+  const gripping = new ForceFeedback().update(1 / 60, usCfg, { ...gentle, utilF: 0.5 }, { deg: -20, halfLockDeg: 56 }, feel);
+  const slid = new ForceFeedback().update(1 / 60, usCfg, { ...gentle, utilF: 1.5 }, { deg: -20, halfLockDeg: 56 }, feel);
+  check("understeer effect: nothing under the peak", gripping.align / turned.align, 0.9999, 1.0001, "");
+  check("understeer effect: 40% left when slid", slid.align / turned.align, 0.3999, 0.4001, "");
+  // Oversteer effect: a left turn with the rear ahead of the front pushes
+  // clockwise, half of rated at full effect; the mirror image for a right
+  // turn; nothing when balanced.
+  const osCfg = { ...cfg, oversteerEffect: 0.5 };
+  const loose = new ForceFeedback().update(1 / 60, osCfg, { ...straight, slipF: 3, slipR: 12, utilF: 0.4, utilR: 1.2, balance: 0.8 }, { deg: 0, halfLockDeg: 56 }, feel);
+  check("oversteer effect: pushes clockwise in a left-hand slide", loose.oversteer / cfg.maxForceNm, 0.4999, 0.5001, "");
+  const looseR = new ForceFeedback().update(1 / 60, osCfg, { ...straight, slipF: -3, slipR: -12, utilF: 0.4, utilR: 1.2, balance: 0.8 }, { deg: 0, halfLockDeg: 56 }, feel);
+  check("oversteer effect: and anticlockwise in a right-hand one", looseR.oversteer / cfg.maxForceNm, -0.5001, -0.4999, "");
+  const balanced = new ForceFeedback().update(1 / 60, osCfg, { ...straight, slipR: 3, balance: 0.0 }, { deg: 0, halfLockDeg: 56 }, feel);
+  check("oversteer effect: nothing when balanced", Math.abs(balanced.oversteer), 0, 1e-12, "");
 }
 
 // --------------------------------------------------------------- ETC map ---

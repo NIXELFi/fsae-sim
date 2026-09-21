@@ -40,6 +40,29 @@ export function lowSpeedFade(speed) {
  * instead of flattening into a ceiling. `gamma` below 1 lifts everything under
  * full scale, the way AC's `ff_post_process` GAMMA does.
  */
+/** 0 below `a`, 1 above `b`, a cubic between. */
+export function smoothstep(x, a, b) {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Where the understeer effect starts and finishes, in normalised front slip
+ * (1.0 = the tyre's force peak). The aligning torque itself peaks at about
+ * 0.55 and is only 18% down by 1.0 -- the 19 mm of mechanical trail holds
+ * most of it up -- so the effect begins just past the model's own peak and
+ * is complete once the front is properly sliding. Same numbers as rig.rs.
+ */
+export const UNDERSTEER_SLIP_START = 0.7;
+export const UNDERSTEER_SLIP_FULL = 1.3;
+/**
+ * Where the oversteer effect starts and finishes, in rear-minus-front
+ * normalised slip (`telemetry.balance`). A balanced car sits near zero; 0.15
+ * is the rear beginning to run ahead of the front, 0.65 is a slide.
+ */
+export const OVERSTEER_BALANCE_START = 0.15;
+export const OVERSTEER_BALANCE_FULL = 0.65;
+
 export function compress(x, gamma = 1, knee = 1) {
   if (!x || !Number.isFinite(x)) return 0;
   const sign = x < 0 ? -1 : 1;
@@ -76,7 +99,7 @@ export class ForceFeedback {
       /** One-shot impact, Nm peak. Consumed by the native side, then zero. */
       kickNm: 0,
       /** Components, for the live display. All Nm, wheel frame. */
-      align: 0, damping: 0, friction: 0, jacking: 0, softLock: 0,
+      align: 0, damping: 0, friction: 0, jacking: 0, oversteer: 0, softLock: 0,
       clipped: false,
     };
   }
@@ -116,6 +139,30 @@ export class ForceFeedback {
     //    0.4-3 m/s on the rig. Nothing a driver reads lives there.
     const fade = lowSpeedFade(tel.speed);
     out.align = -tel.rimTorqueNm * cfg.alignTorqueGain * fade;
+
+    // 1b. Understeer effect. The tyre model's own cue is small: with 19 mm
+    //     of mechanical trail under a pneumatic trail that collapses, the
+    //     aligning torque drops only 18% by the force peak and 40% in a full
+    //     slide, which a 5.5 N.m base renders as 0.4 and 1.3 N.m. This
+    //     scales it down past the front's peak so the rim goes properly
+    //     light. Off at 0, the default.
+    const understeer = cfg.understeerEffect ?? 0;
+    if (understeer > 0) {
+      const past = smoothstep(tel.utilF ?? 0, UNDERSTEER_SLIP_START, UNDERSTEER_SLIP_FULL);
+      out.align *= 1 - Math.min(1, understeer) * past;
+    }
+    // 1c. Oversteer effect. With the steer held, the model's only oversteer
+    //     signal is the same lightening as understeer -- the front slip grows
+    //     with the rotation, so the torque falls but never reverses. This
+    //     pushes toward counter-steer as the rear runs ahead of the front:
+    //     positive rear slip is a left turn, where counter-steer is
+    //     clockwise, the wheel's positive. Faded with the tyres. Off at 0.
+    const oversteer = cfg.oversteerEffect ?? 0;
+    const slipR = tel.slipR ?? 0;
+    if (oversteer > 0 && Math.abs(slipR) > 1e-6) {
+      const outOfBalance = smoothstep(tel.balance ?? 0, OVERSTEER_BALANCE_START, OVERSTEER_BALANCE_FULL);
+      out.oversteer = Math.sign(slipR) * oversteer * rated * outOfBalance * fade;
+    }
 
     // 2. Damping. Proportional to rim speed, so a sudden release does not slam
     //    the wheel through centre and a spin does not whip it. `damping` is a
@@ -179,12 +226,14 @@ export class ForceFeedback {
       out.kickNm = Math.min(1, feel.coneHit) * 0.6 * rated * (rim.deg >= 0 ? -1 : 1);
     }
 
-    out.torqueNm = out.align + out.damping + out.friction + out.jacking + out.softLock;
+    out.torqueNm = out.align + out.damping + out.friction + out.jacking + out.oversteer + out.softLock;
 
     // To the motor. COMPRESS rather than clip: a hard clamp at the rated
     // torque erases the one cue this whole model exists to deliver, the rim
     // going light as the front starts to slide. See `compress` above.
-    const base = ((out.align + out.damping + out.friction + out.jacking) * cfg.gain) / rated;
+    // The oversteer push is already a fraction of rated and not a tyre
+    // torque, so it goes in after the gain.
+    const base = ((out.align + out.damping + out.friction + out.jacking) * cfg.gain) / rated + out.oversteer / rated;
     out.clipped = Math.abs(base) > 1;
     let cmd = compress(base, cfg.gamma ?? 1, cfg.knee ?? 1);
     // The floor lifts tiny commands to where the motor's own cogging and

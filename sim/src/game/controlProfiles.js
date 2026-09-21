@@ -540,6 +540,24 @@ export const PROFILES = {
       parkFriction: 0.10,
       /** Damping inside the end stop only, so the stop does not bounce. */
       stopDamping: 0.35,
+      /**
+       * Exaggerate the rim going light past the front's grip peak, 0..1.
+       *
+       * The tyre model's own cue is small: 19 mm of mechanical trail holds
+       * the aligning torque up, so it drops only 18% by the force peak and
+       * 40% in a full slide -- 0.4 and 1.3 N.m at the hands on a 5.5 N.m
+       * base, inside the noise of the driver's own arms. This scales the
+       * torque down past the peak (0.6 turns the R5's cue into ~4 N.m).
+       * Off by default; a 15 N.m base does not need it.
+       */
+      understeerEffect: 0.0,
+      /**
+       * Push the rim toward counter-steer as the rear runs ahead of the
+       * front, as a fraction of rated torque at full effect. The model's
+       * own oversteer signal is the same lightening as understeer; this
+       * gives a small base a direction as well. Off by default.
+       */
+      oversteerEffect: 0.0,
       /** Stiffness of the stop past the car's lock. */
       softLockGain: 1.0,
       /** Lift torques below this fraction of rated, past the motor's cogging. */
@@ -864,6 +882,12 @@ export function editableSettings(profile) {
         { path: "forceFeedback.knee", label: "Soft-knee start", unit: "",
           min: 0.3, max: 1, step: 0.05,
           note: "Where the peak starts compressing instead of clipping, as a fraction of rated torque. 1.0 is a hard clip." },
+        { path: "forceFeedback.understeerEffect", label: "Understeer effect", unit: "",
+          min: 0, max: 1, step: 0.05,
+          note: "Exaggerates the rim going light past the front's grip peak. 0 is the tyre model as is; try 0.6 on a 5 N.m base, 0.3 on 8, none from 15 up." },
+        { path: "forceFeedback.oversteerEffect", label: "Oversteer effect", unit: "",
+          min: 0, max: 1, step: 0.05,
+          note: "Pushes toward counter-steer as the rear runs ahead of the front, as a fraction of rated torque. 0 is off; try 0.3 on a small base." },
         { path: "forceFeedback.parkFriction", label: "Standing-still friction", unit: "",
           min: 0, max: 0.4, step: 0.01,
           note: "A stationary tyre twisting against the ground. What the paddock feels like." },

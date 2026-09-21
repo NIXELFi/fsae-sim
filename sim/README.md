@@ -898,6 +898,31 @@ standstill terms sit outside that compressor: a stop that scaled with a taste
 setting was not a stop, and a stationary tyre being scrubbed about its kingpin
 has weight whatever the gain says.
 
+**Small bases.** The shape above is the same on every base; what differs is
+the torque behind it, and on a 5.5 N.m base the limit cue is inside the noise
+of the driver's own arms. Measured with `tools/ffb_sweep.mjs` (the model,
+headless, through the same compressor): the aligning torque drops only 18% by
+the force peak and 40% in a full slide, because the 19 mm of mechanical trail
+holds it up under the collapsing pneumatic trail; after the compressor an R5
+renders that as 0.4 and 1.3 N.m, where a 20 N.m base gets 1.9 and 4.8. And
+with the steer held, oversteer arrives as the *same* lightening -- the front
+slip grows with the rotation, so the torque falls but never reverses. Two
+optional effects in the panel, **both off by default**, spend a small base's
+range on the cues instead:
+
+- **Understeer effect** scales the aligning torque down past the front's
+  grip peak (`1 - effect * smoothstep(front slip, 0.7, 1.3)` in normalised
+  slip, so nothing changes before the model's own torque peak). At 0.6 with
+  gamma 1.0 and knee 0.85 an R5 goes 5.2 N.m at the peak, 3.1 at the grip
+  peak, 1.3 in the slide: a 3.9 N.m cue in place of 1.3.
+- **Oversteer effect** pushes the rim toward counter-steer as the rear runs
+  ahead of the front (`telemetry.balance`, rear minus front normalised slip,
+  through a smoothstep from 0.15 to 0.65), as a fraction of rated torque. It
+  gives the wheel a direction: understeer is light, oversteer pulls.
+
+A 15 N.m base needs neither. Both are mixed identically in `forceFeedback.js`
+and `rig.rs`, checked in `validate.js` and the rig's own tests.
+
 If the wheel pulls the wrong way, there is an **Invert** switch -- and that
 would be worth reporting, because the sign convention is worked out rather than
 guessed.

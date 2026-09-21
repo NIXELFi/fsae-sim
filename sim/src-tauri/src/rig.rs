@@ -74,6 +74,25 @@ fn compress(x: f64, gamma: f64, knee: f64) -> f64 {
     sign * m
 }
 
+/// 0 below `a`, 1 above `b`, a cubic between.
+fn smoothstep(x: f64, a: f64, b: f64) -> f64 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Where the understeer effect starts and finishes, in normalised front slip
+/// (1.0 = the tyre's force peak). The aligning torque itself peaks at about
+/// 0.55 and is only 18 % down by 1.0 -- the 19 mm of mechanical trail holds
+/// most of it up -- so the effect begins just past the model's own peak and
+/// is complete once the front is properly sliding.
+const UNDERSTEER_SLIP_START: f64 = 0.7;
+const UNDERSTEER_SLIP_FULL: f64 = 1.3;
+/// Where the oversteer effect starts and finishes, in rear-minus-front
+/// normalised slip (`Telemetry::balance`). A balanced car sits near zero;
+/// 0.15 is the rear beginning to run ahead of the front, 0.65 is a slide.
+const OVERSTEER_BALANCE_START: f64 = 0.15;
+const OVERSTEER_BALANCE_FULL: f64 = 0.65;
+
 /// Set FSAE_RIG_TRACE=1 to print the rig's inputs and force feedback terms to stderr.
 fn trace_on() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -242,6 +261,26 @@ pub struct FfbConfig {
     /// Damping inside the end stop only, fraction of rated torque at 10 rad/s.
     /// Without it the stop is a ~6 Hz spring with nothing damping it.
     pub stop_damping: f64,
+    /// Exaggerate the rim going light past the front's grip peak, 0..1.
+    ///
+    /// The tyre model's own cue is small: with 19 mm of mechanical trail
+    /// under a pneumatic trail that collapses, the aligning torque drops
+    /// only 18 % by the force peak and 40 % in a full slide, and after the
+    /// compressor a 5.5 N.m base renders that as 0.4 and 1.3 N.m -- inside
+    /// the noise of the driver's own arms. This scales the aligning torque
+    /// by `1 - effect * smoothstep(front slip, 0.7, 1.3)`, so at 1.0 the rim
+    /// goes fully light once the front is sliding. 0 = off, the model as is.
+    pub understeer_effect: f64,
+    /// Push the rim toward counter-steer as the rear runs ahead of the
+    /// front, as a fraction of rated torque at full effect. 0 = off.
+    ///
+    /// With the steer held, the model's only oversteer signal is the same
+    /// lightening as understeer: the front slip angle grows with the
+    /// rotation, so the aligning torque falls but never reverses. This adds
+    /// a torque in the counter-steer direction proportional to
+    /// `smoothstep(rear - front normalised slip, 0.15, 0.65)`, which gives a
+    /// small base a direction as well as a weight.
+    pub oversteer_effect: f64,
 }
 
 impl Default for FfbConfig {
@@ -265,6 +304,8 @@ impl Default for FfbConfig {
             knee: 0.6,
             park_friction: 0.10,
             stop_damping: 0.35,
+            understeer_effect: 0.0,
+            oversteer_effect: 0.0,
         }
     }
 }
@@ -449,6 +490,8 @@ pub struct FfbOut {
     pub friction: f64,
     /// Caster/KPI jacking: the only self-centring torque at a standstill.
     pub jacking: f64,
+    /// The oversteer effect's counter-steer push (N.m, wheel frame).
+    pub oversteer: f64,
     pub soft_lock: f64,
     pub texture_nm: f64,
     pub clipped: bool,
@@ -1257,9 +1300,9 @@ impl Loop {
         // DEBUG TRACE (FSAE_RIG_TRACE=1): what the rig sees at each boundary, twice a second.
         if trace_on() && self.ticks % 500 == 0 {
             eprintln!(
-                "trace t={} native={} axes={:?} rim={:.1} half={:.1} steer={:+.3} thr={:.3} brk={:.3} | align={:+.2} damp={:+.2} fric={:+.2} stop={:+.2} tex={:.2} cmd={:+.3} clip={} | rimTq={:+.2} spd={:.1} kappa={:.2}/{:.2} gear={} rpm={:.0} bal={:+.2} bslip={:+.1}",
+                "trace t={} native={} axes={:?} rim={:.1} half={:.1} steer={:+.3} thr={:.3} brk={:.3} | align={:+.2} damp={:+.2} fric={:+.2} over={:+.2} stop={:+.2} tex={:.2} cmd={:+.3} clip={} | rimTq={:+.2} spd={:.1} kappa={:.2}/{:.2} gear={} rpm={:.0} bal={:+.2} bslip={:+.1}",
                 self.ticks, native, &self.device.axes[..8], rim_deg, half_lock, steer, throttle_demand, brake_demand,
-                ffb.align, ffb.damping, ffb.friction, ffb.soft_lock, ffb.texture_nm, ffb.command, ffb.clipped,
+                ffb.align, ffb.damping, ffb.friction, ffb.oversteer, ffb.soft_lock, ffb.texture_nm, ffb.command, ffb.clipped,
                 tel.rim_torque_nm, tel.speed, tel.kappa[0], tel.kappa[2], tel.gear, tel.engine_rpm, tel.balance, tel.body_slip_deg
             );
         }
@@ -1399,6 +1442,21 @@ impl FfbMixer {
         // the rig). Same curve as `forceFeedback.js` `lowSpeedFade`.
         let fade = low_speed_fade(tel.speed);
         out.align = -tel.rim_torque_nm * cfg.align_torque_gain * fade;
+        // Understeer effect: the rim goes lighter than the trail alone says
+        // once the front is past its peak. Off at 0 (see `FfbConfig`).
+        if cfg.understeer_effect > 0.0 {
+            let past = smoothstep(tel.utilisation[FL], UNDERSTEER_SLIP_START, UNDERSTEER_SLIP_FULL);
+            out.align *= 1.0 - cfg.understeer_effect.clamp(0.0, 1.0) * past;
+        }
+        // Oversteer effect: a push toward counter-steer as the rear runs
+        // ahead of the front. The model is left-positive: a positive rear
+        // slip is a left turn, where counter-steer is clockwise, which is
+        // the wheel's positive. Faded with the tyres, so a standstill
+        // wriggle cannot fire it. Off at 0.
+        if cfg.oversteer_effect > 0.0 && tel.slip_deg[RL].abs() > 1e-6 {
+            let out_of_balance = smoothstep(tel.balance, OVERSTEER_BALANCE_START, OVERSTEER_BALANCE_FULL);
+            out.oversteer = tel.slip_deg[RL].signum() * cfg.oversteer_effect * rated * out_of_balance * fade;
+        }
         // Damping: `damping` is the fraction of rated torque at 10 rad/s.
         out.damping = -cfg.damping * rated * (rate / 10.0);
         // Coulomb friction with a soft sign.
@@ -1426,7 +1484,7 @@ impl FfbMixer {
                 - (cfg.stop_damping * rate / 10.0).clamp(-0.6, 0.6);
             out.soft_lock = stop * rated;
         }
-        out.torque_nm = out.align + out.damping + out.friction + out.jacking + out.soft_lock;
+        out.torque_nm = out.align + out.damping + out.friction + out.jacking + out.oversteer + out.soft_lock;
 
         // To the motor. COMPRESS rather than clip. A hard clamp at the rated
         // torque erases the one cue this whole model exists to deliver -- the
@@ -1436,7 +1494,9 @@ impl FfbMixer {
         // and then a slightly lighter wall. `gamma` lifts the small on-centre
         // torques; the tanh knee bends everything above `knee` into the
         // headroom that is left, so the peak and the drop stay readable.
-        let base = (out.align + out.damping + out.friction + out.jacking) * cfg.gain / rated;
+        // The oversteer push is already a fraction of rated torque and is
+        // not a tyre torque, so it goes in after the gain.
+        let base = (out.align + out.damping + out.friction + out.jacking) * cfg.gain / rated + out.oversteer / rated;
         out.clipped = base.abs() > 1.0;
         let mut cmd = compress(base, cfg.gamma, cfg.knee);
         // `f64::signum(0.0)` is +1, unlike Math.sign; a zero command must
@@ -1486,6 +1546,77 @@ mod tests {
 
     fn tel_with_rim(rim: f64) -> sim_core::solver::Telemetry {
         sim_core::solver::Telemetry { rim_torque_nm: rim, speed: 15.0, ..Default::default() }
+    }
+
+    fn feel_none() -> Feel {
+        Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0, jacking_nm: 0.0 }
+    }
+
+    #[test]
+    fn effects_are_off_by_default() {
+        let cfg = FfbConfig::default();
+        assert_eq!(cfg.understeer_effect, 0.0);
+        assert_eq!(cfg.oversteer_effect, 0.0);
+        // And a sliding, unbalanced car mixes exactly as it did without them.
+        let tel = sim_core::solver::Telemetry {
+            rim_torque_nm: -10.0,
+            speed: 15.0,
+            utilisation: [1.5, 1.5, 2.0, 2.0],
+            slip_deg: [8.0, 8.0, 14.0, 14.0],
+            balance: 0.8,
+            ..Default::default()
+        };
+        let o = FfbMixer::default().mix(0.001, &cfg, true, &tel, -20.0, 56.0, true, &feel_none());
+        assert_eq!(o.oversteer, 0.0);
+        assert!((o.align - 10.0).abs() < 1e-9, "{o:?}");
+    }
+
+    #[test]
+    fn understeer_effect_lightens_the_rim_past_the_peak() {
+        let off = FfbConfig::default();
+        let on = FfbConfig { understeer_effect: 0.6, ..off };
+        let at = |util: f64, cfg: &FfbConfig| {
+            let tel = sim_core::solver::Telemetry {
+                rim_torque_nm: -10.0,
+                speed: 15.0,
+                utilisation: [util, util, 0.5, 0.5],
+                ..Default::default()
+            };
+            FfbMixer::default().mix(0.001, cfg, true, &tel, -20.0, 56.0, true, &feel_none()).align
+        };
+        // Under the effect's start the torque is untouched.
+        assert!((at(0.5, &on) - at(0.5, &off)).abs() < 1e-9);
+        // Fully slid: 60 % of it is gone. Same sign, so it is lighter, not reversed.
+        assert!((at(1.5, &on) / at(1.5, &off) - 0.4).abs() < 1e-9, "{}", at(1.5, &on) / at(1.5, &off));
+        // Monotone through the band.
+        assert!(at(0.9, &on) < at(0.7, &on) && at(1.1, &on) < at(0.9, &on));
+        assert!(at(1.1, &on) > 0.0);
+    }
+
+    #[test]
+    fn oversteer_effect_pushes_toward_counter_steer() {
+        let cfg = FfbConfig { oversteer_effect: 0.5, ..Default::default() };
+        let tel = |slip_r: f64, balance: f64, speed: f64| sim_core::solver::Telemetry {
+            rim_torque_nm: 0.0,
+            speed,
+            slip_deg: [3.0, 3.0, slip_r, slip_r],
+            utilisation: [0.4, 0.4, 1.2, 1.2],
+            balance,
+            ..Default::default()
+        };
+        let mix = |t: &sim_core::solver::Telemetry| FfbMixer::default().mix(0.001, &cfg, true, t, 0.0, 56.0, true, &feel_none());
+        // A left turn (positive rear slip) with the rear well ahead of the
+        // front: clockwise, at the full 50 % of the 5.5 N.m rated.
+        let o = mix(&tel(12.0, 0.8, 15.0));
+        assert!((o.oversteer - 0.5 * 5.5).abs() < 1e-9, "{o:?}");
+        assert!(o.command > 0.4, "{o:?}");
+        // The other way round for a right turn.
+        assert!(mix(&tel(-12.0, 0.8, 15.0)).command < -0.4);
+        // Balanced: nothing. Under the start: nothing.
+        assert_eq!(mix(&tel(12.0, 0.0, 15.0)).oversteer, 0.0);
+        assert_eq!(mix(&tel(12.0, 0.1, 15.0)).oversteer, 0.0);
+        // Standing still the slip angles mean nothing: faded out with the tyres.
+        assert_eq!(mix(&tel(12.0, 0.8, 0.1)).oversteer, 0.0);
     }
 
     #[test]
