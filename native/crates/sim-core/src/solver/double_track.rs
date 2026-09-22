@@ -38,16 +38,16 @@ const KAPPA_H: f64 = 1e-4;
 /// How much of `front_grip_factor`'s deficit this model resolves physically.
 ///
 /// The 0.80 was pinned to the skidpad through the BICYCLE, which puts both
-/// front tyres at one slip angle and one camber. With four patches, parallel
-/// steer on a 9 m radius runs the inner front ~1.3 deg below the outer, the
-/// rear gets its toe-in, and camber is real -- and at the same 0.80 this model
-/// ran the skidpad in 5.73 s against the bicycle's 5.19 and the car's 5.02.
-/// Scaling the factor by 1.10 (0.80 -> 0.88) puts it at 5.26 s while it still
-/// pushes at the limit at 10, 15 and 20 m/s; 0.90 spins at 20 m/s on a steer
-/// ramp. A scale rather than a second number so an edit to the factor still
-/// moves both models. The 12 % it leaves is what nothing here explains yet
-/// (compliance steer, the tyre's load-dependent peak slip, the fit itself).
-const DT_FRONT_GRIP_SCALE: f64 = 1.10;
+/// front tyres at one slip angle, one camber and no toe. This model has four
+/// patches, the as-run toe (front 1.1 deg in; rear 0.5 in, or 0.7 out on the
+/// skidpad setup), 18.5 % measured Ackermann, camber, and the tyre's peak slip
+/// moving with load. With all of that, 1.07 (0.80 -> 0.856) runs the skidpad
+/// setup at 5.26 s (real: 5.01-5.40 s across 2026 test days) and still pushes
+/// at the limit at 10, 15 and 20 m/s on the autocross setup; 1.10 spins at
+/// 20 m/s on a steer ramp. A scale rather than a second number so an edit to
+/// the factor still moves both models. The deficit it leaves (~14 %) is what
+/// nothing here explains yet: system compliance, the tyre fit, 9 vs 10 psi.
+const DT_FRONT_GRIP_SCALE: f64 = 1.07;
 
 pub struct DoubleTrackSolver {
     c: Chassis,
@@ -86,7 +86,14 @@ struct Body {
 }
 
 impl DoubleTrackSolver {
-    pub fn new(c: Chassis) -> Self {
+    pub fn new(mut c: Chassis) -> Self {
+        // This model runs the tyre with its peak slip moving with load (see
+        // `MagicFormulaTyre::peak_alpha_scale_at`); the bicycle does not.
+        if let Some(t) = c.tyre.as_any_mut().and_then(|a| a.downcast_mut::<crate::tyre::MagicFormulaTyre>()) {
+            if t.peak_alpha_scale_at.is_none() {
+                t.peak_alpha_scale_at = Some(crate::tyre::MagicFormulaTyre::PEAK_ALPHA_SCALE_SDM26);
+            }
+        }
         Self {
             c,
             s: ChassisState::default(),
@@ -109,13 +116,13 @@ impl DoubleTrackSolver {
     fn steer_angles(&self) -> (f64, f64) {
         let p = &self.c.params;
         let d = self.delta;
-        if d.abs() < 1e-6 || p.steering.ackermann <= 0.0 {
+        if d.abs() < 1e-6 || p.suspension.ackermann <= 0.0 {
             return (d, d);
         }
         let radius = p.wheelbase_m / d.tan();
         let inner = (p.wheelbase_m / (radius.abs() - p.track_front_m * 0.5)).atan();
         let outer = (p.wheelbase_m / (radius.abs() + p.track_front_m * 0.5)).atan();
-        let k = p.steering.ackermann.clamp(0.0, 1.0);
+        let k = p.suspension.ackermann.clamp(0.0, 1.0);
         let (i, o) = (d.abs() + k * (inner - d.abs()), d.abs() + k * (outer - d.abs()));
         // Positive steer is left, so the left wheel is the inner one.
         if d > 0.0 {

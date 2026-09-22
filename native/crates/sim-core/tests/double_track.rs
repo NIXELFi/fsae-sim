@@ -167,9 +167,9 @@ fn accelerates_and_brakes_like_the_car() {
     assert!((18.0..=40.0).contains(&dist), "stopping distance {dist:.1} m");
 }
 
-/// The body reproduces the team's gradients: 0.602 deg/g of roll and
-/// 0.805 deg/g of pitch, both with tyres ('SDM26 Ride Roll Calc'). A touch
-/// more roll, because this model also has gravity's moment as the body leans.
+/// The body reproduces the gradients its stiffness is derived from
+/// (`SuspensionParams`, with tyres). A touch more roll, because this model
+/// also has gravity's moment as the body leans.
 #[test]
 fn body_rolls_and_pitches_by_the_team_gradients() {
     let mut c = car();
@@ -183,7 +183,8 @@ fn body_rolls_and_pitches_by_the_team_gradients() {
     let t = c.telemetry();
     let roll_grad = t.roll_deg / t.ay_g;
     println!("roll {:.3} deg at {:.3} g -> {roll_grad:.3} deg/g", t.roll_deg, t.ay_g);
-    assert!((0.60..=0.62).contains(&roll_grad), "roll gradient {roll_grad:.3} deg/g");
+    let want = sdm26().suspension.roll_gradient_deg_g;
+    assert!((want..=want * 1.03).contains(&roll_grad), "roll gradient {roll_grad:.3} deg/g, want {want}");
 
     let mut c = car();
     c.powertrain_mut().set_gear(3);
@@ -195,7 +196,8 @@ fn body_rolls_and_pitches_by_the_team_gradients() {
     let t = c.telemetry();
     let pitch_grad = t.pitch_deg / -t.ax_g;
     println!("pitch {:.3} deg at {:.3} g -> {pitch_grad:.3} deg/g", t.pitch_deg, t.ax_g);
-    assert!((0.78..=0.83).contains(&pitch_grad), "pitch gradient {pitch_grad:.3} deg/g");
+    let want = sdm26().suspension.pitch_gradient_deg_g;
+    assert!((want * 0.97..=want * 1.03).contains(&pitch_grad), "pitch gradient {pitch_grad:.3} deg/g, want {want}");
 }
 
 /// Roll is a damped mode, not an instant: after a step steer it lags and

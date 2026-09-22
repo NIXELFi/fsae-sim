@@ -86,19 +86,33 @@ pub struct SuspensionParams {
     /// pointing toward the centreline).
     pub toe_in_front_deg: f64,
     pub toe_in_rear_deg: f64,
+    /// Fraction of true Ackermann (0 parallel, 1 full). Here rather than in
+    /// `SteeringParams` so the bicycle's parameters are untouched.
+    pub ackermann: f64,
 }
 
 impl SuspensionParams {
     pub fn sdm26() -> Self {
         Self {
-            roll_gradient_deg_g: 0.602,
-            pitch_gradient_deg_g: 0.805,
-            roll_damping_ratio: 0.85,
-            pitch_damping_ratio: 0.85,
+            // 2026-09-22: re-derived for the car AS RUN, not as the Ride Roll
+            // sheet's 280 lb/in front spring had it. Front spring 200 lb/in
+            // (spec sheet, every 2026 setup sheet); axle roll stiffness from
+            // the 'SDM26 Anti-Roll Bar Calculator' at the event setting
+            // (~47 % RSD, e.g. F1-1 / R6-7: ~746 / ~914 N.m/deg), each in
+            // series with the tyres at 520 lb/in -> ~959 N.m/deg, so
+            // ms g arm / K = 0.66 deg/g. Pitch: the front ride rate with tyre
+            // falls from 214 to 173 lb/in, 0.805 -> 0.91 deg/g. Roll is to be
+            // checked against the shock pots in the SDM26 test logs.
+            roll_gradient_deg_g: 0.66,
+            pitch_gradient_deg_g: 0.91,
+            // Ohlins TTX25, force-matched by Stillwell to a 0.7 damping-ratio
+            // curve (Suspension Design Report 4.4).
+            roll_damping_ratio: 0.70,
+            pitch_damping_ratio: 0.70,
             ixx_kg_m2: 24.8,
             iyy_kg_m2: 85.3,
             tyre_rate_n_m: 520.0 * 175.126_835,
-            wheel_rate_front_n_m: 363.888 * 175.126_835,
+            wheel_rate_front_n_m: 200.0 * 1.14 * 1.14 * 175.126_835,
             wheel_rate_rear_n_m: 249.833 * 175.126_835,
             anti_dive_front: 0.128,
             anti_lift_rear: 0.158,
@@ -109,12 +123,18 @@ impl SuspensionParams {
             camber_gain_roll_rear: 0.738,
             camber_gain_bump_front_deg_m: -0.826 / 0.0254,
             camber_gain_bump_rear_deg_m: -0.678 / 0.0254,
-            // OptimumK 'rear.toe angle' -0.5 deg each side (toe distance
-            // -0.087 in), read as TOE-IN, which is what an FSAE rear runs for
-            // stability and what the sign of the toe distance says. Front
-            // toe is not in the export: zero.
-            toe_in_front_deg: 0.0,
+            // AS RUN, per wheel, spec-sheet sign "- out, + in": front +1.1
+            // (toe-in), rear +0.5 (toe-in) for autocross and endurance
+            // (Overall Vehicle DR 5.3; 4/23 and 4/25 setup sheets). The
+            // skidpad setup runs the rear at -0.7 (toe-out). The OptimumK
+            // export's rear -0.5 was the DESIGN value, not what was run.
+            toe_in_front_deg: 1.1,
             toe_in_rear_deg: 0.5,
+            // Measured from both road wheels against rim angle
+            // (Steer_Force_Calculator/wheel_toe_angles.csv): 18.5 % of true
+            // Ackermann to 60 deg of rim, rising to 24 % at full lock. Not
+            // the OptimumK 0 % nor the spec sheet's 85 %.
+            ackermann: 0.185,
         }
     }
 }

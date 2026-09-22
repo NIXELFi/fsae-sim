@@ -170,6 +170,19 @@ pub struct MagicFormulaTyre {
     pub camber_ratio_at: [(f64, f64); 3],
     /// Peak grip loss with camber: mu x (1 - k gamma^2), gamma in rad.
     pub camber_mu_quad: f64,
+    /// Peak slip angle against load, as (Fz N, multiple of `peak_alpha`)
+    /// points, linear between and flat past the ends. `None` holds the peak
+    /// at `peak_alpha` at every load -- the validated bicycle's tyre, bit for
+    /// bit. The double track switches it on (`DoubleTrackSolver::new`).
+    ///
+    /// A real slick peaks at a smaller slip when lightly loaded: TEAM MF6.1
+    /// at 10 psi 5.7 / 7.0 / 7.6 deg at 200 / 700 / 800 N, and the MF6.1.2
+    /// 7 in rim fit 6.5 / 8.2 / 9.6 deg (mean of both sides) at 300 / 655 /
+    /// 800 N -- 0.79 and 1.17 of its own 655 N value. That fit is not
+    /// believable above ~800 N (its cornering stiffness collapses and the
+    /// peak runs off to 18 deg at 1200 N), so the top point is an
+    /// extrapolation of the trend below it, flagged as an estimate.
+    pub peak_alpha_scale_at: Option<[(f64, f64); 4]>,
     by: f64,
     /// Normalising scales so each fitted curve peaks at exactly mu*Fz. The
     /// solved B puts the peak at the right slip; these put it at the right
@@ -255,6 +268,7 @@ impl MagicFormulaTyre {
             // it is worth about a tenth of a degree of slip.
             camber_ratio_at: [(300.0, 0.089), (655.0, 0.107), (1000.0, 0.159)],
             camber_mu_quad: 18.66,
+            peak_alpha_scale_at: None,
             by,
             ky: 1.0 / peak_value(by, cy, ey, peak_alpha),
             kx: 1.0 / peak_value(bx, cx, ex, peak_kappa),
@@ -272,6 +286,35 @@ impl MagicFormulaTyre {
         }
         let m = base * (1.0 - self.load_sensitivity * (fz / self.nominal_load - 1.0));
         m.clamp(0.25 * base, 1.6 * base)
+    }
+
+    /// The load-dependent table the double track runs (see
+    /// `peak_alpha_scale_at`).
+    pub const PEAK_ALPHA_SCALE_SDM26: [(f64, f64); 4] = [(200.0, 0.82), (655.0, 1.0), (800.0, 1.12), (1200.0, 1.30)];
+
+    /// Peak slip angle and the matching stiffness factor at a load. The MF
+    /// core depends only on B.x, so moving the peak to alpha_p is B scaled by
+    /// peak_alpha / alpha_p, and the normalising height is unchanged.
+    fn lateral_peak(&self, fz: f64) -> (f64, f64) {
+        let Some(t) = &self.peak_alpha_scale_at else {
+            return (self.peak_alpha, self.by);
+        };
+        let k = if fz <= t[0].0 {
+            t[0].1
+        } else if fz >= t[t.len() - 1].0 {
+            t[t.len() - 1].1
+        } else {
+            let mut k = t[t.len() - 1].1;
+            for i in 0..t.len() - 1 {
+                if fz <= t[i + 1].0 {
+                    k = t[i].1 + (fz - t[i].0) / (t[i + 1].0 - t[i].0) * (t[i + 1].1 - t[i].1);
+                    break;
+                }
+            }
+            k
+        };
+        let ap = self.peak_alpha * k;
+        (ap, self.by * self.peak_alpha / ap)
     }
 
     /// Camber-to-slip ratio at a load (see `camber_ratio_at`).
@@ -313,8 +356,9 @@ impl TyreModel for MagicFormulaTyre {
 
         // Normalised slip vector: each channel in units of its own peak, so the
         // combined limit is a true ellipse.
+        let (peak_alpha, by) = self.lateral_peak(fz);
         let sx = slip.kappa / self.peak_kappa;
-        let sy = slip.alpha.tan() / self.peak_alpha.tan();
+        let sy = slip.alpha.tan() / peak_alpha.tan();
         let s = (sx * sx + sy * sy).sqrt();
         if s < 1e-9 {
             return TyreForces { trail: self.pneumatic_trail(0.0, fz), ..TyreForces::zero() };
@@ -322,7 +366,7 @@ impl TyreModel for MagicFormulaTyre {
 
         let fx0 = mux * fz * self.kx * mf(s * self.peak_kappa, self.bx, self.cx, self.ex);
         let fy0 =
-            muy * fz * self.ky * mf((s * self.peak_alpha.tan()).atan(), self.by, self.cy, self.ey);
+            muy * fz * self.ky * mf((s * peak_alpha.tan()).atan(), by, self.cy, self.ey);
 
         TyreForces {
             fx: (sx / s) * fx0,
