@@ -249,7 +249,7 @@ export function diffSetup(values, defaults = SETUP_DEFAULTS) {
  * two answering the same question by accident is not good enough.
  */
 export const SETUP_LEGAL_PATHS = [
-  "roll.rsdFront", "brakeBiasFront", "aeroFrontFrac",
+  "roll.rsdFront", "brakeBiasFront",
   "diff.preloadNm", "diff.coastLock", "diff.powerLock",
   "launchRpm", "finalDrive",
 ];
@@ -265,6 +265,13 @@ export const SETUP_LEGAL_PATHS = [
  * the team is judged on. So: the lap is still driven, still recorded, still
  * replayable -- it just does not count, it says so on screen while it is
  * being driven, and it never becomes anybody's best.
+ *
+ * Aero balance is one of these, on purpose. It reads like a setup knob -- a
+ * flap hole, on a car with adjustable flaps -- but on SDM26 it is not
+ * something anyone can do between two runs, so a lap on a different aero
+ * balance is a lap on a different car. It lives on the Vehicle model sheet
+ * with the rest of the car's description. Move `aeroFrontFrac` back into
+ * `SETUP_LEGAL_PATHS` if that stops being true.
  *
  * @returns [{path, label, unit, from, to, fromText, toText}], empty when the
  *          car is honest.

@@ -26,10 +26,9 @@ import { SLOT_IDS, slotSummary, loadSlots } from "./setupSlots.js";
 const SHORT = {
   "roll.rsdFront": "RSD-F",
   brakeBiasFront: "BB-F",
-  aeroFrontFrac: "AERO-F",
   "diff.preloadNm": "PRELD",
-  "diff.coastLock": "COAST",
-  "diff.powerLock": "POWER",
+  "diff.coastLock": "LOCK-OFF",
+  "diff.powerLock": "LOCK-ON",
   launchRpm: "LC",
   finalDrive: "FINAL",
 };

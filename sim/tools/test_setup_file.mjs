@@ -192,9 +192,11 @@ section("a run's times only count on the car the team actually has");
     timeCounts(), modelChanges().map((c) => c.path).join(", "));
   for (const path of SETUP_LEGAL_PATHS) writeParam(path, AS_SHIPPED[path]);
 
-  // ...and anything else does not.
+  // ...and anything else does not -- including aero balance, which reads like
+  // a setup knob but is not a change SDM26 can be given between two runs.
   for (const [path, value] of [["massKg", 220], ["muLat", 2.4], ["drivetrainEff", 0.99],
-                               ["brakeTorqueMaxNm", 2000], ["tireRadiusM", 0.25]]) {
+                               ["brakeTorqueMaxNm", 2000], ["tireRadiusM", 0.25],
+                               ["aeroFrontFrac", 0.58]]) {
     const before = SDM26[path];
     SDM26[path] = value;
     const changes = modelChanges();

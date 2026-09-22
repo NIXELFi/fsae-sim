@@ -318,7 +318,8 @@ section("each setup item has its own up/down, and they move the car");
       ok(!!act && act.setupItem === a.id && act.dir === dir, `${a.id} has a ${dir > 0 ? "up" : "down"} action`);
     }
   }
-  ok(!ADJUSTMENTS.some((a) => a.id === "aero"), "aero balance is on the sheet, not the wheel");
+  ok(!ADJUSTMENTS.some((a) => a.id === "aero"),
+     "aero balance is a model parameter on the sheet, not a wheel adjustment");
 
   // nudgeId moves the named parameter, only that one, and selects it.
   const car = { roll: { rsdFront: 0.48 }, brakeBiasFront: 0.65, diff: { preloadNm: 25, coastLock: 0.42 },

@@ -377,7 +377,7 @@ there too, and in a `.hset`). **Reset all parameters** puts them back.
 | `RSD-F` roll stiffness, front share | 30-70% | 0.1% | up = more understeer |
 | `BB-F` brake bias, front | 45-75% | 0.1% | up = more stable on entry |
 | `PRELD` diff preload | 0-75 N.m | 5 | up = steadier entry, less rotation |
-| `COAST` diff coast-ramp lock | 0-0.95 | 0.01 | up = steadier on a lift (50 deg ramp = 0.42) |
+| `LOCK-OFF` diff lock, off throttle | 0-0.95 | 0.01 | up = steadier on a lift (50 deg ramp = 0.42) |
 | `LC` launch control | 4000-12000 rpm | 100 | up = more wheelspin off the line |
 | `FINAL` final drive | 2.50-4.00 | 0.05 | up = shorter gearing |
 
@@ -410,9 +410,15 @@ Three buttons on it, and the last two are also bindable:
   started. Ten minutes of fiddling used to be undone by reading the HUD's
   deltas and reversing each one by hand.
 
-Aero balance (front downforce share) is deliberately not on the wheel -- it is
-a flap change in the pits, not a knob -- but it is a slider on the Vehicle
-model sheet with the rest.
+**Aero balance is not here at all**, and not on the setup card either. It
+reads like a setup knob, and on a car with adjustable flaps it would be one --
+but nothing on SDM26 changes the front downforce share between two runs. It is
+what the wings *are*, so it sits on the **Vehicle model** sheet with the rest
+of the car's description, and moving it stops a lap counting as a time (below).
+
+The diff's two ramps are named for what they do rather than for the ramp:
+**lock on throttle** is the drive ramp, **lock off throttle** the coast ramp --
+the one that steadies the rear on a lift.
 
 0.1% is finer than anything you can set on the real car -- roll stiffness comes
 in bar holes, bias in turns of a bar. That is deliberate: find where the balance
@@ -958,12 +964,12 @@ with 1.4x the grip is not a lap, and it cannot sit in the same list as the runs
 the team is judged on.
 
 So the simulator draws one line. The **run-to-run setup list** -- roll
-stiffness, brake bias, aero balance, the diff's three numbers, launch rpm,
-final drive -- is every change the real SDM26 can be given between two runs,
-and a lap driven on any combination of them is a lap the car could have
-driven. It counts. **Anything else** -- mass, grip, aero area, the gear
-ratios, driveline efficiency, brake torque, tyre radius, an inertia, a
-geometry number -- means the car is not the car, and from that moment:
+stiffness, brake bias, the diff's three numbers, launch rpm, final drive -- is
+every change the real SDM26 can be given between two runs, and a lap driven on
+any combination of them is a lap the car could have driven. It counts.
+**Anything else** -- mass, grip, aero area, **aero balance**, the gear ratios,
+driveline efficiency, brake torque, tyre radius, an inertia, a geometry
+number -- means the car is not the car, and from that moment:
 
 - the HUD says **TIME NOT COUNTED - CAR MODIFIED**, top centre, not behind a
   density setting and not inside a panel the cockpit camera hides;

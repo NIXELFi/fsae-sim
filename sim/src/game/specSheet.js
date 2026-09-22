@@ -35,13 +35,16 @@ function paramRow(r) {
 
 /**
  * What a team changes between runs, in one place: the wheel adjustments plus
- * aero balance and the diff's power ramp, which are pit changes rather than
- * knobs. The same parameters as the full sheet -- these sliders and those
+ * the diff's drive ramp, which is a pit change rather than a knob.
+ *
+ * Aero balance is NOT here. On SDM26 it is not a between-runs change at all --
+ * it is what the wings are, and it lives on the Vehicle model sheet with the
+ * rest of the car's description. The same parameters as the full sheet -- these sliders and those
  * write the same values -- gathered so nobody has to scroll a few hundred
  * rows between runs to find brake bias.
  */
 export const QUICK_SETUP_PATHS = [
-  "roll.rsdFront", "brakeBiasFront", "aeroFrontFrac",
+  "roll.rsdFront", "brakeBiasFront",
   "diff.preloadNm", "diff.coastLock", "diff.powerLock",
   "launchRpm", "finalDrive",
 ];

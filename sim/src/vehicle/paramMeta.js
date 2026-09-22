@@ -171,7 +171,7 @@ export function parameterGroups() {
     rows("Aerodynamics", [
       p("CdA", v.cdaM2, "m^2", "cfd", "2026 full-car CFD ride-height map at nominal ride height: 42.72 lbf of drag at 15.65 m/s.", { path: "cdaM2", min: 0.4, max: 2.6, step: 0.005 }),
       p("ClA", v.claM2, "m^2", "cfd", "2026 full-car CFD ride-height map at nominal ride height: 105.64 lbf of downforce at 15.65 m/s. The Aero Design Binder's Cl 3.064 x 1.0224 m^2 agrees.", { path: "claM2", min: 0, max: 5.5, step: 0.005 }),
-      p("Aero balance (front downforce share)", v.aeroFrontFrac * 100, "%", "cfd", "2026 CFD map at nominal ride height (both the ride-height and pitch sweeps give 52.42%). Read where the car sits on its measured springs it is 52% at 10-15 m/s and 54-57% at 20-30 m/s, at the coarse edge of the map. The 55.3% previously quoted was the 2025 half-car sheet.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
+      p("Aero balance (front downforce share)", v.aeroFrontFrac * 100, "%", "cfd", "What the wings ARE, not a setup knob: nothing on SDM26 changes this between two runs, so it is here rather than on the setup card, and moving it stops a lap counting as a time. 2026 CFD map at nominal ride height (both the ride-height and pitch sweeps give 52.42%). Read where the car sits on its measured springs it is 52% at 10-15 m/s and 54-57% at 20-30 m/s, at the coarse edge of the map. The 55.3% previously quoted was the 2025 half-car sheet.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
       p("Air density", v.airDensityKgM3, "kg/m^3", "team", "Ambient used across Helios."),
       p("Rolling resistance", v.crr, "", "team", "Helios model constant."),
     ]),
@@ -230,10 +230,10 @@ export function parameterGroups() {
     ]),
 
     rows("Driver & environment", [
-      p("Diff lock, power", v.diff.powerLock, "", "team",
-        "Drexler V3 drive ramp, from the lock table in the Formula Student LSD manual: 30 deg is 0.88, 40 is 0.60, 45 is 0.51, 50 is 0.42, 60 is 0.29. The car ships on 40/50. The team's study notes the manual is optimistic and on-track values run 60-80% of it.", { path: "diff.powerLock", min: 0, max: 0.95, step: 0.01 }),
-      p("Diff lock, coast", v.diff.coastLock, "", "team",
-        "Coast ramp, same table. Lower than the power ramp on a 1.5-way. This is the number that steadies the rear on a lift.", { path: "diff.coastLock", min: 0, max: 0.95, step: 0.01 }),
+      p("Diff lock, on throttle", v.diff.powerLock, "", "team",
+        "The DRIVE ramp: how hard the two rear wheels are tied together under power. Drexler V3, from the lock table in the Formula Student LSD manual: 30 deg is 0.88, 40 is 0.60, 45 is 0.51, 50 is 0.42, 60 is 0.29. The car ships on 40/50. The team's study notes the manual is optimistic and on-track values run 60-80% of it.", { path: "diff.powerLock", min: 0, max: 0.95, step: 0.01 }),
+      p("Diff lock, off throttle", v.diff.coastLock, "", "team",
+        "The COAST ramp: the same, off the throttle and under braking. Same table. Lower than the power ramp on a 1.5-way. This is the number that steadies the rear on a lift.", { path: "diff.coastLock", min: 0, max: 0.95, step: 0.01 }),
       p("Diff preload", v.diff.preloadNm, "N.m", "team",
         "Breakaway torque wheel to wheel, as Drexler specifies it: 25-35 on the fixed unit, 0-75 adjustable. Raising it adds understeer on entry and kills lock-up lag on exit; lowering it lets the rear rotate more freely off throttle.", { path: "diff.preloadNm", min: 0, max: 75, step: 1 }),
       p("Eye height", v.eyeHeightM, "m", "estimate", "Cockpit camera.", { path: "eyeHeightM", min: 0.4, max: 1.0, step: 0.005 }),

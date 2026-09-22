@@ -65,11 +65,12 @@ export const ADJUSTMENTS = [
   },
   {
     id: "diffCoast",
-    label: "Diff lock, coast",
-    bindLabel: "Diff coast lock",
-    short: "COAST",
+    label: "Diff lock, off throttle",
+    bindLabel: "Diff lock, off throttle",
+    short: "LOCK-OFF",
     unit: "",
-    // Coast-ramp lock fraction. Drexler's table: 60 deg 0.29, 50 deg 0.42
+    // The COAST ramp: how hard the rear wheels are tied together OFF the
+    // throttle and under braking. Drexler's table: 60 deg 0.29, 50 deg 0.42
     // (as shipped), 45 deg 0.51, 40 deg 0.60. The number that steadies the
     // rear on a lift, which is exactly the handling the drivers talk about.
     path: "diff.coastLock", factor: 1,
