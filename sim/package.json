@@ -1,6 +1,6 @@
 {
   "name": "fsae-sim",
-  "version": "0.6.11",
+  "version": "0.6.12",
   "private": true,
   "type": "module",
   "description": "First-person SDM26 driving simulator on the 2026 FSAE Michigan courses",
