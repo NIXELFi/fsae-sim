@@ -51,8 +51,11 @@ import {
  * launch assist is held because letting go is how you release the clutch.
  */
 const HOLD_ACTIONS = new Set(["steerLeft", "steerRight", "throttle", "brake", "launch"]);
-/** Auto-repeat while held; see `applyRepeat`. */
-const REPEAT_ACTIONS = new Set(["setupUp", "setupDown"]);
+/** Auto-repeat while held; see `applyRepeat`. The setup menu's up/down and
+ *  every direct setup pair (BBAL up, RSD down, ...), from the `repeat` flag. */
+const REPEAT_IDS = ACTIONS.filter((a) => a.repeat).map((a) => a.id);
+const REPEAT_ACTIONS = new Set(REPEAT_IDS);
+const REPEAT_LIST = ACTIONS.filter((a) => a.repeat);
 /** Everything else: one edge per press. */
 const EDGE_ACTIONS = ACTIONS.filter(
   (a) => !HOLD_ACTIONS.has(a.id) && !REPEAT_ACTIONS.has(a.id),
@@ -105,8 +108,19 @@ export class Input {
       accept: false, back: false, prevTab: false, nextTab: false, start: false };
     // D-pad up/down auto-repeat. At 0.1% a press, walking roll stiffness a few
     // points would be dozens of taps, so held presses repeat and then speed up.
-    this._holdSince = { setupUp: 0, setupDown: 0 };
-    this._nextRepeat = { setupUp: 0, setupDown: 0 };
+    this._holdSince = {};
+    this._nextRepeat = {};
+    // This frame's device state for each repeating action, merged with the
+    // keyboard's before `applyRepeat` sees it -- so a key and a rim button
+    // bound to the same thing both work, whichever is plugged in.
+    this._repHeld = {};
+    this._repEdge = {};
+    for (const id of REPEAT_IDS) {
+      this._holdSince[id] = 0;
+      this._nextRepeat[id] = 0;
+      this._repHeld[id] = false;
+      this._repEdge[id] = false;
+    }
     /** Multiplier the game applies to the step size while a d-pad is held. */
     this.setupHoldScale = 1;
     this._prevButtons = [];
@@ -530,6 +544,7 @@ export class Input {
   /** Read the pad and keyboard into `state` and `edges`. Call once per frame. */
   poll() {
     for (const k in this.edges) this.edges[k] = false;
+    for (const id of REPEAT_IDS) { this._repHeld[id] = false; this._repEdge[id] = false; }
     for (const k in this.menu) this.menu[k] = false;
 
     const p = this.pad();
@@ -617,9 +632,13 @@ export class Input {
       M.start = edge(B.pause);
 
       // D-pad: left/right pick the setting (above, as setupPrev/setupNext),
-      // up/down move it and repeat while held.
-      this.applyRepeat("setupUp", pressed(B.dpadUp), edge(B.dpadUp));
-      this.applyRepeat("setupDown", pressed(B.dpadDown), edge(B.dpadDown));
+      // up/down move it and repeat while held; the direct setup buttons
+      // repeat the same way. Applied after the keyboard is read, below.
+      for (const a of REPEAT_LIST) {
+        const i = B[buttonSlot(a)];
+        if (pressed(i)) this._repHeld[a.id] = true;
+        if (edge(i)) this._repEdge[a.id] = true;
+      }
 
       // Last frame's buttons for the edge detection, kept in one array
       // rather than `map`ped fresh; and whether anything at all is pressed.
@@ -742,9 +761,10 @@ export class Input {
     for (const a of EDGE_ACTIONS) {
       if (anyEdge(K[a.id])) this.edges[a.id] = true;
     }
-    if (!p) {
-      this.applyRepeat("setupUp", held(K.setupUp), anyEdge(K.setupUp));
-      this.applyRepeat("setupDown", held(K.setupDown), anyEdge(K.setupDown));
+    for (const id of REPEAT_IDS) {
+      this.applyRepeat(id,
+        this._repHeld[id] || held(K[id]),
+        this._repEdge[id] || anyEdge(K[id]));
     }
 
     // Walkaround camera nudges, live rather than edge-triggered so holding a

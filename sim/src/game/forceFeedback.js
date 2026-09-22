@@ -63,6 +63,46 @@ export const UNDERSTEER_SLIP_FULL = 1.3;
 export const OVERSTEER_BALANCE_START = 0.15;
 export const OVERSTEER_BALANCE_FULL = 0.65;
 
+/**
+ * Asphalt buzz: the surface coming up through the tyres and the rack.
+ *
+ * Nothing in the vehicle model produces it -- the road is perfectly smooth to
+ * a bicycle model -- but it is most of what a real rim feels like above walking
+ * pace, and without it a straight is dead. So it is synthesised, and it is off
+ * by default: it is a feel setting, not physics, and saying so in the default
+ * matters on a tool the team uses to judge setup changes.
+ *
+ * Amplitude is `asphaltVibration` x this fraction of rated torque, faded in
+ * with speed, so the same setting feels the same on any base. 0.08 of a 5.5
+ * N.m R5 is 0.44 N.m at full effect, which is a clear texture and nowhere
+ * near enough to hide the aligning torque.
+ */
+export const ASPHALT_MAX_FRAC = 0.08;
+/** Faded in over this speed band, m/s: nothing at a crawl, all of it by 12. */
+export const ASPHALT_FADE_START = 2;
+export const ASPHALT_FADE_FULL = 12;
+/** Pitch: this many times wheel-rotation frequency, clamped to a felt band. */
+export const ASPHALT_HZ_PER_WHEEL_HZ = 3.2;
+export const ASPHALT_HZ_MIN = 22;
+export const ASPHALT_HZ_MAX = 75;
+
+/**
+ * Amplitude (as a fraction of rated torque) and pitch of the asphalt buzz.
+ *
+ * Shared by this mixer and `rig.rs`, which renders it sample by sample; keep
+ * the two in step.
+ */
+export function asphaltTexture(cfg, tel, feel) {
+  const amount = cfg.asphaltVibration ?? 0;
+  if (amount <= 0 || feel.offTrack) return { frac: 0, hz: 0 };
+  const speed = tel.speed ?? 0;
+  const fade = smoothstep(speed, ASPHALT_FADE_START, ASPHALT_FADE_FULL);
+  if (fade <= 0) return { frac: 0, hz: 0 };
+  const wheelHz = speed / (2 * Math.PI * 0.2);
+  const hz = Math.max(ASPHALT_HZ_MIN, Math.min(ASPHALT_HZ_MAX, ASPHALT_HZ_PER_WHEEL_HZ * wheelHz));
+  return { frac: Math.min(1, amount) * ASPHALT_MAX_FRAC * fade, hz };
+}
+
 export function compress(x, gamma = 1, knee = 1) {
   if (!x || !Number.isFinite(x)) return 0;
   const sign = x < 0 ? -1 : 1;
@@ -96,6 +136,9 @@ export class ForceFeedback {
       /** Vibration the motor should overlay: amplitude Nm, frequency Hz. */
       textureNm: 0,
       textureHz: 0,
+      /** The asphalt buzz on its own, Nm and Hz, for the settings display. */
+      asphaltNm: 0,
+      asphaltHz: 0,
       /** One-shot impact, Nm peak. Consumed by the native side, then zero. */
       kickNm: 0,
       /** Components, for the live display. All Nm, wheel frame. */
@@ -223,6 +266,17 @@ export class ForceFeedback {
       // Wheel-speed-ish for slip; a fixed low rumble for grass.
       const wheelHz = Math.max(8, Math.min(45, tel.speed / (2 * Math.PI * 0.2)));
       out.textureHz = rough && slipTex < 0.02 ? 12 : wheelHz;
+    }
+    // 5b. The asphalt itself, while the tyres are not saying anything louder.
+    //     The native rig runs the two as separate oscillators; this path has
+    //     one channel to describe, so the bigger of the two wins -- a wheel
+    //     already shaking with wheelspin has nothing to learn from the road.
+    const asphalt = asphaltTexture(cfg, tel, feel);
+    out.asphaltNm = asphalt.frac * rated;
+    out.asphaltHz = asphalt.hz;
+    if (out.asphaltNm > out.textureNm) {
+      out.textureNm = out.asphaltNm;
+      out.textureHz = asphalt.hz;
     }
 
     // 6. A cone. Short, sharp, and in a direction: the front wing catches it,

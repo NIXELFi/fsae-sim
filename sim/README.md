@@ -65,7 +65,11 @@ against the same modules the game loads.
 | X / Y | `T` / `C` | Traction control / camera |
 | View / Menu | `Backspace` / `Esc` | Restart run / pause |
 | D-pad < > | `[` `]` | Pick the setup item to adjust |
-| D-pad ^ v | `-` `=` | Adjust it, 0.1% a press |
+| D-pad ^ v | `-` `=` | Adjust it, one step a press |
+| -- | `Num 8` / `Num 2` | Brake bias up / down (bindable to any button) |
+| -- | `Num 0` | Every setup value back to this session's baseline |
+| -- | `Num 5` | Switch between setup A and setup B |
+| -- | `Num 9` / `Num 3` | Front roll stiffness up / down (bindable to any button) |
 | L3 | `H` | Back to the home screen |
 | -- | `U` / `J` | Overlay density / which dash |
 | -- | `M` | Throttle-map editor |
@@ -205,9 +209,9 @@ they are traction-limited and the order flips back to what you would expect
 A setup can leave the machine. The **Setup** toolbar at the top of the Vehicle
 model tab exports the whole parameter set as a `.hset` file (Helios setup):
 JSON text with a name, author, date, course, notes, the simulator version, and
-a `values` block holding every parameter on the sheet plus the two the driver
-moves from the wheel (front roll stiffness and brake bias), under the same
-dotted paths a run manifest records its `setup` in.
+a `values` block holding every parameter on the sheet (which includes
+everything the driver can move from the wheel), under the same dotted paths a
+run manifest records its `setup` in.
 
 It is a **full snapshot, not a diff**. A file means the same thing whatever the
 as-shipped defaults are on the machine that opens it, and a run is only
@@ -355,15 +359,60 @@ the road.
 ## Setup changes from the wheel
 
 The d-pad adjusts the car while it is moving -- left/right picks the item,
-up/down moves it in 0.1 percentage-point steps (held, it repeats and then
-speeds up). These write straight into the parameter object the physics already
-holds, so a change lands on the next 500 Hz substep. The HUD shows both values
-and how far each has drifted from the baseline.
+up/down moves it one step (held, it repeats and then goes five steps at a
+time). Every item also has its own **up / down pair** in Settings -> Controls
+-> Setup, so brake bias or roll stiffness can sit on two rim buttons and skip
+the menu; brake bias ships on `Num 8` / `Num 2` and roll stiffness on
+`Num 9` / `Num 3`, the rest unbound. These write straight into the parameter
+object the physics already holds, so a change lands on the next 500 Hz
+substep. The HUD shows every value and how far each has drifted from where the
+session started.
 
-| Item | Range | Effect |
-|---|---|---|
-| `RSD-F` roll stiffness, front share | 30-70% | up = more understeer |
-| `BB-F` brake bias, front | 45-75% | up = more stable on entry |
+A change sticks: it is remembered between runs and between launches like a
+slider change, and the Vehicle model sheet shows it (every item is a slider
+there too, and in a `.hset`). **Reset all parameters** puts them back.
+
+| Item | Range | Step | Effect |
+|---|---|---|---|
+| `RSD-F` roll stiffness, front share | 30-70% | 0.1% | up = more understeer |
+| `BB-F` brake bias, front | 45-75% | 0.1% | up = more stable on entry |
+| `PRELD` diff preload | 0-75 N.m | 5 | up = steadier entry, less rotation |
+| `COAST` diff coast-ramp lock | 0-0.95 | 0.01 | up = steadier on a lift (50 deg ramp = 0.42) |
+| `LC` launch control | 4000-12000 rpm | 100 | up = more wheelspin off the line |
+| `FINAL` final drive | 2.50-4.00 | 0.05 | up = shorter gearing |
+
+### The setup card, A / B, and back to baseline
+
+The same values are on four surfaces, and all four follow each other: the
+wheel buttons, the **Car tab's run-to-run block**, the full **Vehicle model**
+sheet, and a **setup card** that is the point of this section.
+
+The card appears twice. On the launch screen it sits beside **Start engine**,
+because the second before a run starts is when "what is this car on?" is worth
+asking. And in the car it comes up **the moment a run is armed and clears when
+the flag goes green** -- which is the only place it appears for anyone
+launching straight into a run (`--autostart`, or Helios starting the rig), who
+never sees the launch screen at all. Both are mouse *and* keyboard: every row
+is a number you can type into or arrow-key, with a minus and a plus either
+side. While the staging card is up the pointer stays free, so mouse steering
+does not swallow the clicks, and the keyboard goes back to the car the moment
+it clears.
+
+Three buttons on it, and the last two are also bindable:
+
+- **Save / Load A and B.** Two whole setups, kept between sessions. A test day
+  is back-to-back runs on two setups until one of them is clearly quicker, and
+  `Num 5` (or a rim button) flips between them without a menu. The chip at the
+  top says which one the car is on, and it says `unsaved` the moment anything
+  moves -- because once brake bias has been nudged, the car is not slot A any
+  more and a switch that pretended otherwise would throw the nudge away.
+- **Baseline** (`Num 0`) puts every setup value back to where the session
+  started. Ten minutes of fiddling used to be undone by reading the HUD's
+  deltas and reversing each one by hand.
+
+Aero balance (front downforce share) is deliberately not on the wheel -- it is
+a flap change in the pits, not a knob -- but it is a slider on the Vehicle
+model sheet with the rest.
 
 0.1% is finer than anything you can set on the real car -- roll stiffness comes
 in bar holes, bias in turns of a bar. That is deliberate: find where the balance
@@ -901,6 +950,56 @@ standstill terms sit outside that compressor: a stop that scaled with a taste
 setting was not a stop, and a stationary tyre being scrubbed about its kingpin
 has weight whatever the gain says.
 
+### When a time does not count
+
+Every number in the car is editable, which is the point of a sheet where the
+provenance of each one is on the row beside it -- but a lap on a 220 kg car
+with 1.4x the grip is not a lap, and it cannot sit in the same list as the runs
+the team is judged on.
+
+So the simulator draws one line. The **run-to-run setup list** -- roll
+stiffness, brake bias, aero balance, the diff's three numbers, launch rpm,
+final drive -- is every change the real SDM26 can be given between two runs,
+and a lap driven on any combination of them is a lap the car could have
+driven. It counts. **Anything else** -- mass, grip, aero area, the gear
+ratios, driveline efficiency, brake torque, tyre radius, an inertia, a
+geometry number -- means the car is not the car, and from that moment:
+
+- the HUD says **TIME NOT COUNTED - CAR MODIFIED**, top centre, not behind a
+  density setting and not inside a panel the cockpit camera hides;
+- the lap is still driven, timed, shown and recorded, but it cannot become a
+  best, a reference, a sector record or the archive's best on the course --
+  exactly like an off-course lap;
+- the run's manifest carries `counted: false` and names the parameters
+  responsible, and the Runs tab says so on the row.
+
+It **latches for the run**: putting mass back mid-lap does not un-drive the
+part of the lap that was driven light. A restart clears it.
+
+### What a run records about the car
+
+A run's manifest has always carried its setup. It now carries the whole car:
+
+- `setup` -- the 31 parameters with sliders, which is also what a `.hset` is.
+- `car` -- **every** number in the model, all 68, flattened to dotted paths.
+  The 37 that had no slider include the ones actually worth cheating with:
+  peak grip, the gear ratios, driveline efficiency, the rev limit, brake
+  torque, tyre radius. A run driven on a locally edited build used to look
+  identical in the log to an honest one.
+- `engine` -- name, point count, peak torque and an FNV-1a hash of the torque
+  curve, because `data/sdm26-torque.json` is a file on disk and nothing in the
+  parameter snapshot can see it. Hashing it does not stop anyone editing it --
+  nothing running on the driver's own machine can -- but two runs claiming the
+  same car and the same sim version with different engine hashes did not use
+  the same engine.
+- `counted` and `modelChanges` -- the verdict above, and why.
+
+In the **Runs tab** each run now says what it was driven on, flags a setup
+that moved mid-run (the laps before and after it were driven on different
+cars), and has a **Setup** button that diffs that run against as-shipped, the
+car as it is now, or **another run** -- the question a test day actually asks.
+**Load this setup** puts it back in the car.
+
 **Small bases.** The shape above is the same on every base; what differs is
 the torque behind it, and on a 5.5 N.m base the limit cue is inside the noise
 of the driver's own arms. Measured with `tools/ffb_sweep.mjs` (the model,
@@ -925,6 +1024,20 @@ range on the cues instead:
 
 A 15 N.m base needs neither. Both are mixed identically in `forceFeedback.js`
 and `rig.rs`, checked in `validate.js` and the rig's own tests.
+
+**Asphalt vibration**, a third optional effect and also off by default, is the
+surface coming up through the rack. The vehicle model's road is perfectly
+smooth, so unlike everything else in the mix this one is *synthesised rather
+than simulated* -- which is why it ships off. It is a feel setting, and this
+simulator is also how the team judges a setup change; an invented texture sits
+on top of the cue they are reading. Turned up, it is a continuous buzz worth
+up to 8% of rated torque (0.44 N.m on an R5), faded in from 2 to 12 m/s so the
+paddock stays quiet, pitched at 3.2x wheel-rotation frequency between 22 and
+75 Hz, and silent off the course where the grass rumble already owns the
+channel. The rig renders it as two tones an irrational ratio apart so it never
+settles into a hum, inside whatever headroom the base torque and the slip
+texture leave; a straight stays centred. Try 0.3-0.5. Wheel only: on a pad the
+rumble still fires for wheelspin, lockup and grass, and nothing else.
 
 If the wheel pulls the wrong way, there is an **Invert** switch -- and that
 would be worth reporting, because the sign convention is worked out rather than

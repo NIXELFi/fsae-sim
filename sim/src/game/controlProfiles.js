@@ -32,7 +32,7 @@
 // file that configures it.) The other profiles carry a disabled stub, because
 // nothing else here has a motor.
 
-import { defaultKeys, UNBOUND } from "./controlBindings.js";
+import { defaultKeys, UNBOUND, unboundSetupButtons } from "./controlBindings.js";
 import WHEEL_BRANDS from "./wheelBrands.json" with { type: "json" };
 
 const STORAGE_KEY = "fsae-sim.controls.v1";
@@ -329,6 +329,7 @@ export const PROFILES = {
       // map so the bindings panel can offer them. UNBOUND, not absent: an
       // override can only reach a key the shipped default already has.
       hudDensity: UNBOUND, dashMode: UNBOUND,
+      ...unboundSetupButtons(),
     },
     keys: defaultKeys(),
     labels: { launch: "A", reset: "B", traction: "X", camera: "Y", upshift: "RB", downshift: "LB" },
@@ -363,6 +364,7 @@ export const PROFILES = {
       restart: 8, pause: 9, home: 10,
       dpadUp: 12, dpadDown: 13, dpadLeft: 14, dpadRight: 15,
       hudDensity: UNBOUND, dashMode: UNBOUND,
+      ...unboundSetupButtons(),
     },
     keys: defaultKeys(),
     labels: {
@@ -478,6 +480,7 @@ export const PROFILES = {
       restart: 8, pause: 9, home: 10,
       dpadUp: 128, dpadDown: 129, dpadLeft: 130, dpadRight: 131,
       hudDensity: UNBOUND, dashMode: UNBOUND,
+      ...unboundSetupButtons(),
     },
     keys: defaultKeys(),
     forceFeedback: {
@@ -558,6 +561,16 @@ export const PROFILES = {
        * gives a small base a direction as well. Off by default.
        */
       oversteerEffect: 0.0,
+      /**
+       * Asphalt buzz, 0..1 of `ASPHALT_MAX_FRAC` of rated torque.
+       *
+       * The surface coming up through the rack. The vehicle model's road is
+       * perfectly smooth, so this is synthesised rather than simulated --
+       * which is why it is OFF by default. It is a feel setting, and this
+       * simulator is also how the team judges a setup change; a texture
+       * nobody asked for sits on top of the cue they are reading.
+       */
+      asphaltVibration: 0.0,
       /**
        * Steering-torque model, for A/B testing. 1 = the tyres' aligning
        * moment only (lateral force through the trails). 2 = also the front
@@ -898,6 +911,9 @@ export function editableSettings(profile) {
         { path: "forceFeedback.oversteerEffect", label: "Oversteer effect", unit: "",
           min: 0, max: 1, step: 0.05,
           note: "Pushes toward counter-steer as the rear runs ahead of the front, as a fraction of rated torque. 0 is off; try 0.3 on a small base." },
+        { path: "forceFeedback.asphaltVibration", label: "Asphalt vibration", unit: "",
+          min: 0, max: 1, step: 0.05,
+          note: "A synthesised surface buzz through the rim, faded in with speed and off the grass. Nothing in the vehicle model produces it, so it is off by default; 0.3-0.5 makes a straight feel alive. Full effect is 8% of rated torque." },
         { path: "forceFeedback.parkFriction", label: "Standing-still friction", unit: "",
           min: 0, max: 0.4, step: 0.01,
           note: "A stationary tyre twisting against the ground. What the paddock feels like." },

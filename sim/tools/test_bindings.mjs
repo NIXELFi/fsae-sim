@@ -306,6 +306,65 @@ section("device buttons go through the same table");
   input.settings.resetProfile("gamepad-xbox");
 }
 
+// ------------------------------------------------ direct setup bindings --
+
+section("each setup item has its own up/down, and they move the car");
+{
+  const { ADJUSTMENTS, SetupAdjuster } = await import("../src/vehicle/setupAdjust.js");
+  const { SETUP_ITEM_ACTIONS, setupActionId } = await import("../src/game/controlBindings.js");
+  for (const a of ADJUSTMENTS) {
+    for (const dir of [1, -1]) {
+      const act = SETUP_ITEM_ACTIONS.find((x) => x.id === setupActionId(a.id, dir));
+      ok(!!act && act.setupItem === a.id && act.dir === dir, `${a.id} has a ${dir > 0 ? "up" : "down"} action`);
+    }
+  }
+  ok(!ADJUSTMENTS.some((a) => a.id === "aero"), "aero balance is on the sheet, not the wheel");
+
+  // nudgeId moves the named parameter, only that one, and selects it.
+  const car = { roll: { rsdFront: 0.48 }, brakeBiasFront: 0.65, diff: { preloadNm: 25, coastLock: 0.42 },
+    launchRpm: 7000, finalDrive: 3.0 };
+  const adj = new SetupAdjuster(car);
+  adj.nudgeId("bbias", 1, 1, 0);
+  ok(Math.abs(car.brakeBiasFront - 0.651) < 1e-9, `BBAL up is +0.1% (${car.brakeBiasFront})`);
+  ok(car.roll.rsdFront === 0.48, "and nothing else moved");
+  ok(adj.current.id === "bbias", "and the menu now points at it");
+  adj.nudgeId("final", -1, 1, 0);
+  ok(car.finalDrive === 2.95, `final drive steps cleanly (${car.finalDrive})`);
+  adj.nudgeId("launch", 1, 5, 0);
+  ok(car.launchRpm === 7500, `a held LC button takes 5x steps (${car.launchRpm})`);
+  for (let i = 0; i < 100; i++) adj.nudgeId("diffPre", -1, 5, 0);
+  ok(car.diff.preloadNm === 0, "preload stops at its floor");
+}
+
+section("direct setup bindings work from a key and from a device button");
+{
+  const input = new Input();
+  input.setProfile("gamepad-xbox");
+  const buttons = navigator.getGamepads()[0].buttons;
+  const press = (fn) => { fn(true); input.poll(); const f = { ...input.edges }; fn(false); input.poll(); return f; };
+
+  // The keyboard still works with a pad plugged in -- the old menu keys did not.
+  ok(press((on) => on ? input.keys.add("Numpad8") : input.keys.delete("Numpad8")).setupBbiasUp === true,
+     "Numpad 8 is brake bias up, with a pad connected");
+  ok(press((on) => on ? input.keys.add("Equal") : input.keys.delete("Equal")).setupUp === true,
+     "= still turns the menu item up with a pad connected");
+
+  ok(press((on) => { buttons[16].pressed = on; }).setupRsdDown !== true, "RSD down ships unbound on a pad");
+  input.settings.set("gamepad-xbox", "buttons.setupRsdDown", 16);
+  input.refreshProfile();
+  ok(press((on) => { buttons[16].pressed = on; }).setupRsdDown === true, "bound to a button, it fires");
+
+  // Held, it repeats.
+  buttons[16].pressed = true;
+  let fired = 0;
+  const t0 = performance.now();
+  while (performance.now() - t0 < 700) { input.poll(); if (input.edges.setupRsdDown) fired++; }
+  buttons[16].pressed = false;
+  input.poll();
+  ok(fired >= 3, `holding it repeats (${fired} steps in 0.7 s)`);
+  input.settings.resetProfile("gamepad-xbox");
+}
+
 // ------------------------------------------------------- reserved keys --
 
 section("nothing ships bound to a key the game already uses elsewhere");

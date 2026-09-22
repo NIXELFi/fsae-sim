@@ -16,6 +16,8 @@
 //     axis a pedal is on is to move it and watch. Sweeping it also measures
 //     its travel, so the binding and the calibration come out of one gesture.
 
+import { ADJUSTMENTS } from "../vehicle/setupAdjust.js";
+
 /** Unbound, for a numeric slot. Not null: see `overlay` in controlProfiles.js. */
 export const UNBOUND = -1;
 
@@ -27,6 +29,9 @@ export const UNBOUND = -1;
  *   keysOnly  no device button: it is either a keyboard-only action, or it is
  *             an AXIS on a device and belongs in the axis section instead
  *   hold      pressed-and-held rather than edge-triggered, so the row can say so
+ *   repeat    an edge that auto-repeats, then speeds up, while held
+ *   setupItem the adjustment (setupAdjust.js) a direct setup action moves, and
+ *   dir       which way
  */
 export const ACTIONS = [
   { id: "steerLeft", label: "Steer left", group: "Driving", keysOnly: true, hold: true },
@@ -48,14 +53,47 @@ export const ACTIONS = [
 
   { id: "traction", label: "Traction control", group: "Car" },
   { id: "mapEditor", label: "Throttle map editor", group: "Car", keysOnly: true },
-  { id: "setupPrev", label: "Setup: previous item", group: "Car", button: "dpadLeft" },
-  { id: "setupNext", label: "Setup: next item", group: "Car", button: "dpadRight" },
-  { id: "setupUp", label: "Setup: turn it up", group: "Car", button: "dpadUp" },
-  { id: "setupDown", label: "Setup: turn it down", group: "Car", button: "dpadDown" },
+  { id: "setupPrev", label: "Setup menu: previous item", group: "Setup", button: "dpadLeft" },
+  { id: "setupNext", label: "Setup menu: next item", group: "Setup", button: "dpadRight" },
+  { id: "setupUp", label: "Setup menu: turn it up", group: "Setup", button: "dpadUp", repeat: true },
+  { id: "setupDown", label: "Setup menu: turn it down", group: "Setup", button: "dpadDown", repeat: true },
+  { id: "setupReset", label: "Setup: back to baseline", group: "Setup" },
+  { id: "setupSwitchSlot", label: "Setup: switch A / B", group: "Setup" },
+  // One up/down pair per adjustment, straight to the item without the menu:
+  // brake bias on two rim buttons, the way a real car has it on a knob.
+  ...ADJUSTMENTS.flatMap((a) => [
+    { id: setupActionId(a.id, 1), label: `${a.bindLabel}: up`, group: "Setup", repeat: true, setupItem: a.id, dir: 1 },
+    { id: setupActionId(a.id, -1), label: `${a.bindLabel}: down`, group: "Setup", repeat: true, setupItem: a.id, dir: -1 },
+  ]),
 ];
 
 /** The order the settings panel lays the groups out in. */
-export const ACTION_GROUPS = ["Driving", "The run", "View", "Car"];
+export const ACTION_GROUPS = ["Driving", "The run", "View", "Car", "Setup"];
+
+/** The action that moves one setup item one way: "setupRsdUp", "setupBbiasDown". */
+export function setupActionId(itemId, dir) {
+  return `setup${itemId[0].toUpperCase()}${itemId.slice(1)}${dir > 0 ? "Up" : "Down"}`;
+}
+
+/** The direct setup actions, for the game loop to walk. */
+export const SETUP_ITEM_ACTIONS = ACTIONS.filter((a) => a.setupItem);
+
+/**
+ * The profile `buttons` entries for the setup actions, all UNBOUND.
+ * Spread into every shipped profile: an override can only reach a slot the
+ * shipped default already has (see `overlay` in controlProfiles.js), so a
+ * missing slot is one the driver could never bind.
+ */
+export function unboundSetupButtons() {
+  const out = {};
+  // Every Setup action that does not already share the d-pad's slots: the
+  // per-item pairs, plus reset and the A/B switch.
+  for (const a of ACTIONS) {
+    if (a.group !== "Setup" || a.button) continue;
+    out[buttonSlot(a)] = UNBOUND;
+  }
+  return out;
+}
 
 /** Which slot in a profile's `buttons` map an action uses. */
 export function buttonSlot(action) {
@@ -92,6 +130,18 @@ export const DEFAULT_KEYS = {
   setupNext: ["BracketRight"],
   setupUp: ["Equal"],
   setupDown: ["Minus"],
+  // The two that change most between runs get the numpad; the rest ship
+  // unbound and are there to be put on the rim.
+  setupReset: ["Numpad0"],
+  setupSwitchSlot: ["Numpad5"],
+  setupBbiasUp: ["Numpad8"],
+  setupBbiasDown: ["Numpad2"],
+  setupRsdUp: ["Numpad9"],
+  setupRsdDown: ["Numpad3"],
+  ...Object.fromEntries(
+    ADJUSTMENTS.filter((a) => a.id !== "bbias" && a.id !== "rsd")
+      .flatMap((a) => [[setupActionId(a.id, 1), []], [setupActionId(a.id, -1), []]]),
+  ),
 };
 
 /** A fresh copy, for a profile's defaults. */

@@ -280,6 +280,10 @@ export class Hud {
       this.setupPanel(ctx, W, H, s);
       ctx.restore();
     }
+    // NOT behind a density switch and not inside a panel that the cockpit
+    // camera hides: a driver must not be able to end up with a time they
+    // think counts. Top centre, under the message line.
+    if (s.counted === false) this.notCounted(ctx, W);
     if (show.message) this.message(ctx, W, H, s);
     if (s.paused) this.paused(ctx, W, H);
 
@@ -814,7 +818,7 @@ export class Hud {
    */
   setupPanel(ctx, W, H, s) {
     const items = s.setup.items;
-    const w = 176, rowH = 22;
+    const w = 188, rowH = 22;
     const h = 26 + items.length * rowH;
     const x = W - w - 18, y = H - 132 - 18 - 34 - h - 10;
 
@@ -840,16 +844,37 @@ export class Hud {
       ctx.textAlign = "right";
       ctx.font = "600 12px ui-monospace, monospace";
       ctx.fillStyle = it.selected ? GOLD : "#e8ecf3";
-      ctx.fillText(`${it.value.toFixed(1)}${it.unit}`, x + w - 40, ry + 11);
+      const dp = it.decimals ?? 1;
+      ctx.fillText(`${it.value.toFixed(dp)}${it.unit === "%" ? "%" : ""}`, x + w - 44, ry + 11);
 
+      // "At baseline" is half the printed resolution: anything smaller would
+      // print as +0.0 anyway.
       const d = it.value - it.baseline;
+      const atBase = Math.abs(d) < 0.5 * 10 ** -dp;
       ctx.font = "9px ui-monospace, monospace";
-      ctx.fillStyle = Math.abs(d) < 0.05 ? "rgba(255,255,255,0.28)"
+      ctx.fillStyle = atBase ? "rgba(255,255,255,0.28)"
         : d > 0 ? "#3ddc84" : "#4a9eff";
-      ctx.fillText(Math.abs(d) < 0.05 ? "base" : `${d > 0 ? "+" : ""}${d.toFixed(1)}`,
+      ctx.fillText(atBase ? "base" : `${d > 0 ? "+" : ""}${d.toFixed(dp)}`,
         x + w - 8, ry + 11);
       ctx.textAlign = "left";
     });
+  }
+
+  /**
+   * "This car is not the car": mass, power, grip or anything else outside the
+   * run-to-run setup list has been moved off as-shipped, so the lap is being
+   * driven but cannot become a best, a reference or a record.
+   */
+  notCounted(ctx, W) {
+    const text = "TIME NOT COUNTED - CAR MODIFIED";
+    ctx.font = "600 11px ui-monospace, monospace";
+    const w = ctx.measureText(text).width + 22;
+    const x = (W - w) / 2;
+    panel(ctx, x, 12, w, 22, 6);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e0552f";
+    ctx.fillText(text, W / 2, 27);
+    ctx.textAlign = "left";
   }
 
   timing(ctx, s) {

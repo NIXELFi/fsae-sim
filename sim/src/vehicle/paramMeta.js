@@ -171,14 +171,14 @@ export function parameterGroups() {
     rows("Aerodynamics", [
       p("CdA", v.cdaM2, "m^2", "cfd", "2026 full-car CFD ride-height map at nominal ride height: 42.72 lbf of drag at 15.65 m/s.", { path: "cdaM2", min: 0.4, max: 2.6, step: 0.005 }),
       p("ClA", v.claM2, "m^2", "cfd", "2026 full-car CFD ride-height map at nominal ride height: 105.64 lbf of downforce at 15.65 m/s. The Aero Design Binder's Cl 3.064 x 1.0224 m^2 agrees.", { path: "claM2", min: 0, max: 5.5, step: 0.005 }),
-      p("Front downforce split", v.aeroFrontFrac * 100, "%", "cfd", "2026 CFD map at nominal ride height (both the ride-height and pitch sweeps give 52.42%). Read where the car sits on its measured springs it is 52% at 10-15 m/s and 54-57% at 20-30 m/s, at the coarse edge of the map. The 55.3% previously quoted was the 2025 half-car sheet.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
+      p("Aero balance (front downforce share)", v.aeroFrontFrac * 100, "%", "cfd", "2026 CFD map at nominal ride height (both the ride-height and pitch sweeps give 52.42%). Read where the car sits on its measured springs it is 52% at 10-15 m/s and 54-57% at 20-30 m/s, at the coarse edge of the map. The 55.3% previously quoted was the 2025 half-car sheet.", { path: "aeroFrontFrac", min: 25, max: 75, step: 0.1, factor: 100 }),
       p("Air density", v.airDensityKgM3, "kg/m^3", "team", "Ambient used across Helios."),
       p("Rolling resistance", v.crr, "", "team", "Helios model constant."),
     ]),
 
     rows("Roll balance", [
       p("Roll stiffness distribution, front", v.roll.rsdFront * 100, "%", "team",
-        "Team setup choice, between the measured blade settings: front 1-1 / rear 1-1 is 46%, front 4-7 / rear 1-1 is 51%."),
+        "Team setup choice, between the measured blade settings: front 1-1 / rear 1-1 is 46%, front 4-7 / rear 1-1 is 51%.", { path: "roll.rsdFront", min: 30, max: 70, step: 0.1, factor: 100 }),
       p("CG to roll-axis arm", v.roll.hRollArmM * 1000, "mm", "team",
         "Matches the SDM25 RSD test sheet's measured 10.34 in."),
       p("Roll centre, front", v.roll.rcFrontM * 1000, "mm", "team", "", { path: "roll.rcFrontM", min: -60, max: 160, step: 0.5, factor: 1000 }),
@@ -195,10 +195,10 @@ export function parameterGroups() {
       p("Engine braking", "From the sweep's own fmep", "", "cfd", "T = fmep.Vd/4pi; about 12 N.m of overrun drag at 10 000 rpm."),
       p("Gear ratios", v.gearRatios.join(" / "), "", "team", "Stock CBR600RR (PC40)."),
       p("Primary reduction", v.primaryReduction, "", "team", "76/36."),
-      p("Final drive", v.finalDrive, "", "team", "SDM sprocket choice."),
+      p("Final drive", v.finalDrive, "", "team", "SDM sprocket choice.", { path: "finalDrive", min: 2.5, max: 4, step: 0.01 }),
       p("Rev limit", v.revLimitRpm, "rpm", "team", "Confirmed by Nick."),
       p("Rev limiter hysteresis", v.revLimitHystRpm, "rpm", "estimate", "Hard ignition cut at the limit, back on this far under it. Tuned to the drivers' 'bounces a little'; the ECU's control range would replace it."),
-      p("Launch control", v.launchRpm, "rpm", "team", "Where the car's LC is set."),
+      p("Launch control", v.launchRpm, "rpm", "team", "Where the car's LC is set.", { path: "launchRpm", min: 4000, max: 12000, step: 100 }),
       p("Launch control hysteresis", v.launchHystRpm, "rpm", "estimate", "Wider than the main limiter's: the real LC bounces hard."),
       p("Shift time", v.shiftTimeS * 1000, "ms", "team", "The ignition cut: 80-100 ms off the real paddle shift, per Nick."),
       p("Shift torque blend", v.shiftReintroS * 1000, "ms", "estimate", "How long the torque takes to come back after the cut, on a smoothstep. A step was a kick through the driveline on every shift."),
@@ -226,7 +226,7 @@ export function parameterGroups() {
       p("Max brake torque", v.brakeTorqueMaxNm, "N.m", "estimate",
         "Derived, not measured: the brakes calculator's 70 bar max working pressure through the P4.24/P2.24 callipers, pad mu 0.45 and the 54% bias bar. That is 206 lbf on the pedal; the force a driver reaches is the unmeasured part. All four lock at 786 N.m (1.5 g)."),
       p("Brake bias, front", v.brakeBiasFront * 100, "%", "team",
-        "Team setup choice, as a torque share. The 54% bias bar measured on the car gives 72% through the calliper geometry (calculator: 71.3%, workbook radii: 72.7%); 65% is a bar near 45%. The bias bar figure is a pressure split."),
+        "Team setup choice, as a torque share. The 54% bias bar measured on the car gives 72% through the calliper geometry (calculator: 71.3%, workbook radii: 72.7%); 65% is a bar near 45%. The bias bar figure is a pressure split.", { path: "brakeBiasFront", min: 45, max: 75, step: 0.1, factor: 100 }),
     ]),
 
     rows("Driver & environment", [
@@ -270,6 +270,40 @@ export function writeParam(path, stored) {
   const target = keys.reduce((o, k) => o[k], SDM26);
   target[last] = stored;
 }
+
+/**
+ * EVERY number in the car, flattened to dotted paths -- not just the ones
+ * with a slider.
+ *
+ * The run recorder used to snapshot the spec sheet's editable rows, which is
+ * 31 of the model's 68 numbers. The other 37 include the ones that would
+ * actually be worth cheating with: peak grip, the gear ratios, driveline
+ * efficiency, the rev limit, brake torque, tyre radius. A run driven on a
+ * locally edited build looked identical in the log to an honest one.
+ *
+ * Arrays of numbers (gear ratios, the rack's toe table) are joined rather
+ * than expanded: they are still compared exactly, and a 60-entry table does
+ * not belong in a manifest as 60 keys.
+ */
+export function flattenParams(obj = SDM26, prefix = "", out = {}) {
+  for (const [k, v] of Object.entries(obj)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    if (typeof v === "number") out[path] = v;
+    else if (Array.isArray(v) && v.every((x) => typeof x === "number")) out[path] = v.join(",");
+    else if (v && typeof v === "object" && !Array.isArray(v)) flattenParams(v, path, out);
+  }
+  return out;
+}
+
+/**
+ * The whole car as it shipped, captured at import -- before `loadParams()`
+ * restores anything a driver changed, which is the only moment this is
+ * knowable at runtime.
+ */
+export const AS_SHIPPED = Object.freeze(flattenParams());
+
+/** Every parameter path in the model, sliders or not. */
+export const ALL_PARAM_PATHS = Object.keys(AS_SHIPPED);
 
 /** The as-shipped value of every editable parameter, for Reset. */
 export const PARAM_DEFAULTS = (() => {

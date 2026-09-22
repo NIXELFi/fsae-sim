@@ -165,5 +165,52 @@ ok("empty name still yields a file", setupFilename("") === "setup.hset" && setup
 ok("a stray extension does not double up", setupFilename("Quali.hset") === "Quali.hset.hset" ? false : true);
 ok("dots at the ends are dropped", !setupFilename("...secret").startsWith("."));
 
+// ---- what counts as a time, and what the log has to carry ------------------
+section("a run's times only count on the car the team actually has");
+{
+  const { SDM26 } = await import("../src/vehicle/params.js");
+  const { flattenParams, AS_SHIPPED, writeParam } = await import("../src/vehicle/paramMeta.js");
+  const { modelChanges, timeCounts, carSnapshot, SETUP_LEGAL_PATHS } = await import("../src/vehicle/setupFile.js");
+
+  ok("the car snapshot carries EVERY number in the model, not just the sliders",
+    Object.keys(carSnapshot()).length === Object.keys(flattenParams()).length
+    && Object.keys(carSnapshot()).length > SETUP_PATHS.length,
+    `${Object.keys(carSnapshot()).length} vs ${SETUP_PATHS.length} setup paths`);
+  ok("including the ones worth cheating with",
+    ["massKg", "muLat", "gearRatios", "drivetrainEff", "revLimitRpm", "brakeTorqueMaxNm", "tireRadiusM"]
+      .every((p) => p in carSnapshot()));
+
+  ok("an as-shipped car counts", timeCounts() && modelChanges().length === 0);
+
+  // Every legal setup change, all at once, still counts: these are things the
+  // real car can be set to between two runs.
+  for (const path of SETUP_LEGAL_PATHS) {
+    const v = AS_SHIPPED[path];
+    if (typeof v === "number") writeParam(path, v * 1.02 + 0.001);
+  }
+  ok("the whole run-to-run setup list can move and the time still counts",
+    timeCounts(), modelChanges().map((c) => c.path).join(", "));
+  for (const path of SETUP_LEGAL_PATHS) writeParam(path, AS_SHIPPED[path]);
+
+  // ...and anything else does not.
+  for (const [path, value] of [["massKg", 220], ["muLat", 2.4], ["drivetrainEff", 0.99],
+                               ["brakeTorqueMaxNm", 2000], ["tireRadiusM", 0.25]]) {
+    const before = SDM26[path];
+    SDM26[path] = value;
+    const changes = modelChanges();
+    ok(`${path} stops the time counting`, !timeCounts() && changes.some((c) => c.path === path),
+      changes.map((c) => c.path).join(", "));
+    SDM26[path] = before;
+  }
+  // An array, one entry deep: a single taller gear is a different car.
+  const gears = SDM26.gearRatios.slice();
+  SDM26.gearRatios[0] = 3.1;
+  ok("a single changed gear ratio stops it too",
+    !timeCounts() && modelChanges().some((c) => c.path === "gearRatios"));
+  SDM26.gearRatios = gears;
+  ok("and it counts again once the car is put back", timeCounts(),
+    modelChanges().map((c) => c.path).join(", "));
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) process.exit(1);

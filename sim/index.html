@@ -158,6 +158,52 @@
   #specs b em { font-style: normal; font-family: var(--mono); font-size: 12px; }
 
   /* ---------------- car pane ---------------- */
+  /* The launch-screen setup card: a checklist beside Start engine. */
+  .setup-now { border: 1px solid rgba(255,255,255,0.09); border-radius: 10px; padding: 10px 11px; margin: 14px 0 4px; background: rgba(255,255,255,0.02); }
+  .setup-now-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 7px; }
+  .setup-now-head b { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .slot-chip { font-size: 10.5px; font-family: ui-monospace, monospace; color: #FFC627; }
+  .slot-chip.off { color: rgba(255,255,255,0.35); }
+  .sn-row { display: grid; grid-template-columns: 54px 20px 1fr 20px 26px 38px; gap: 4px; align-items: center; padding: 1.5px 0; }
+  .sn-name { font-size: 10.5px; font-family: ui-monospace, monospace; color: rgba(255,255,255,0.62); }
+  .sn-row.changed .sn-name { color: #fff; }
+  .sn-step { background: rgba(255,255,255,0.06); border: 0; border-radius: 4px; color: rgba(255,255,255,0.75); font-size: 12px; line-height: 1; padding: 3px 0; cursor: pointer; }
+  .sn-step:hover { background: rgba(255,255,255,0.14); color: #fff; }
+  .sn-val { width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #e8ecf3; font: 600 11px ui-monospace, monospace; text-align: right; padding: 2px 4px; }
+  .sn-val:focus { outline: 1px solid #FFC627; border-color: #FFC627; }
+  .sn-unit { font-size: 9.5px; color: rgba(255,255,255,0.35); }
+  .sn-delta { font-size: 9.5px; font-family: ui-monospace, monospace; text-align: right; }
+  .sn-delta.up { color: #3ddc84; }
+  .sn-delta.down { color: #4a9eff; }
+  .setup-now-slots { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 9px; }
+  .sn-slot { display: inline-flex; align-items: center; gap: 3px; }
+  .sn-slot b { font-size: 10.5px; font-family: ui-monospace, monospace; color: rgba(255,255,255,0.5); }
+  .sn-slot.active b { color: #FFC627; }
+  .sn-slot.empty b { color: rgba(255,255,255,0.28); }
+  .setup-now-slots button { font-size: 10px; padding: 2px 6px; }
+  .sn-note { margin: 7px 0 0; min-height: 12px; }
+  .sn-warn { margin: 7px 0 0; font-size: 10.5px; color: #e0552f; }
+  .uncounted { color: #e0552f; }
+  .compare-row { display: flex; align-items: center; gap: 8px; margin: 8px 0 4px; }
+  .compare-row select { flex: 1; min-width: 0; }
+  .run-row .uncounted { font-weight: 600; }
+  /* Staged on the line: the same card, over the scene, above the HUD. */
+  .staging-setup { position: absolute; z-index: 9; top: 18px; right: 18px; width: 268px; }
+  .staging-setup .setup-now {
+    margin: 0; background: rgba(11,13,16,0.86); backdrop-filter: blur(6px);
+    border-color: rgba(255,255,255,0.14); box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  }
+  .staging-hint {
+    font-size: 10px; color: rgba(255,255,255,0.62); margin: 0 0 6px; text-align: right;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  }
+  .staging-setup[hidden] { display: none; }
+
+  .quick-setup { margin-bottom: 22px; }
+  /* One table per parameter, two columns of them: eight sliders in a single
+     column is a long scroll. */
+  .qs-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); column-gap: 26px; }
+  .qs-grid table { margin-bottom: 0; }
   .car-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px 26px; }
   .checks { display: grid; gap: 8px; }
   .check {
@@ -974,6 +1020,11 @@
 
         <!-- ============ Car ============ -->
         <div class="pane" data-pane="car" role="tabpanel">
+          <div class="quick-setup">
+            <h3>Run-to-run setup</h3>
+            <p class="lead">What the team changes between runs. The same values as the Vehicle model sheet and the in-car setup menu; roll stiffness and brake bias also have their own buttons (Controls &rarr; Setup).</p>
+            <div id="quickSetup"></div>
+          </div>
           <div class="car-grid">
             <div>
               <h3>Driver aids</h3>
@@ -1103,6 +1154,7 @@
         <dt>Driver</dt><dd id="sDriver"><input id="sDriverInput" type="text" maxlength="64" placeholder="Your name" autocomplete="off" aria-label="Driver name"><span class="driver-notes"></span></dd>
         <dt>Logging</dt><dd id="sRecording"><b>on</b></dd>
       </dl>
+      <div class="setup-now" id="setupNow"></div>
       <div class="actions">
         <button id="start" disabled>Start engine</button>
         <button id="restartBtn" class="secondary" hidden>Restart run</button>
@@ -1111,6 +1163,14 @@
         <p class="pad-hint">On the pad: Menu starts the engine, bumpers switch tabs, d-pad moves, A selects.</p>
       </div>
     </aside>
+  </div>
+
+  <!-- The staging card: up from the moment the driver presses Start until the
+       car rolls and the flag goes green. This is the one surface an autostart
+       driver ever sees, so it carries the same controls as the launch card. -->
+  <div id="stagingSetup" class="staging-setup" hidden>
+    <div class="staging-hint">Last look before the green flag. It clears when you move off.</div>
+    <div id="stagingSetupCard" class="setup-now"></div>
   </div>
 
   <div id="dropOverlay" aria-hidden="true">

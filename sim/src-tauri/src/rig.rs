@@ -281,6 +281,19 @@ pub struct FfbConfig {
     /// `smoothstep(rear - front normalised slip, 0.15, 0.65)`, which gives a
     /// small base a direction as well as a weight.
     pub oversteer_effect: f64,
+    /// Asphalt buzz through the rim, 0..1 of `ASPHALT_MAX_FRAC` of rated
+    /// torque at full speed. 0 = off, which is the default.
+    ///
+    /// Nothing in the vehicle model produces it: the road is perfectly smooth
+    /// to the solver, and a real rim is never still above walking pace. So it
+    /// is synthesised here rather than simulated, which is exactly why it
+    /// ships off -- this simulator is also how the team judges a setup
+    /// change, and an invented texture sits on top of the cue they are
+    /// reading. Faded in with speed and silent off the course, where the
+    /// grass rumble already has the channel.
+    ///
+    /// Kept in step with `asphaltTexture` in `forceFeedback.js`.
+    pub asphalt_vibration: f64,
     /// Steering-torque model, for A/B testing what the rim should feel like.
     ///
     /// 1 -- the tyres' aligning moment only: lateral force through the
@@ -324,6 +337,7 @@ impl Default for FfbConfig {
             park_friction: 0.10,
             stop_damping: 0.35,
             understeer_effect: 0.0,
+            asphalt_vibration: 0.0,
             oversteer_effect: 0.0,
             model: 1,
         }
@@ -521,6 +535,8 @@ pub struct FfbOut {
     pub oversteer: f64,
     pub soft_lock: f64,
     pub texture_nm: f64,
+    /// The asphalt buzz on its own, N.m, so the settings panel can show it.
+    pub asphalt_nm: f64,
     pub clipped: bool,
 }
 
@@ -1040,6 +1056,7 @@ impl Loop {
                 // full rated torque. Only the transients belong to the run.
                 self.ffb.kick = 0.0;
                 self.ffb.phase = 0.0;
+                self.ffb.asphalt_phase = 0.0;
                 self.ffb.friction_state = 0.0;
             }
             RigCommand::Params(p) => self.apply_params(&p),
@@ -1452,6 +1469,18 @@ struct Feel {
     jacking_nm: f64,
 }
 
+/// Asphalt buzz, shared with `forceFeedback.js` (`ASPHALT_*` there).
+const ASPHALT_MAX_FRAC: f64 = 0.08;
+const ASPHALT_FADE_START: f64 = 2.0;
+const ASPHALT_FADE_FULL: f64 = 12.0;
+const ASPHALT_HZ_PER_WHEEL_HZ: f64 = 3.2;
+const ASPHALT_HZ_MIN: f64 = 22.0;
+const ASPHALT_HZ_MAX: f64 = 75.0;
+/// A second tone at an irrational multiple of the first, so the buzz never
+/// repeats into a hum. Cheaper than noise and the same every run, which
+/// matters when two runs are being compared.
+const ASPHALT_SECOND_RATIO: f64 = 2.37;
+
 /// The force feedback mix, once per tick. Port of `forceFeedback.js` with the
 /// review's corrections: the minimum-force floor is applied to the final
 /// command, texture is given headroom so it cannot bias the base torque
@@ -1462,6 +1491,9 @@ struct FfbMixer {
     rim_rate_deg_s: f64,
     friction_state: f64,
     phase: f64,
+    /// The asphalt buzz's own phase: it runs at its own pitch, alongside the
+    /// slip texture rather than instead of it.
+    asphalt_phase: f64,
     kick: f64,
 }
 
@@ -1577,6 +1609,25 @@ impl FfbMixer {
             out.texture_nm = amp * rated;
         }
 
+        // The asphalt itself: a continuous buzz that fades in with speed and
+        // stops at the edge of the course, where the grass rumble above is
+        // the surface. Two tones at an irrational ratio so it does not settle
+        // into a single hum under the hands. Off by default.
+        if cfg.asphalt_vibration > 0.0 && !feel.off_track && tel.speed > ASPHALT_FADE_START {
+            let fade = smoothstep(tel.speed, ASPHALT_FADE_START, ASPHALT_FADE_FULL);
+            let wheel_hz = tel.speed / (std::f64::consts::TAU * 0.2);
+            let hz = (ASPHALT_HZ_PER_WHEEL_HZ * wheel_hz).clamp(ASPHALT_HZ_MIN, ASPHALT_HZ_MAX);
+            self.asphalt_phase = (self.asphalt_phase + hz * dt).fract();
+            let want = cfg.asphalt_vibration.clamp(0.0, 1.0) * ASPHALT_MAX_FRAC * fade;
+            // Inside whatever headroom the base torque and the slip texture
+            // have left: the buzz is the least important thing in the mix.
+            let amp = want.min((1.0 - cmd.abs() - texture.abs()).max(0.0));
+            let phase = self.asphalt_phase * std::f64::consts::TAU;
+            let wave = 0.75 * phase.sin() + 0.25 * (ASPHALT_SECOND_RATIO * phase).sin();
+            texture += amp * wave;
+            out.asphalt_nm = amp * rated;
+        }
+
         // A cone: a short kick against the current steer, decaying in 40 ms.
         if feel.cone_hits > 0 {
             self.kick = 0.6 * if rim_deg >= 0.0 { -1.0 } else { 1.0 };
@@ -1613,6 +1664,7 @@ mod tests {
         let cfg = FfbConfig::default();
         assert_eq!(cfg.understeer_effect, 0.0);
         assert_eq!(cfg.oversteer_effect, 0.0);
+        assert_eq!(cfg.asphalt_vibration, 0.0);
         // v1 stays the default: a settings file written before the option
         // existed must feel exactly as it did.
         assert_eq!(cfg.model, 1);
@@ -1628,6 +1680,39 @@ mod tests {
         let o = FfbMixer::default().mix(0.001, &cfg, true, &tel, -20.0, 56.0, true, &feel_none());
         assert_eq!(o.oversteer, 0.0);
         assert!((o.align - 10.0).abs() < 1e-9, "{o:?}");
+    }
+
+    #[test]
+    fn asphalt_vibration_buzzes_only_when_asked_for_and_only_on_the_road() {
+        let rated = 5.5;
+        let cfg = FfbConfig { asphalt_vibration: 1.0, max_force_nm: rated, ..Default::default() };
+        // A straight at speed, nothing else happening: no slip, no grass.
+        let tel = sim_core::solver::Telemetry { rim_torque_nm: 0.0, speed: 20.0, ..Default::default() };
+        let mut m = FfbMixer::default();
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        let mut peak_nm: f64 = 0.0;
+        for _ in 0..1000 {
+            let o = m.mix(0.001, &cfg, true, &tel, 0.0, 56.0, true, &feel_none());
+            lo = lo.min(o.command);
+            hi = hi.max(o.command);
+            peak_nm = peak_nm.max(o.asphalt_nm);
+        }
+        assert!(hi > 0.02 && lo < -0.02, "the rim should buzz both ways: {lo}..{hi}");
+        // At most ASPHALT_MAX_FRAC of rated, and it must not bias the wheel
+        // to one side: a straight with no aligning torque has to stay centred.
+        assert!(peak_nm <= ASPHALT_MAX_FRAC * rated + 1e-9, "too much buzz: {peak_nm}");
+        assert!((hi + lo).abs() < 0.05, "the buzz is off centre: {lo}..{hi}");
+
+        // Off by default, on the grass, and at a standstill: silent.
+        let off = FfbConfig { max_force_nm: rated, ..Default::default() };
+        let o = FfbMixer::default().mix(0.001, &off, true, &tel, 0.0, 56.0, true, &feel_none());
+        assert_eq!(o.asphalt_nm, 0.0);
+        let grass = Feel { off_track: true, ..feel_none() };
+        let o = FfbMixer::default().mix(0.001, &cfg, true, &tel, 0.0, 56.0, true, &grass);
+        assert_eq!(o.asphalt_nm, 0.0);
+        let parked = sim_core::solver::Telemetry { speed: 0.5, ..Default::default() };
+        let o = FfbMixer::default().mix(0.001, &cfg, true, &parked, 0.0, 56.0, true, &feel_none());
+        assert_eq!(o.asphalt_nm, 0.0);
     }
 
     #[test]

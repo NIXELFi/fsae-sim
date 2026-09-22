@@ -5,12 +5,72 @@ import {
   MODEL, PARAM_DEFAULTS, PROVENANCE, parameterGroups, provenanceTally, readParam, writeParam,
 } from "../vehicle/paramMeta.js";
 
+/** Provenance chip: TEAM, CFD, CAL, EST. */
+function chip(key) {
+  return `<span class="prov prov-${key}" title="${esc(PROVENANCE[key].blurb)}">${PROVENANCE[key].short}</span>`;
+}
+
+/** One parameter: its value row, and a slider row under it when it is live. */
+function paramRow(r) {
+  return `
+    <tr class="p-${r.prov}${r.edit ? " p-live" : ""}"${r.note ? ` title="${esc(r.note)}"` : ""}>
+      <td class="p-label">${esc(r.label)}${r.note ? '<i class="p-info">i</i>' : ""}</td>
+      <td class="p-value">${esc(r.value)}<span>${esc(r.unit)}</span></td>
+      <td class="p-prov">${chip(r.prov)}</td>
+    </tr>
+    ${r.edit ? `
+    <tr class="p-editrow">
+      <td colspan="3">
+        <div class="p-edit" data-path="${esc(r.edit.path)}"
+             data-factor="${r.edit.factor}" data-step="${r.edit.step}">
+          <input type="range" min="${r.edit.min}" max="${r.edit.max}"
+                 step="${r.edit.step}" value="${r.edit.raw}">
+          <input type="number" min="${r.edit.min}" max="${r.edit.max}"
+                 step="${r.edit.step}" value="${round(r.edit.raw, r.edit.step)}">
+          <button class="p-reset" title="Back to as-shipped">reset</button>
+        </div>
+      </td>
+    </tr>` : ""}`;
+}
+
+/**
+ * What a team changes between runs, in one place: the wheel adjustments plus
+ * aero balance and the diff's power ramp, which are pit changes rather than
+ * knobs. The same parameters as the full sheet -- these sliders and those
+ * write the same values -- gathered so nobody has to scroll a few hundred
+ * rows between runs to find brake bias.
+ */
+export const QUICK_SETUP_PATHS = [
+  "roll.rsdFront", "brakeBiasFront", "aeroFrontFrac",
+  "diff.preloadNm", "diff.coastLock", "diff.powerLock",
+  "launchRpm", "finalDrive",
+];
+
+export function renderQuickSetup(root, onChange) {
+  const rows = [];
+  for (const g of parameterGroups()) {
+    for (const r of g.rows) if (r.edit && QUICK_SETUP_PATHS.includes(r.edit.path)) rows.push(r);
+  }
+  rows.sort((a, b) => QUICK_SETUP_PATHS.indexOf(a.edit.path) - QUICK_SETUP_PATHS.indexOf(b.edit.path));
+  root.innerHTML = `
+    <section class="pgroup qs-grid">
+      ${rows.map((r) => `<table>${paramRow(r)}</table>`).join("")}
+    </section>`;
+  wireEditors(root, onChange);
+}
+
+/**
+ * Bring every slider under `root` up to the live value without re-rendering
+ * it -- after the other sheet or a wheel button moved something. Re-rendering
+ * would drop a slider out from under a drag in progress.
+ */
+export function syncEditors(root) {
+  for (const box of root.querySelectorAll(".p-edit")) box._sync?.();
+}
+
 export function renderSpecSheet(root, onChange) {
   const { tally, total } = provenanceTally();
   const groups = parameterGroups();
-
-  const chip = (key) =>
-    `<span class="prov prov-${key}" title="${esc(PROVENANCE[key].blurb)}">${PROVENANCE[key].short}</span>`;
 
   const legend = Object.entries(PROVENANCE).map(([key, meta]) => `
     <div class="legend-item">
@@ -33,25 +93,7 @@ export function renderSpecSheet(root, onChange) {
     <section class="pgroup">
       <h5>${esc(g.title)}</h5>
       <table>
-        ${g.rows.map((r) => `
-          <tr class="p-${r.prov}${r.edit ? " p-live" : ""}"${r.note ? ` title="${esc(r.note)}"` : ""}>
-            <td class="p-label">${esc(r.label)}${r.note ? '<i class="p-info">i</i>' : ""}</td>
-            <td class="p-value">${esc(r.value)}<span>${esc(r.unit)}</span></td>
-            <td class="p-prov">${chip(r.prov)}</td>
-          </tr>
-          ${r.edit ? `
-          <tr class="p-editrow">
-            <td colspan="3">
-              <div class="p-edit" data-path="${esc(r.edit.path)}"
-                   data-factor="${r.edit.factor}" data-step="${r.edit.step}">
-                <input type="range" min="${r.edit.min}" max="${r.edit.max}"
-                       step="${r.edit.step}" value="${r.edit.raw}">
-                <input type="number" min="${r.edit.min}" max="${r.edit.max}"
-                       step="${r.edit.step}" value="${round(r.edit.raw, r.edit.step)}">
-                <button class="p-reset" title="Back to as-shipped">reset</button>
-              </div>
-            </td>
-          </tr>` : ""}`).join("")}
+        ${g.rows.map(paramRow).join("")}
       </table>
     </section>`).join("");
 
@@ -135,15 +177,22 @@ function wireEditors(root, onChange) {
     const valueCell = box.closest("tr").previousElementSibling.querySelector(".p-value");
     const unit = valueCell.querySelector("span")?.textContent ?? "";
 
-    const apply = (displayed, from) => {
-      const clamped = Math.min(Number(slider.max), Math.max(Number(slider.min), displayed));
-      writeParam(path, clamped / factor);
+    const show = (clamped, from) => {
       if (from !== slider) slider.value = clamped;
       if (from !== number) number.value = round(clamped, step);
       valueCell.innerHTML = `${round(clamped, step)}<span>${unit}</span>`;
       const isDefault = Math.abs(clamped / factor - PARAM_DEFAULTS[path]) < 1e-9;
       box.classList.toggle("changed", !isDefault);
+    };
+    const apply = (displayed, from) => {
+      const clamped = Math.min(Number(slider.max), Math.max(Number(slider.min), displayed));
+      writeParam(path, clamped / factor);
+      show(clamped, from);
       onChange?.(path, clamped / factor);
+    };
+    box._sync = () => {
+      if (document.activeElement === slider || document.activeElement === number) return;
+      show(readParam(path) * factor, null);
     };
 
     slider.addEventListener("input", () => apply(Number(slider.value), slider));

@@ -449,6 +449,7 @@ export class ControlsPanel {
           `   tyre ${last.align.toFixed(2)}   damping ${last.damping.toFixed(2)}` +
           ((last.oversteer ?? 0) !== 0 ? `   oversteer ${last.oversteer.toFixed(2)}` : "") +
           `   stop ${last.softLock.toFixed(2)}   texture ${last.textureNm.toFixed(2)}` +
+          ((last.asphaltNm ?? 0) > 0 ? `   asphalt ${last.asphaltNm.toFixed(2)}` : "") +
           (last.clipped ? "   CLIPPING" : "");
       }
     });

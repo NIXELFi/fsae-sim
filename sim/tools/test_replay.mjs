@@ -380,10 +380,7 @@ section("Statistics");
 section("Every adjustable parameter is recorded");
 {
   // The recorder builds its setup snapshot from the spec sheet's editable list
-  // (PARAM_DEFAULTS) plus ADJUSTABLE_PATHS. Neither of the d-pad's two items is
-  // in PARAM_DEFAULTS, so a run's manifest used to omit roll distribution and
-  // brake bias -- the only two a driver can change from inside the car, and so
-  // the two most likely to differ between runs.
+  // (PARAM_DEFAULTS) plus ADJUSTABLE_PATHS.
   const items = buildAdjustments(SDM26);
   ok("the adjuster's item count matches the recorded path list",
      items.length === ADJUSTABLE_PATHS.length,
@@ -391,8 +388,10 @@ section("Every adjustable parameter is recorded");
   for (const path of ADJUSTABLE_PATHS) {
     const v = readParam(path);
     ok(`${path} is readable`, typeof v === "number" && Number.isFinite(v), String(v));
-    ok(`${path} is NOT already in PARAM_DEFAULTS (so it must be added by hand)`,
-       !(path in PARAM_DEFAULTS));
+    // RSD and brake bias were once on no slider, and a run's manifest
+    // omitted them. They are all on the sheet now, which is what records them.
+    ok(`${path} is on the setup sheet (PARAM_DEFAULTS), so it is saved and recorded`,
+       path in PARAM_DEFAULTS);
   }
   // And each item really does move the parameter the list names.
   const before = ADJUSTABLE_PATHS.map(readParam);

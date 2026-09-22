@@ -13,8 +13,8 @@
 //
 // Pure ES module: no DOM, no Tauri. `main.js` does the file I/O.
 
-import { PARAM_DEFAULTS, parameterGroups, readParam, writeParam } from "./paramMeta.js";
-import { ADJUSTABLE_PATHS, buildAdjustments } from "./setupAdjust.js";
+import { PARAM_DEFAULTS, parameterGroups, readParam, writeParam, flattenParams, AS_SHIPPED } from "./paramMeta.js";
+import { buildAdjustments } from "./setupAdjust.js";
 import { SDM26 } from "./params.js";
 
 export const SETUP_FORMAT = "helios-setup";
@@ -30,9 +30,8 @@ export const SETUP_MIME = "application/x-helios-setup";
  *   factor            stored -> displayed (CG height is stored in m, shown in mm)
  *   min, max, step    in STORED units (the sheet's ranges are in display units)
  *
- * The spec sheet's editable rows plus the two the driver moves from the wheel
- * (`ADJUSTABLE_PATHS`), which are on no slider but are the likeliest two to
- * differ between two setups.
+ * The spec sheet's editable rows, plus anything the driver moves from the
+ * wheel (`ADJUSTABLE_PATHS`) that has no slider.
  */
 export const SETUP_META = (() => {
   const meta = {};
@@ -46,13 +45,15 @@ export const SETUP_META = (() => {
       };
     }
   }
+  // Anything the driver can move from the wheel that the sheet has no slider
+  // for. Every item is on the sheet today; this is here so the next one added
+  // to ADJUSTMENTS cannot go missing from the file.
   for (const item of buildAdjustments(SDM26)) {
-    const path = item.id === "rsd" ? "roll.rsdFront" : item.id === "bbias" ? "brakeBiasFront" : null;
-    if (!path || !ADJUSTABLE_PATHS.includes(path)) continue;
-    // These are stored as fractions and shown as percentages.
-    meta[path] = {
-      label: item.label, unit: item.unit, factor: 100, group: "Setup from the wheel",
-      min: item.min / 100, max: item.max / 100, step: item.step / 100,
+    if (meta[item.path]) continue;
+    const f = item.factor || 1;
+    meta[item.path] = {
+      label: item.label, unit: item.unit, factor: f, group: "Setup from the wheel",
+      min: item.min / f, max: item.max / f, step: item.step / f,
     };
   }
   return meta;
@@ -233,6 +234,82 @@ export function diffSetup(values, defaults = SETUP_DEFAULTS) {
     });
   }
   return out;
+}
+
+/**
+ * The parameters a team is allowed to change between runs without the time
+ * ceasing to mean anything.
+ *
+ * Every one of these is a real adjustment on the real SDM26 -- a bar blade, a
+ * bias-bar turn, a flap hole, a diff shim, an ECU number, a sprocket -- so a
+ * lap driven on any combination of them is a lap the car could actually have
+ * driven. `QUICK_SETUP_PATHS` in specSheet.js is the same list; it lives
+ * there because that is the block the driver adjusts, and it is re-declared
+ * here because THIS is the list that decides whether a time counts, and the
+ * two answering the same question by accident is not good enough.
+ */
+export const SETUP_LEGAL_PATHS = [
+  "roll.rsdFront", "brakeBiasFront", "aeroFrontFrac",
+  "diff.preloadNm", "diff.coastLock", "diff.powerLock",
+  "launchRpm", "finalDrive",
+];
+
+/**
+ * Everything the car is running that is NOT a setup change: mass, power,
+ * grip, aero area, inertias, geometry -- the numbers that describe the car
+ * rather than how it is set up.
+ *
+ * A time on a 220 kg car with 1.4x the grip is not a time. It is a what-if,
+ * and what-ifs are worth having (that is the whole point of a sheet where
+ * every number is editable), but they cannot sit in the same list as the runs
+ * the team is judged on. So: the lap is still driven, still recorded, still
+ * replayable -- it just does not count, it says so on screen while it is
+ * being driven, and it never becomes anybody's best.
+ *
+ * @returns [{path, label, unit, from, to, fromText, toText}], empty when the
+ *          car is honest.
+ */
+export function modelChanges(values = null) {
+  const now = values ?? flattenParams();
+  const legal = new Set(SETUP_LEGAL_PATHS);
+  const out = [];
+  for (const path of Object.keys(AS_SHIPPED)) {
+    if (legal.has(path)) continue;
+    const to = now[path];
+    const from = AS_SHIPPED[path];
+    if (to === undefined) continue;
+    // Arrays arrive joined ("2.75,2,1.667,..."), so an exact string compare
+    // catches a single changed gear.
+    if (typeof from === "string" || typeof to === "string") {
+      if (String(from) === String(to)) continue;
+    } else if (Math.abs(to - from) <= 1e-9 * Math.max(1, Math.abs(from))) {
+      continue;
+    }
+    const m = SETUP_META[path];
+    const factor = m?.factor ?? 1;
+    const show = (v) => (typeof v === "number" ? fmt(v * factor) : String(v));
+    out.push({
+      path, label: m?.label ?? path, unit: m?.unit ?? "", group: m?.group ?? "Model",
+      from, to, fromText: show(from), toText: show(to),
+    });
+  }
+  return out;
+}
+
+/**
+ * Every number in the car, for the run manifest.
+ *
+ * `setup` carries the sliders (and is what a `.hset` is); this carries the
+ * whole model, so a run driven on a build with the grip or the gear ratios
+ * edited says so in its own file rather than looking like everyone else's.
+ */
+export function carSnapshot() {
+  return flattenParams();
+}
+
+/** Does a car in this state produce times worth recording? */
+export function timeCounts(values = null) {
+  return modelChanges(values).length === 0;
 }
 
 /** A filename a driver can hand over, ending in `.hset`. */

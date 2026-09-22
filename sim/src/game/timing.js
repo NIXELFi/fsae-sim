@@ -120,6 +120,16 @@ export class Timing {
     const best = keepBest ? this.best : null;
     const bestRaw = keepBest ? this.bestRaw : null;
     const bestSectors = keepBest ? this.bestSectors : [];
+    /**
+     * Is the CAR one these times mean anything on?
+     *
+     * False once anything outside the run-to-run setup list has been moved
+     * off as-shipped -- mass, power, grip, aero area, geometry. The lap is
+     * still driven, timed, shown and recorded; it simply cannot become a
+     * best, a reference or a record, exactly like an off-course lap. Set by
+     * the game from `timeCounts()`; see `modelChanges` in setupFile.js.
+     */
+    this.countsForRecords = true;
     this.state = "staged";       // staged -> running -> finished
     this.elapsed = 0;
     this.lap = 0;
@@ -431,9 +441,12 @@ export class Timing {
       // to know what it was worth -- but it is not a time, so nothing that
       // ranks, references or averages may take it.
       valid: !this.lapInvalid,
+      // ...and whether the CAR was one this lap could have been driven in.
+      // See `countsForRecords`.
+      counted: !this.lapInvalid && this.countsForRecords,
     };
     this.laps.push(entry);
-    if (entry.valid) {
+    if (entry.counted) {
       if (this.best == null || entry.total < this.best.total) this.best = entry;
       if (this.bestRaw == null || raw < this.bestRaw) this.bestRaw = raw;
       this.foldSectorBests();
@@ -447,7 +460,9 @@ export class Timing {
 
     if (this.state !== "finished") {
       this.say(
-        entry.valid ? `LAP ${this.lap}  ${fmt(entry.total)}` : `LAP ${this.lap}  INVALID - OFF COURSE`,
+        !entry.valid ? `LAP ${this.lap}  INVALID - OFF COURSE`
+          : entry.counted ? `LAP ${this.lap}  ${fmt(entry.total)}`
+          : `LAP ${this.lap}  ${fmt(entry.total)}  NOT COUNTED`,
         3,
       );
       this.onCue?.(entry.valid ? "lap" : "invalid");

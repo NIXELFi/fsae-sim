@@ -18,16 +18,18 @@ import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
 import { Timing, fmt, sectorVerdict, penalisedSector, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
 import { planReplayLaunch, buildSectorSync, ghostClockAt, sectorLaunchOptions } from "./game/sectorSync.js";
-import { keyLabel, buttonLabel, buttonSlot, ACTIONS, ACTION_GROUPS } from "./game/controlBindings.js";
+import { keyLabel, buttonLabel, buttonSlot, ACTIONS, ACTION_GROUPS, SETUP_ITEM_ACTIONS } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
 import { EtcEditor } from "./game/etcEditor.js";
 import { isDesktop, installDesktopBehaviour, rigNative, launchOptions, onLaunchOptions, onWindowClose, closeAppWindow, toggleFullscreen, restoreFullscreen, appVersion, readSetupFile, saveSetupFile, onFileDrop } from "./game/desktop.js";
 import { ForceFeedback } from "./game/forceFeedback.js";
 import { NativeCar } from "./vehicle/nativeCar.js";
-import { renderSpecSheet } from "./game/specSheet.js";
+import { renderSpecSheet, renderQuickSetup, syncEditors } from "./game/specSheet.js";
 import { PARAM_DEFAULTS, readParam, writeParam } from "./vehicle/paramMeta.js";
-import { serializeSetup, parseSetup, applySetup, setupFilename, diffSetup, SETUP_EXT, SETUP_MIME } from "./vehicle/setupFile.js";
-import { SetupAdjuster, ADJUSTABLE_PATHS } from "./vehicle/setupAdjust.js";
+import { serializeSetup, parseSetup, applySetup, setupFilename, diffSetup, modelChanges, timeCounts, carSnapshot, SETUP_PATHS, SETUP_DEFAULTS, SETUP_EXT, SETUP_MIME } from "./vehicle/setupFile.js";
+import { SetupAdjuster, ADJUSTABLE_PATHS, formatSetupValue } from "./vehicle/setupAdjust.js";
+import { applySlot, nextSlot, markEdited, saveSlot, loadSlots } from "./game/setupSlots.js";
+import { renderSetupCard, syncSetupCard } from "./game/setupCard.js";
 import { drawCoursePlan } from "./game/coursePlan.js";
 import { Recorder, datumFor } from "./game/recorder.js";
 
@@ -220,6 +222,10 @@ class Game {
     // Live setup adjustment from the d-pad. Writes into the same params object
     // the physics holds, so changes land on the next substep.
     this.setup = new SetupAdjuster(SDM26);
+    /** Is the staging setup card on screen? See `syncStagingCard`. */
+    this.stagingUp = false;
+    /** Does this run's time count? See `refreshTimeCounts`. */
+    this.runCounts = timeCounts();
     this.clock = 0;
 
     this.paused = false;
@@ -528,6 +534,10 @@ class Game {
     this.track.resetCones();
     // A restart is "try again": the reference the driver is chasing stays.
     this.timing.reset({ keepBest: true });
+    // A fresh run gets a fresh verdict: put the car back to as-shipped and
+    // the next run counts again, however many what-ifs came before it.
+    this.runCounts = timeCounts();
+    this.refreshTimeCounts();
     // A restart is a new lap, not a new session: the reference the driver is
     // chasing survives, exactly as their best time does.
     this.deltaTimer?.reset();
@@ -599,6 +609,23 @@ class Game {
       physics: this.car?.native ? "native-1khz" : "javascript",
       assists: { ...this.assists },
       setup: snapshotSetup(),
+      // EVERY number in the model, not just the ones with a slider. `setup`
+      // is the sliders (and is what a .hset carries); this is the car. A run
+      // driven on a build with the grip or the gear ratios edited is
+      // otherwise indistinguishable from an honest one in its own log.
+      car: carSnapshot(),
+      // ...and the torque curve is a data file, so it is fingerprinted
+      // rather than copied: two runs that disagree here were not driven on
+      // the same engine, whatever their parameters say.
+      engine: engineFingerprint(this.powertrain),
+      // Whether this run's times are times. False once anything outside the
+      // run-to-run setup list was off as-shipped during it -- mass, power,
+      // grip -- with the offending parameters named so a reader does not
+      // have to diff two setups to find out why.
+      counted: this.refreshTimeCounts(),
+      modelChanges: modelChanges().map((d) => ({
+        path: d.path, label: d.label, unit: d.unit, from: d.from, to: d.to,
+      })),
       etc: this.etc?.points ? JSON.parse(JSON.stringify(this.etc.points)) : null,
       simVersion: SIM_VERSION,
       // Whatever the delta is already chasing -- a lap Helios loaded, or the
@@ -754,6 +781,9 @@ class Game {
 
   update(dt) {
     this.lastDt = dt;
+    // Before any of the early returns below: pausing, opening the throttle-map
+    // editor and going home all have to take the staging card away with them.
+    this.syncStagingCard();
     // The sampler is ticked at the END of this frame, but the timing, the cone
     // strikes and the shifts all happen before that and all want stamping with
     // the time the frame lands on. Tell the recorder how far ahead the rest of
@@ -813,16 +843,24 @@ class Game {
     if (e.setupPrev) this.announceSetup(this.setup.select(-1));
     if (e.setupNext) this.announceSetup(this.setup.select(1));
     if (e.setupUp || e.setupDown) {
-      const item = this.setup.nudge(e.setupUp ? 1 : -1, this.input.setupHoldScale, this.clock);
-      this.announceSetup(item);
+      this.setupChanged(this.setup.nudge(e.setupUp ? 1 : -1, this.input.setupHoldScale, this.clock));
+    }
+    // Back to where the session started: `SetupAdjuster` kept the baseline,
+    // so this is the one way out of ten minutes of fiddling that does not
+    // mean reading the HUD deltas and undoing each one by hand.
+    if (e.setupReset) {
+      this.setup.resetAll();
+      this.timing?.say("SETUP  BASELINE", 1.6);
       this.pushParams();
-      // A setup change mid-run is part of the run. Without this the manifest
-      // carries the values the run STARTED with and quietly disagrees with the
-      // telemetry from the moment the driver touches the d-pad -- which is
-      // exactly when somebody will be trying to work out what changed.
-      this.recorder?.event("setup", {
-        item: item.short, value: round3(item.get()), unit: item.unit,
-      });
+      this.recorder?.event("setup", { item: "ALL", value: 0, unit: "baseline" });
+      this.onSetupChanged?.();
+    }
+    if (e.setupSwitchSlot) this.switchSetupSlot();
+    // Direct bindings: BBAL up, RSD down, ... straight to the item.
+    for (const a of SETUP_ITEM_ACTIONS) {
+      if (!e[a.id]) continue;
+      const item = this.setup.nudgeId(a.setupItem, a.dir, this.input.setupHoldScale, this.clock);
+      if (item) this.setupChanged(item);
     }
 
     if (this.input.edges.camera) {
@@ -1337,6 +1375,8 @@ class Game {
       brake: this.brakeApplied,
       etcName: this.etc.name,
       setup: this.setup.state(this.clock),
+      // Say it while it is happening, not in the run file afterwards.
+      counted: this.runCounts !== false,
       // After the flag the big clock shows the run that just finished, not 0.
       lapTimeText: fmt(t.state === "staged" ? 0 : t.state === "finished" && last ? last.total : t.lapTime),
       lastLapText: last ? fmt(last.total) : "--.---",
@@ -1511,8 +1551,58 @@ class Game {
     };
   }
 
+  /**
+   * Whether this run's times mean anything, kept current.
+   *
+   * Once the car has been off the setup list at any point in a run, that run
+   * is done for: changing mass back mid-lap does not un-drive the part of the
+   * lap that was driven light. So this latches false and only a restart
+   * clears it.
+   */
+  refreshTimeCounts() {
+    if (!timeCounts()) this.runCounts = false;
+    if (this.timing) this.timing.countsForRecords = this.runCounts !== false;
+    return this.runCounts !== false;
+  }
+
+  /**
+   * Flip to the other saved setup, A to B or back. The whole point is
+   * back-to-back runs: change nothing else, drive the same lap twice.
+   */
+  switchSetupSlot() {
+    const to = nextSlot();
+    if (!to) {
+      this.timing?.say("NO SAVED SETUP", 1.6);
+      return null;
+    }
+    const n = applySlot(to, SDM26);
+    this.timing?.say(`SETUP  ${to}`, 1.8);
+    this.pushParams();
+    this.recorder?.event("setup", { item: `SLOT ${to}`, value: n ?? 0, unit: "params" });
+    this.onSetupChanged?.({ slotOnly: true });
+    return to;
+  }
+
+  /** After any setup nudge, from the menu or a direct binding. */
+  setupChanged(item) {
+    this.announceSetup(item);
+    this.pushParams();
+    // A setup change mid-run is part of the run. Without this the manifest
+    // carries the values the run STARTED with and quietly disagrees with the
+    // telemetry from the moment the driver touches the d-pad -- which is
+    // exactly when somebody will be trying to work out what changed.
+    this.recorder?.event("setup", {
+      item: item.short, value: round3(item.get()), unit: item.unit,
+    });
+    this.refreshTimeCounts();
+    // The car no longer matches the slot it came from, whichever that was.
+    markEdited();
+    // The car keeps what you set, run to run, and the setup sheet shows it.
+    this.onSetupChanged?.();
+  }
+
   announceSetup(item) {
-    this.timing.say(`${item.short} ${item.get().toFixed(1)}${item.unit}`, 1.6);
+    this.timing.say(`${item.short} ${formatSetupValue(item.get(), item)}`, 1.6);
   }
 
   openEtcEditor() {
@@ -1532,6 +1622,9 @@ class Game {
     this.dom.pauseMenu.hidden = true;
     this.dom.menu.hidden = false;
     this.audio.setEnabled(false);
+    // Whatever was changed from the wheel during the run is what the launch
+    // screen must now be showing.
+    this.onHome?.();
     // The run is still there -- offer to go back to it rather than bin it.
     this.dom.startBtn.textContent = "Resume run";
     this.dom.restartBtn.hidden = false;
@@ -2243,13 +2336,45 @@ class Game {
    * released the moment a menu is up.
    */
   syncPointer() {
-    const want = this.driving && !!this.input.profile.mouse?.enabled;
+    // The staging card is a mouse target, so the pointer stays free while it
+    // is up. Without this a mouse-steering driver can see the card and not
+    // click it, which is worse than not showing it at all.
+    const want = this.driving && !this.stagingUp && !!this.input.profile.mouse?.enabled;
     const locked = document.pointerLockElement === this.dom.gl;
     try {
       if (want && !locked) this.dom.gl.requestPointerLock?.();
       else if (!want && locked) document.exitPointerLock?.();
     } catch { /* not available (some webviews); movementX still works unlocked */ }
     this.dom.gl.style.cursor = want ? "none" : "";
+  }
+
+  /**
+   * The staging card: up from the moment a run is armed until the car rolls
+   * and the flag goes green, and up again on the next restart.
+   *
+   * This is where the card matters most, and for an autostart driver
+   * (`--autostart`, or Helios launching the rig straight into a run) it is
+   * the ONLY place a setup is ever shown -- they never see the launch screen.
+   * Toggled on change rather than every frame: `hidden` is a style write and
+   * this runs at 60 Hz.
+   */
+  syncStagingCard() {
+    const el = this.dom.stagingSetup;
+    if (!el) return;
+    const show = !!(this.started && this.dom.menu.hidden && !this.paused && !this.replay
+      && !this.etcEditor?.isOpen && this.timing?.state === "staged");
+    if (show === this.stagingUp) return;
+    this.stagingUp = show;
+    el.hidden = !show;
+    if (show) {
+      this.onStagingShown?.();
+    } else {
+      // Green: hand the keyboard back to the car. A number field still
+      // focused would swallow the throttle.
+      const active = document.activeElement;
+      if (active && el.contains(active)) active.blur();
+    }
+    this.syncPointer();
   }
 
   /** True while the driver is actually in the run (not menu, pause, editor). */
@@ -2285,6 +2410,10 @@ const dom = {
   etcSummary: document.getElementById("etcSummary"),
   etcBtn: document.getElementById("etcBtn"),
   vehicle: document.getElementById("vehicle"),
+  quickSetup: document.getElementById("quickSetup"),
+  setupNow: document.getElementById("setupNow"),
+  stagingSetup: document.getElementById("stagingSetup"),
+  stagingSetupCard: document.getElementById("stagingSetupCard"),
   resetParams: document.getElementById("resetParams"),
   paramNote: document.getElementById("paramNote"),
   exportSetup: document.getElementById("exportSetup"),
@@ -2425,8 +2554,10 @@ function updateSession() {
   }
   const pt = game.powertrain;
   const engine = pt ? `${pt.peakPower.powerKW.toFixed(0)} kW at ${pt.peakPower.rpm} rpm` : "";
+  const illegal = modelChanges();
   dom.sCar.innerHTML = `<b>SDM26</b><small>${esc(engine)}${changed
-    ? ` <span class="changed">${changed} parameter${changed === 1 ? "" : "s"} changed</span>` : ""}</small>`;
+    ? ` <span class="changed">${changed} parameter${changed === 1 ? "" : "s"} changed</span>` : ""}` +
+    `${illegal.length ? ` <span class="uncounted" title="${esc(illegal.map((c) => c.label).join(", "))}">times will not count</span>` : ""}</small>`;
   if (dom.paramBadge) dom.paramBadge.textContent = changed ? String(changed) : "";
 
   const aids = [];
@@ -2630,7 +2761,7 @@ function downloadText(name, text, mime) {
 
 function wireSetupFiles(tabs, onParamChange) {
   const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const markSvg = '<svg class="hset-mark" aria-hidden="true"><use href="#hset-mark-sym"/></svg>';
+
   let pending = null;   // {meta, values, warnings} waiting on Apply
 
   const isoDay = () => new Date().toISOString().slice(0, 10);
@@ -2832,6 +2963,9 @@ function wireSetupFiles(tabs, onParamChange) {
     const n = applySetup(values);
     saveParams();
     renderSpecSheet(dom.vehicle, onParamChange);
+    syncEditors(dom.quickSetup);
+    syncSetupCard(dom.setupNow);
+    markEdited();
     game?.pushParams();
     game?.renderer.rebuildCar(SDM26);
     updateSession();
@@ -2851,6 +2985,12 @@ function etcSummary(map) {
 }
 
 let game;
+/**
+ * Redraw every setup surface after something wrote the parameters from
+ * outside the usual handlers -- a run's setup loaded from the Runs tab. Set
+ * in boot, where the surfaces are.
+ */
+let refreshSetupSurfaces = () => {};
 /** `boot`'s course loader, for the Runs tab's Chase. */
 let loadCourseFromSelect = async () => false;
 
@@ -2906,26 +3046,104 @@ async function boot() {
   const restored = loadParams();
   const onParamChange = (path) => {
     saveParams();
+    game?.refreshTimeCounts();
     game?.pushParams();
     if (GEOMETRY_PATHS.includes(path)) game?.renderer.rebuildCar(SDM26);
     updateSession();
   };
-  renderSpecSheet(dom.vehicle, onParamChange);
+  // Two surfaces over the same parameters: the full sheet, and the Car tab's
+  // run-to-run block. Each keeps the other in step.
+  // Four surfaces over the same parameters: the full sheet, the Car tab's
+  // run-to-run block, the launch card, and the wheel. Every one of them keeps
+  // the other three in step, and none of them redraws another mid-edit.
+  const syncAllSetup = (except) => {
+    if (except !== dom.vehicle) syncEditors(dom.vehicle);
+    if (except !== dom.quickSetup) syncEditors(dom.quickSetup);
+    if (except !== dom.setupNow) syncSetupCard(dom.setupNow);
+    if (except !== dom.stagingSetupCard) syncSetupCard(dom.stagingSetupCard);
+  };
+  const onSheetChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.vehicle); };
+  const onQuickChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.quickSetup); };
+  const onCardChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.setupNow); };
+  const onStagingChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.stagingSetupCard); };
+  renderSpecSheet(dom.vehicle, onSheetChange);
+  renderQuickSetup(dom.quickSetup, onQuickChange);
+  /**
+   * The slot buttons, shared by the launch card and the staging card: the
+   * same three actions, and whichever card was clicked gets the note.
+   */
+  const onSlot = (card) => (action, id) => {
+    if (action === "save") {
+      saveSlot(id);
+      syncAllSetup(null);
+      syncSetupCard(card, `Slot ${id} holds the car as it is now.`);
+      return;
+    }
+    if (action === "load") {
+      const n = applySlot(id, SDM26);
+      if (n == null) return;
+      saveParams();
+      game?.pushParams();
+      game?.renderer.rebuildCar(SDM26);
+      syncAllSetup(null);
+      syncSetupCard(card, `Slot ${id} loaded: ${n} parameters.`);
+      updateSession();
+      return;
+    }
+    // Baseline: where the car was when this session started, which is what
+    // the in-car button and the HUD's deltas both mean by it.
+    game?.setup?.resetAll();
+    markEdited();
+    saveParams();
+    game?.pushParams();
+    syncAllSetup(null);
+    syncSetupCard(card, "Back to this session's baseline.");
+    updateSession();
+  };
+  refreshSetupSurfaces = () => {
+    saveParams();
+    game?.refreshTimeCounts();
+    game?.pushParams();
+    game?.renderer?.rebuildCar(SDM26);
+    syncAllSetup(null);
+    updateSession();
+  };
+  renderSetupCard(dom.setupNow, { onChange: onCardChange, onSlot: onSlot(dom.setupNow) });
+  renderSetupCard(dom.stagingSetupCard, { onChange: onStagingChange, onSlot: onSlot(dom.stagingSetupCard) });
   if (restored) dom.paramNote.textContent = `${restored} parameter${restored === 1 ? "" : "s"} restored from your last session.`;
 
   dom.resetParams.addEventListener("click", () => {
     for (const path of Object.keys(PARAM_DEFAULTS)) writeParam(path, PARAM_DEFAULTS[path]);
     saveParams();
-    renderSpecSheet(dom.vehicle, onParamChange);
+    renderSpecSheet(dom.vehicle, onSheetChange);
+    syncEditors(dom.quickSetup);
+    syncSetupCard(dom.setupNow);
+    markEdited();
     game?.pushParams();
     game?.renderer.rebuildCar(SDM26);
     dom.paramNote.textContent = "All parameters back to as-shipped.";
     updateSession();
   });
-  const setupUi = wireSetupFiles(tabs, onParamChange);
+  const setupUi = wireSetupFiles(tabs, onSheetChange);
 
   try {
     game = new Game(dom);
+    // A wheel nudge is remembered like a slider change, and the sheet is
+    // redrawn to match. Debounced: a held button repeats every 70 ms, and
+    // the sheet is a few hundred rows nobody is looking at mid-run.
+    let sheetTimer = 0;
+    // Redrawn every time it appears: a run may be armed minutes after the
+    // last look at the launch screen.
+    game.onStagingShown = () => syncSetupCard(dom.stagingSetupCard, "");
+    game.onHome = () => refreshSetupSurfaces();
+    game.onSetupChanged = () => {
+      clearTimeout(sheetTimer);
+      sheetTimer = setTimeout(() => {
+        saveParams();
+        syncAllSetup(null);
+        updateSession();
+      }, 400);
+    };
   } catch (err) {
     dom.loadNote.textContent = String(err.message ?? err);
     dom.loadNote.classList.add("error");
@@ -3562,7 +3780,12 @@ async function boot() {
 }
 
 /** The quickest scored lap in the archive, per course: { best, driver, runId }. */
+/** The Helios setup mark, for any card that shows a setup. */
+const markSvg = '<svg class="hset-mark" aria-hidden="true"><use href="#hset-mark-sym"/></svg>';
+
 const bestOnCourse = new Map();
+/** The last listing, so a run's setup can be diffed against another one. */
+let lastRuns = [];
 
 /** One line naming a run, for pickers. */
 function runLabel(runId, m) {
@@ -3592,9 +3815,14 @@ async function refreshRuns() {
   }
   // The archive best per course, for the session card.
   bestOnCourse.clear();
+  lastRuns = runs;
   for (const { runId, manifest: m } of runs) {
     const best = m.stats?.bestLapS;
     if (best == null || !m.track) continue;
+    // A time set on a car that was not the car is not the number to chase.
+    // `counted` is absent on runs recorded before this existed; those were
+    // all driven on an unmodified model, so absent means counted.
+    if (m.counted === false) continue;
     const cur = bestOnCourse.get(m.track);
     if (!cur || best < cur.best) bestOnCourse.set(m.track, { best, driver: m.driver || "Unknown", runId });
   }
@@ -3630,6 +3858,7 @@ async function refreshRuns() {
     row.innerHTML =
       `<div class="who"><b>${escHtml(m.driver || "Unknown")}</b> &middot; ${escHtml(m.trackName || m.track || "?")}</div>` +
       `<div class="right"><span class="time">${best != null ? fmt(best) : "--.---"}</span>` +
+      `<button class="secondary" data-setup="${escHtml(runId)}" title="What this run was driven on">Setup</button>` +
       `<button class="secondary" data-replay="${escHtml(runId)}">Replay</button>` +
       (referenceLapOf(m.laps)
         ? `<button class="secondary" data-chase="${escHtml(runId)}" title="Put this run's best lap on the live delta"${chasing === runId ? ' disabled' : ''}>${chasing === runId ? "Chasing" : "Chase"}</button>`
@@ -3639,15 +3868,135 @@ async function refreshRuns() {
       ` &middot; ${(st.durationS ?? 0).toFixed(1)} s` +
       ` &middot; ${st.totalCones ?? 0} cone${st.totalCones === 1 ? "" : "s"}` +
       `${st.peakLatG ? ` &middot; ${st.peakLatG.toFixed(2)} g peak` : ""}` +
-      `${m.session ? ` &middot; ${escHtml(m.session)}` : ""}</div>`;
+      `${m.session ? ` &middot; ${escHtml(m.session)}` : ""}</div>` +
+      `<div class="meta">${runSetupLine(m)}</div>`;
     host.appendChild(row);
   }
+  host.querySelectorAll("button[data-setup]").forEach((b) => {
+    b.addEventListener("click", () => showRunSetup(b.dataset.setup));
+  });
   host.querySelectorAll("button[data-replay]").forEach((b) => {
     b.addEventListener("click", () => openReplay(b.dataset.replay));
   });
   host.querySelectorAll("button[data-chase]").forEach((b) => {
     b.addEventListener("click", () => chaseRun(b.dataset.chase));
   });
+}
+
+/**
+ * The one-line setup summary under a run: what it was driven on, whether the
+ * setup moved during it, and whether the times count at all.
+ *
+ * Every run has carried its full setup since the recorder existed, and until
+ * now nothing ever read it back -- so two runs a second apart looked
+ * identical in the list even when one of them was on a different brake bias.
+ */
+function runSetupLine(m) {
+  const bits = [];
+  if (m.counted === false) {
+    const why = (m.modelChanges ?? []).map((c) => c.label).filter(Boolean);
+    bits.push(`<span class="uncounted" title="${escHtml(why.join(", "))}">time not counted` +
+      `${why.length ? `: ${escHtml(why.slice(0, 2).join(", "))}${why.length > 2 ? "..." : ""}` : ""}</span>`);
+  }
+  const changes = m.setup ? diffSetup(m.setup) : [];
+  bits.push(changes.length
+    ? `setup: ${changes.slice(0, 3).map((c) => `${escHtml(c.label.replace(/,.*$/, ""))} ${escHtml(c.toText)}${escHtml(c.unit)}`).join(", ")}` +
+      `${changes.length > 3 ? ` +${changes.length - 3} more` : ""}`
+    : "setup: as-shipped");
+  // A change made mid-run means the laps before it and the laps after it were
+  // driven on different cars, which is worth knowing before comparing them.
+  if ((m.events ?? []).some((e) => e.kind === "setup")) {
+    bits.push(`<span class="changed">setup changed mid-run</span>`);
+  }
+  return bits.join(" &middot; ");
+}
+
+/**
+ * Show what a run was driven on, diffed against whatever you pick: as-shipped,
+ * the car as it is now, or another run. "Load this setup" puts it in the car.
+ *
+ * This is the question a test day actually asks -- that run was three tenths
+ * quicker, what was different about it? -- and the data to answer it has been
+ * in every manifest all along.
+ */
+async function showRunSetup(runId, againstId = "shipped") {
+  if (!runId) return;
+  let m;
+  try {
+    ({ manifest: m } = await loadRun(runId));
+  } catch (err) {
+    toast(`Could not read that run: ${err?.message ?? err}`, { error: true });
+    return;
+  }
+  const values = m.setup ?? {};
+  const others = lastRuns.filter((r) => r.runId !== runId).slice(0, 25);
+  const against = againstId === "now"
+    ? Object.fromEntries(SETUP_PATHS.map((p) => [p, readParam(p)]))
+    : againstId === "shipped"
+      ? SETUP_DEFAULTS
+      : (others.find((r) => r.runId === againstId)?.manifest?.setup ?? SETUP_DEFAULTS);
+  const changes = diffSetup(values, against);
+  const when = m.startedAt ? new Date(m.startedAt) : null;
+  const whenText = when && !Number.isNaN(when.getTime())
+    ? when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : runId;
+  const best = m.stats?.bestLapS;
+  const label = (id) => {
+    const r = others.find((x) => x.runId === id);
+    const b = r?.manifest?.stats?.bestLapS;
+    const d = r?.manifest?.startedAt ? new Date(r.manifest.startedAt) : null;
+    return `${r?.manifest?.driver || "Unknown"} ${b != null ? fmt(b) : "--.---"}` +
+      `${d && !Number.isNaN(d.getTime()) ? ` (${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })})` : ""}`;
+  };
+
+  dom.setupCard.innerHTML = `
+    <div class="head">${markSvg}
+      <div>
+        <h4>${escHtml(m.driver || "Unknown")} &middot; ${best != null ? fmt(best) : "no lap"}</h4>
+        <div class="meta">${escHtml(whenText)} &middot; ${escHtml(m.trackName || m.track || "?")}` +
+          `${m.session ? ` &middot; ${escHtml(m.session)}` : ""}` +
+          `${m.counted === false ? ` &middot; <span class="uncounted">time not counted</span>` : ""}</div>
+      </div>
+    </div>
+    <div class="compare-row">
+      <label class="field" for="setupAgainst">Compared with</label>
+      <select id="setupAgainst">
+        <option value="shipped"${againstId === "shipped" ? " selected" : ""}>as-shipped SDM26</option>
+        <option value="now"${againstId === "now" ? " selected" : ""}>the car as it is now</option>
+        ${others.map((r) => `<option value="${escHtml(r.runId)}"${againstId === r.runId ? " selected" : ""}>${escHtml(label(r.runId))}</option>`).join("")}
+      </select>
+    </div>
+    ${changes.length
+      ? `<table class="changes"><tbody>${changes.map((c) => `
+          <tr>
+            <td>${escHtml(c.label)}</td>
+            <td class="v">${escHtml(c.fromText)}<span>${escHtml(c.unit)}</span></td>
+            <td class="arrow">&rarr;</td>
+            <td class="v to">${escHtml(c.toText)}<span>${escHtml(c.unit)}</span></td>
+          </tr>`).join("")}</tbody></table>
+         <p class="same">${changes.length} parameter${changes.length === 1 ? "" : "s"} differ${changes.length === 1 ? "s" : ""}.</p>`
+      : `<p class="same">Identical setups. Whatever the difference was, it was not the car.</p>`}
+    <div class="actions">
+      <button class="primary" id="runSetupApply">Load this setup</button>
+      <button class="secondary" id="runSetupClose">Close</button>
+      <span class="note">Writes ${Object.keys(values).length} parameters into the car and remembers them like any slider change.</span>
+    </div>`;
+  dom.setupCard.hidden = false;
+  dom.setupCard.querySelector("#setupAgainst").addEventListener("change", (e) => {
+    showRunSetup(runId, e.target.value);
+  });
+  dom.setupCard.querySelector("#runSetupClose").addEventListener("click", () => {
+    dom.setupCard.hidden = true;
+    dom.setupCard.innerHTML = "";
+  });
+  dom.setupCard.querySelector("#runSetupApply").addEventListener("click", () => {
+    const n = applySetup(values);
+    refreshSetupSurfaces();
+    dom.setupCard.hidden = true;
+    dom.setupCard.innerHTML = "";
+    toast(`Loaded that run's setup: ${n} parameters.`);
+  });
+  document.querySelector('.tab[data-pane="vehicle"]')?.click();
+  dom.setupCard.scrollIntoView?.({ block: "nearest" });
 }
 
 /**
@@ -3705,6 +4054,33 @@ function escHtml(v) {
   return String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+/**
+ * A short, stable fingerprint of the engine's torque curve.
+ *
+ * `data/sdm26-torque.json` is a file on disk, outside everything the
+ * parameter snapshot can see. Hashing it into each run does not stop anyone
+ * editing it -- nothing running on the driver's own machine can -- but it
+ * makes an edited curve VISIBLE: two runs claiming the same car and the same
+ * sim version with different engine hashes did not use the same engine.
+ * FNV-1a, because this needs to be comparable, not cryptographic.
+ */
+function engineFingerprint(pt) {
+  if (!pt?.points?.length) return null;
+  const text = JSON.stringify(pt.points) + "|" + (pt.displacement ?? "");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return {
+    name: pt.sourceName ?? null,
+    points: pt.points.length,
+    peakTorqueNm: round3(pt.peakTorque?.torqueNm ?? 0),
+    peakTorqueRpm: pt.peakTorque?.rpm ?? null,
+    hash: h.toString(16).padStart(8, "0"),
+  };
+}
+
 function round3(v) {
   return Number.isFinite(v) ? Math.round(v * 1000) / 1000 : 0;
 }
@@ -3732,11 +4108,9 @@ function snapshotSetup() {
       if (typeof v === "number" && Number.isFinite(v)) out[path] = v;
     } catch { /* a parameter this build no longer has */ }
   }
-  // The d-pad's two items are NOT in PARAM_DEFAULTS -- that list comes from the
-  // spec sheet's editable rows, and roll distribution and brake bias are
-  // adjusted from a different surface. They are also the only two a driver
-  // changes from inside the car, which makes them the likeliest to differ
-  // between two runs and the worst two to be missing from the record.
+  // Everything the driver can change from inside the car -- the likeliest
+  // values to differ between two runs, and the worst to be missing from the
+  // record. All on the sheet today; this keeps a future wheel-only item in.
   for (const path of ADJUSTABLE_PATHS) {
     const v = readParam(path);
     if (typeof v === "number" && Number.isFinite(v)) out[path] = v;

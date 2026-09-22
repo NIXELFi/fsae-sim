@@ -39,7 +39,7 @@ export class NativeCar {
     /** What the rig actually applied after driver aids, for the HUD. */
     this.applied = { steer: 0, throttle: 0, brake: 0, nativeSteer: false };
     /** The rig's force feedback mix, for the settings panel. */
-    this.ffb = { command: 0, torqueNm: 0, align: 0, damping: 0, friction: 0, oversteer: 0, softLock: 0, textureNm: 0, clipped: false, kickNm: 0 };
+    this.ffb = { command: 0, torqueNm: 0, align: 0, damping: 0, friction: 0, oversteer: 0, softLock: 0, textureNm: 0, asphaltNm: 0, clipped: false, kickNm: 0 };
     /** The natively read wheel, if any, for the input layer. */
     this.device = { present: false, forceFeedback: false, axes: [], buttons: 0, pov: -1, rimDeg: 0, halfLockDeg: 0 };
     this.stats = { ticks: 0, tickUsAvg: 0, tickUsMax: 0, overruns: 0, rateHz: 0 };
@@ -200,6 +200,7 @@ export class NativeCar {
       gamma: ffb.gamma ?? 0.75, knee: ffb.knee ?? 0.6,
       parkFriction: ffb.parkFriction ?? 0.10, stopDamping: ffb.stopDamping ?? 0.35,
       understeerEffect: ffb.understeerEffect ?? 0, oversteerEffect: ffb.oversteerEffect ?? 0,
+      asphaltVibration: ffb.asphaltVibration ?? 0,
       // 1 = v1, 2 = v2, 3 = v2.1 (see `FfbConfig::model` in rig.rs).
       model: ffb.model === 2 || ffb.model === 3 ? ffb.model : 1,
     });
