@@ -14,7 +14,7 @@ fn ramp(f: Fidelity, fgf: f64, speed: f64) -> (f64, f64, f64) {
     (pk, bal, beta)
 }
 fn main() {
-    for (lbl, f, fgfs) in [("bicycle", Fidelity::Bicycle, vec![0.80]), ("double", Fidelity::DoubleTrack, vec![0.80,0.85,0.88,0.90,0.92])] {
+    for (lbl, f, fgfs) in [("bicycle", Fidelity::Bicycle, vec![0.80]), ("double", Fidelity::DoubleTrack, vec![0.80])] {
         for fgf in fgfs { let mut s = format!("{lbl:<8} fgf {fgf:.2}:"); for sp in [10.0,15.0,20.0] { let (pk,bal,beta)=ramp(f,fgf,sp); s+=&format!("  {sp} m/s {pk:.2} g bal {bal:+.2} beta {beta:.1}"); } println!("{s}"); }
     }
 }

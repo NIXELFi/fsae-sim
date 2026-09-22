@@ -40,9 +40,10 @@ fn main() {
     report("bicycle (validated)", mk(Fidelity::Bicycle, &none).as_mut());
     report("double track + suspension + camber", mk(Fidelity::DoubleTrack, &none).as_mut());
     report("double track, camber off", mk(Fidelity::DoubleTrack, &|p, t| { t.camber_ratio_at = [(300.0,0.0),(655.0,0.0),(1000.0,0.0)]; t.camber_mu_quad = 0.0; let _ = p; }).as_mut());
+    report("double track, toe 0", mk(Fidelity::DoubleTrack, &|p, _| { p.suspension.toe_in_rear_deg = 0.0; }).as_mut());
     report("double track, 0 static camber", mk(Fidelity::DoubleTrack, &|p, _| { p.suspension.static_camber_front_deg = 0.0; p.suspension.static_camber_rear_deg = 0.0; }).as_mut());
     report("double track, -2.0 deg static camber", mk(Fidelity::DoubleTrack, &|p, _| { p.suspension.static_camber_front_deg = -2.0; p.suspension.static_camber_rear_deg = -2.0; }).as_mut());
-    for fgf in [0.86, 0.87, 0.88, 0.89] {
+    for fgf in [0.80f64; 0] {
         report(&format!("double track, front_grip_factor {fgf}"), mk(Fidelity::DoubleTrack, &|p, _| p.front_grip_factor = fgf).as_mut());
     }
     // steady gradients: 1 g lateral / braking
