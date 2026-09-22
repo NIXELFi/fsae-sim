@@ -143,6 +143,7 @@ export class NativeCar {
     const servo = this._servo;
     rigNative.command({
       kind: "params",
+      vehicleModel: p.vehicleModel ?? 2,
       massKg: p.massKg, weightDistFront: p.weightDistFront, cgHeightM: p.cgHeightM,
       wheelbaseM: p.wheelbaseM, trackFrontM: p.trackFrontM, trackRearM: p.trackRearM,
       tireRadiusM: p.tireRadiusM, izzKgM2: p.izzKgM2,
@@ -310,8 +311,12 @@ export class NativeCar {
     this.ax = t.axG * 9.81; this.ay = t.ayG * 9.81;
     const tel = this.telemetry;
     Object.assign(tel, t);
-    tel.rollDeg = t.ayG * this.p.rollGradientDegG;
-    tel.pitchDeg = t.axG * this.p.pitchGradientDegG;
+    // The double track rolls and pitches for real; the bicycle has no body
+    // states, so its attitude is the gradients times the accelerations.
+    if (!(t.vehicleModel >= 3)) {
+      tel.rollDeg = t.ayG * this.p.rollGradientDegG;
+      tel.pitchDeg = t.axG * this.p.pitchGradientDegG;
+    }
     this.applied = s.applied;
     // Into the one ffb record rather than a fresh spread a frame; the
     // settings panel reads it live. The native mix has no cone kick.

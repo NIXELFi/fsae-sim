@@ -135,6 +135,13 @@ const COLUMNS = [
   { id: "sim.body_slip_deg", dp: 3, get: (c) => c.t.bodySlipDeg },
   { id: "sim.roll_deg", dp: 3, get: (c) => c.t.rollDeg },
   { id: "sim.pitch_deg", dp: 3, get: (c) => c.t.pitchDeg },
+  // Camber to the road per wheel (deg, + = top leaning left) and which model
+  // drove the run. The bicycle has no camber and records zeros.
+  { id: "sim.camber_fl", dp: 3, get: (c) => c.t.camberDeg?.[0] ?? 0 },
+  { id: "sim.camber_fr", dp: 3, get: (c) => c.t.camberDeg?.[1] ?? 0 },
+  { id: "sim.camber_rl", dp: 3, get: (c) => c.t.camberDeg?.[2] ?? 0 },
+  { id: "sim.camber_rr", dp: 3, get: (c) => c.t.camberDeg?.[3] ?? 0 },
+  { id: "sim.vehicle_model", dp: 0, get: (c) => c.t.vehicleModel ?? 2 },
   { id: "sim.wheel_angle_f", dp: 3, get: (c) => c.spinFront },
   { id: "sim.wheel_angle_r", dp: 3, get: (c) => c.spinRear },
 

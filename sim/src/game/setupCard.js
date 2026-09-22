@@ -65,8 +65,10 @@ const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
  * @param root      the container
  * @param onChange  (path) => void, after a value is written
  * @param onSlot    (action, id) => void, for "load", "save" and "baseline"
+ * @param model     show the vehicle-model switch (desktop rig only: the
+ *                  browser build has just the bicycle)
  */
-export function renderSetupCard(root, { onChange, onSlot } = {}) {
+export function renderSetupCard(root, { onChange, onSlot, model = false } = {}) {
   if (!root) return;
   const items = cardItems();
   root.innerHTML = `
@@ -74,6 +76,12 @@ export function renderSetupCard(root, { onChange, onSlot } = {}) {
       <b>Setup</b>
       <span class="slot-chip" data-slot-chip></span>
     </div>
+    ${model ? `
+    <div class="sn-model" data-model title="Which vehicle model drives this run. Bicycle is the validated one. 4-wheel is the beta double track: the body rolls and pitches on its springs and every wheel has its own camber. A lap on the beta model does not count.">
+      <span class="sn-name">MODEL</span>
+      <button class="secondary" data-model-set="2">Bicycle</button>
+      <button class="secondary" data-model-set="3">4-wheel &beta;</button>
+    </div>` : ""}
     <div class="setup-now-rows">
       ${items.map((it) => `
         <div class="sn-row" data-path="${esc(it.path)}" title="${esc(it.label)}">
@@ -127,6 +135,13 @@ export function renderSetupCard(root, { onChange, onSlot } = {}) {
     b.addEventListener("click", () => onSlot?.("save", b.dataset.slotSave));
   });
   root.querySelector("[data-baseline]")?.addEventListener("click", () => onSlot?.("baseline"));
+  root.querySelectorAll("[data-model-set]").forEach((b) => {
+    b.addEventListener("click", () => {
+      writeParam("vehicleModel", Number(b.dataset.modelSet));
+      syncSetupCard(root);
+      onChange?.("vehicleModel", Number(b.dataset.modelSet));
+    });
+  });
 
   syncSetupCard(root);
 }
@@ -154,6 +169,11 @@ export function syncSetupCard(root, note = null) {
     delta.textContent = atBase ? "" : `${d > 0 ? "+" : ""}${d.toFixed(it.decimals)}`;
     delta.className = `sn-delta ${atBase ? "" : d > 0 ? "up" : "down"}`;
     row.classList.toggle("changed", !atBase);
+  }
+
+  const current = readParam("vehicleModel") ?? 2;
+  for (const b of root.querySelectorAll("[data-model-set]")) {
+    b.classList.toggle("active", Number(b.dataset.modelSet) === current);
   }
 
   const slots = loadSlots();

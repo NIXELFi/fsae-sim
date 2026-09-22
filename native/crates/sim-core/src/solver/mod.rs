@@ -128,6 +128,14 @@ pub struct Telemetry {
     /// profile selects the v2 steering-torque model. Zero for solvers that do
     /// not compute steering torque.
     pub scrub_moment_nm: f64,
+    /// Body attitude (deg): roll positive right side down (a left turn),
+    /// pitch positive nose down (braking). Zero from solvers with no
+    /// suspension states.
+    pub roll_deg: f64,
+    pub pitch_deg: f64,
+    /// Each wheel's inclination to the road (deg), positive with the top
+    /// leaning left. Zero from solvers without camber.
+    pub camber_deg: [f64; 4],
 }
 
 /// `Send + Sync` so a solver can live in an ECS resource or be shared across

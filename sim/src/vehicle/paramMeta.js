@@ -124,6 +124,11 @@ export function parameterGroups() {
   const rows = (title, list) => ({ title, rows: list });
 
   return [
+    rows("Vehicle model", [
+      p("Vehicle model", v.vehicleModel ?? 2, "", "estimate",
+        "2 = transient bicycle (validated). 3 = double track with a rolling, pitching body and camber from the team's kinematics and tyre fit (BETA, desktop rig only). Laps on 3 do not count.",
+        { path: "vehicleModel", min: 2, max: 3, step: 1 }),
+    ]),
     rows("Mass & geometry", [
       p("Total mass", v.massKg, "kg", "team", "199 kg car (confirmed by Nick) + 68 kg driver.", { path: "massKg", min: 180, max: 400, step: 0.5 }),
       p("Front weight distribution", v.weightDistFront * 100, "%", "team", "With driver aboard.", { path: "weightDistFront", min: 38, max: 62, step: 0.1, factor: 100 }),

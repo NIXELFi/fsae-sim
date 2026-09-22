@@ -15,6 +15,12 @@ export const SDM26 = {
   name: "SDM26",
 
   // ---- mass & geometry (Helios) ----
+  // Which vehicle model the desktop rig runs: 2 = the validated transient
+  // bicycle, 3 = the double track with a rolling, pitching body and camber
+  // (beta; see sim-core `solver/double_track.rs`). A model choice, not a
+  // setup: a lap on the beta model does not count. The browser build has
+  // only the bicycle and ignores it.
+  vehicleModel: 2,
   massKg: 267,            // 199 kg car + 68 kg driver
   weightDistFront: 0.485, // with driver
   cgHeightM: 0.2845,

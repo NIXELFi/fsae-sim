@@ -638,6 +638,7 @@ impl BicycleSolver {
             trail_front_m: af.trail_m,
             mech_trail_m: self.c.params.mechanical_trail(),
             scrub_moment_nm: af.scrub_nm,
+            ..Default::default()
         };
     }
 }

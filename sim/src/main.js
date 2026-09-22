@@ -947,7 +947,31 @@ class Game {
 
     // ---- course state ----
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
-    const hits = this.track.strikeCones(this.pose(), this.carGeometry().box);
+    // Swept between this frame's pose and the last one, so a long frame --
+    // a webview stall while the 1 kHz rig kept driving -- cannot carry the
+    // car through a cone it never touched at either end. Steps of 0.25 m,
+    // well under a cone's 0.31 m diameter; a jump of more than 20 m is a
+    // respawn, not travel, and is not swept. Cones already down never
+    // count twice, so the extra checks cost nothing when nothing is hit.
+    const pose = this.pose();
+    const box = this.carGeometry().box;
+    let hits = 0;
+    const prev = this._strikePose;
+    if (prev) {
+      const dist = Math.hypot(pose.x - prev.x, pose.y - prev.y);
+      if (dist > 0.25 && dist < 20) {
+        const n = Math.ceil(dist / 0.25);
+        let dpsi = pose.psi - prev.psi;
+        dpsi = Math.atan2(Math.sin(dpsi), Math.cos(dpsi));
+        for (let k = 1; k < n; k++) {
+          const f = k / n;
+          hits += this.track.strikeCones(
+            { x: prev.x + (pose.x - prev.x) * f, y: prev.y + (pose.y - prev.y) * f, psi: prev.psi + dpsi * f }, box);
+        }
+      }
+    }
+    hits += this.track.strikeCones(pose, box);
+    this._strikePose = { x: pose.x, y: pose.y, psi: pose.psi };
     // Slalom gates: a cone passed on the wrong side is an off course the
     // width test cannot see. Judged every frame the run is live.
     const missedGates = this.track.checkGates ? this.track.checkGates(this.pose()) : [];
@@ -3109,7 +3133,10 @@ async function boot() {
     updateSession();
   };
   renderSetupCard(dom.setupNow, { onChange: onCardChange, onSlot: onSlot(dom.setupNow) });
-  renderSetupCard(dom.stagingSetupCard, { onChange: onStagingChange, onSlot: onSlot(dom.stagingSetupCard) });
+  // The staging card, and only it, carries the vehicle-model switch: the
+  // last look before the green is where a driver picks what they are about
+  // to drive. Desktop only -- the browser build has just the bicycle.
+  renderSetupCard(dom.stagingSetupCard, { onChange: onStagingChange, onSlot: onSlot(dom.stagingSetupCard), model: isDesktop });
   if (restored) dom.paramNote.textContent = `${restored} parameter${restored === 1 ? "" : "s"} restored from your last session.`;
 
   dom.resetParams.addEventListener("click", () => {

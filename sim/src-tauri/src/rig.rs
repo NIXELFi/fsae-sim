@@ -350,6 +350,9 @@ impl Default for FfbConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ParamSet {
+    /// Which vehicle model runs: 2 = the validated bicycle, 3 = the double
+    /// track with suspension and camber (beta). Swapped live.
+    pub vehicle_model: Option<f64>,
     pub mass_kg: Option<f64>,
     pub weight_dist_front: Option<f64>,
     pub cg_height_m: Option<f64>,
@@ -491,6 +494,15 @@ pub struct TelemetryOut {
     /// Front Fx through the scrub radius, kingpin level, whichever FFB model
     /// is selected -- so a v1 run can still be analysed for it.
     pub scrub_moment_nm: f64,
+    /// Body roll and pitch (deg) and each wheel's camber to the road (deg,
+    /// + = top leaning left), from the double-track model. Zero from the
+    /// bicycle, which has no body states: the webview then derives the
+    /// camera's roll and pitch from the gradients, as it always did.
+    pub roll_deg: f64,
+    pub pitch_deg: f64,
+    pub camber_deg: [f64; 4],
+    /// Which model produced this: 2 bicycle, 3 double track.
+    pub vehicle_model: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -1111,6 +1123,25 @@ impl Loop {
     }
 
     fn apply_params(&mut self, p: &ParamSet) {
+        // The vehicle model first, so everything below lands on the one that
+        // will run. A swap keeps the pose, the speed along it and the gear;
+        // the webview always sends the whole parameter set, so every edit to
+        // the car, the tyre and the engine is re-applied to the new one below.
+        if let Some(m) = p.vehicle_model {
+            let want = if m >= 2.5 { Fidelity::DoubleTrack } else { Fidelity::Bicycle };
+            if self.car.fidelity() != want {
+                let s = self.car.state();
+                let gear = self.car.powertrain_mut().telemetry().gear;
+                let params = self.car.params().clone();
+                let mut car = build(
+                    want,
+                    Chassis::new(params, Box::new(MagicFormulaTyre::sdm26()), Box::new(GearedEngine::sdm26())),
+                );
+                car.powertrain_mut().set_gear(gear);
+                car.reset(s.x, s.y, s.psi, s.speed());
+                self.car = car;
+            }
+        }
         {
             let v = self.car.params_mut();
             macro_rules! set {
@@ -1448,6 +1479,10 @@ impl Loop {
                 trail_fm: tel.trail_front_m,
                 mech_trail_m: tel.mech_trail_m,
                 scrub_moment_nm: tel.scrub_moment_nm,
+                roll_deg: tel.roll_deg,
+                pitch_deg: tel.pitch_deg,
+                camber_deg: tel.camber_deg,
+                vehicle_model: self.car.fidelity().level(),
             },
             pt: pt_out,
             applied: AppliedOut { steer, throttle, brake, native_steer: native },
@@ -1864,6 +1899,45 @@ mod tests {
         assert!(snap.stats.tick_us_avg < 300.0, "tick too slow: {} us", snap.stats.tick_us_avg);
         assert!(snap.stats.overruns < snap.stats.ticks / 10, "overruns {}", snap.stats.overruns);
         assert!(snap.pt.engine_rpm > 2000.0);
+    }
+
+    /// The vehicle-model switch on the staging card: a params message with
+    /// `vehicleModel: 3` swaps the running solver for the double track, and 2
+    /// swaps it back, and the car keeps driving either way.
+    #[test]
+    fn vehicle_model_switch_swaps_the_solver_live() {
+        let rig = Rig::new();
+        let shared = rig.shared.clone();
+        shared.running.store(true, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let th = {
+            let shared = shared.clone();
+            std::thread::spawn(move || run(shared, 0, tx))
+        };
+        rx.recv().unwrap();
+        let drive = |ms: u64| {
+            for _ in 0..ms / 10 {
+                *shared.input.lock().unwrap() = RigInput { throttle: 0.6, traction: true, auto_shift: true, ..Default::default() };
+                shared.touch();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            *shared.snapshot.lock().unwrap()
+        };
+        let set = |m: f64| {
+            let p = ParamSet { vehicle_model: Some(m), ..Default::default() };
+            shared.commands.lock().unwrap().push(RigCommand::Params(Box::new(p)));
+        };
+        let a = drive(300);
+        assert_eq!(a.tel.vehicle_model, 2, "starts on the bicycle");
+        set(3.0);
+        let b = drive(400);
+        assert_eq!(b.tel.vehicle_model, 3, "did not swap to the double track");
+        assert!(b.state.x > a.state.x, "the car stopped at the swap");
+        set(2.0);
+        let c = drive(300);
+        assert_eq!(c.tel.vehicle_model, 2, "did not swap back");
+        shared.running.store(false, Ordering::SeqCst);
+        th.join().unwrap();
     }
 
     /// The webview stops sending frames: the car must hold, not drive off on

@@ -28,6 +28,97 @@ pub struct RollParams {
     pub rc_rear_m: f64,
 }
 
+/// The suspension as the double-track solver runs it: a sprung body that
+/// rolls and pitches on springs and dampers, and wheels whose camber follows
+/// the body, the bumps and the steer.
+///
+/// Sources (SDM26, 2026):
+///  * 'SDM26 Ride Roll Calc' (Drive): wheel rates 363.9 / 249.8 lb/in, tyre
+///    vertical rate 520 lb/in, roll gradient 0.602 and pitch gradient
+///    0.805 deg/g WITH tyres, damping-ratio targets 0.80 front / 0.90 rear.
+///  * 'SDM26 Designed vs Actual Kinematics' (OptimumK, actual column): static
+///    camber -0.8 / -0.7 deg; camber gain in roll 0.657 / 0.738 deg per deg
+///    (camber to GROUND per degree of body roll, i.e. 1 - t / (2 FVSA)); in
+///    heave -0.826 / -0.678 deg per inch of bump; anti-dive 12.8 %, rear
+///    anti-lift 15.8 %, rear anti-squat 11.5 % (mean of 10.4 / 12.6).
+///  * 'SDM26 Full-Vehicle Sim Parameters' workbook: Ixx 24.8, Iyy 85.3 kg m^2.
+///
+/// Roll and pitch STIFFNESS are not stored: they come from the gradients, so
+/// the gradients the team validates are what the car does, and the roll
+/// split between axles is the existing `RollParams::rsd_front` setup knob.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuspensionParams {
+    /// Body roll per g of lateral acceleration, tyres included (deg/g).
+    pub roll_gradient_deg_g: f64,
+    /// Body pitch per g of braking, tyres included (deg/g).
+    pub pitch_gradient_deg_g: f64,
+    /// Fraction of critical damping in roll and in pitch.
+    pub roll_damping_ratio: f64,
+    pub pitch_damping_ratio: f64,
+    /// Sprung-body inertias about its own CG (kg m^2).
+    pub ixx_kg_m2: f64,
+    pub iyy_kg_m2: f64,
+    /// Tyre vertical rate (N/m). Splits body roll into what the springs take
+    /// (camber follows the linkage) and what the tyres take (the whole axle
+    /// leans, camber follows 1:1).
+    pub tyre_rate_n_m: f64,
+    /// Front and rear wheel rates (N/m), springs through their motion
+    /// ratios, no tyre. Only used for that split.
+    pub wheel_rate_front_n_m: f64,
+    pub wheel_rate_rear_n_m: f64,
+    /// Anti geometry, fractions of the sprung longitudinal transfer that the
+    /// links carry instead of the springs.
+    pub anti_dive_front: f64,
+    pub anti_lift_rear: f64,
+    pub anti_squat_rear: f64,
+    /// Static camber, SAE: negative is the top of the wheel leaning inboard.
+    pub static_camber_front_deg: f64,
+    pub static_camber_rear_deg: f64,
+    /// Camber to ground per degree of suspension roll (outer wheel goes
+    /// positive by this much).
+    pub camber_gain_roll_front: f64,
+    pub camber_gain_roll_rear: f64,
+    /// Camber change per metre of bump (deg/m; negative = more negative in
+    /// bump).
+    pub camber_gain_bump_front_deg_m: f64,
+    pub camber_gain_bump_rear_deg_m: f64,
+    /// Static toe-in per wheel (deg; positive = the front of the wheel
+    /// pointing toward the centreline).
+    pub toe_in_front_deg: f64,
+    pub toe_in_rear_deg: f64,
+}
+
+impl SuspensionParams {
+    pub fn sdm26() -> Self {
+        Self {
+            roll_gradient_deg_g: 0.602,
+            pitch_gradient_deg_g: 0.805,
+            roll_damping_ratio: 0.85,
+            pitch_damping_ratio: 0.85,
+            ixx_kg_m2: 24.8,
+            iyy_kg_m2: 85.3,
+            tyre_rate_n_m: 520.0 * 175.126_835,
+            wheel_rate_front_n_m: 363.888 * 175.126_835,
+            wheel_rate_rear_n_m: 249.833 * 175.126_835,
+            anti_dive_front: 0.128,
+            anti_lift_rear: 0.158,
+            anti_squat_rear: 0.115,
+            static_camber_front_deg: -0.8,
+            static_camber_rear_deg: -0.7,
+            camber_gain_roll_front: 0.657,
+            camber_gain_roll_rear: 0.738,
+            camber_gain_bump_front_deg_m: -0.826 / 0.0254,
+            camber_gain_bump_rear_deg_m: -0.678 / 0.0254,
+            // OptimumK 'rear.toe angle' -0.5 deg each side (toe distance
+            // -0.087 in), read as TOE-IN, which is what an FSAE rear runs for
+            // stability and what the sign of the toe distance says. Front
+            // toe is not in the export: zero.
+            toe_in_front_deg: 0.0,
+            toe_in_rear_deg: 0.5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrakeParams {
     /// Total brake torque at the wheels at full pedal (N.m).
@@ -323,6 +414,9 @@ pub struct VehicleParams {
     pub brakes: BrakeParams,
     pub steering: SteeringParams,
     pub diff: DiffParams,
+    /// Suspension and camber. Only the double-track solver uses it; the
+    /// bicycle keeps its validated quasi-static transfer.
+    pub suspension: SuspensionParams,
 }
 
 impl VehicleParams {
@@ -449,6 +543,7 @@ pub fn sdm26() -> VehicleParams {
         // 0.60 and 0.42, with the fixed unit's 25 N.m breakaway preload. The
         // same three numbers the AC mod runs.
         diff: DiffParams { power_lock: 0.60, coast_lock: 0.42, preload_nm: 25.0, stick_rad_s: 0.1 },
+        suspension: SuspensionParams::sdm26(),
         steering: SteeringParams {
             // The rack's measured limit. `wheel_toe_angles.csv` reaches
             // 46.0 deg of road wheel at its 179.24 deg of rim; the old 28 was

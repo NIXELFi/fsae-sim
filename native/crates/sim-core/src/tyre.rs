@@ -55,6 +55,15 @@ pub trait TyreModel: Send + Sync {
     /// which never form a slip state at all.
     fn peak_mu(&self, fz: f64) -> (f64, f64);
 
+    /// Forces with the wheel leaning over. `gamma` is the inclination to the
+    /// road (rad), positive when the top of the wheel leans toward +y (the
+    /// direction positive `fy` points), so camber thrust is positive with it.
+    /// Models without camber sensitivity ignore it.
+    fn forces_cambered(&self, slip: Slip, fz: f64, gamma: f64) -> TyreForces {
+        let _ = gamma;
+        self.forces(slip, fz)
+    }
+
     /// Distance the tyre must roll to build slip force (m). Zero disables the
     /// relaxation lag entirely.
     fn relaxation_length(&self) -> f64 {
@@ -153,6 +162,14 @@ pub struct MagicFormulaTyre {
     /// Normalised slip at which the trail reaches zero.
     pub trail_zero_slip: f64,
     pub trail_ref_load_n: f64,
+    /// Camber: the slip angle one radian of inclination is worth, against
+    /// load, as (Fz N, ratio) points interpolated linearly and held flat past
+    /// the ends. Camber enters as a horizontal shift of the lateral curve --
+    /// how the Magic Formula itself carries it -- so thrust builds and
+    /// saturates with the tyre rather than being added on top of it.
+    pub camber_ratio_at: [(f64, f64); 3],
+    /// Peak grip loss with camber: mu x (1 - k gamma^2), gamma in rad.
+    pub camber_mu_quad: f64,
     by: f64,
     /// Normalising scales so each fitted curve peaks at exactly mu*Fz. The
     /// solved B puts the peak at the right slip; these put it at the right
@@ -229,6 +246,15 @@ impl MagicFormulaTyre {
             trail_m: 0.0392,
             trail_zero_slip: 1.845,
             trail_ref_load_n: 700.0,
+            // TEAM: 'MF612-Hoosier 16x7_5-10 R20 7in Rim.tir' (the newest fit
+            // of the tyre the car runs, 2026-09), evaluated with the full MF6.1
+            // lateral equations: Ky_gamma / Ky_alpha = 0.089 at 300 N, 0.107
+            // at 655 N, 0.159 at 1000 N, and PDY3 = 18.66. The Drive
+            // 'ISO-CamberSens-612' fit agrees to within its scatter (0.091,
+            // PDY3 13.0). Camber is a small effect on this tyre: a degree of
+            // it is worth about a tenth of a degree of slip.
+            camber_ratio_at: [(300.0, 0.089), (655.0, 0.107), (1000.0, 0.159)],
+            camber_mu_quad: 18.66,
             by,
             ky: 1.0 / peak_value(by, cy, ey, peak_alpha),
             kx: 1.0 / peak_value(bx, cx, ex, peak_kappa),
@@ -246,6 +272,21 @@ impl MagicFormulaTyre {
         }
         let m = base * (1.0 - self.load_sensitivity * (fz / self.nominal_load - 1.0));
         m.clamp(0.25 * base, 1.6 * base)
+    }
+
+    /// Camber-to-slip ratio at a load (see `camber_ratio_at`).
+    pub fn camber_ratio(&self, fz: f64) -> f64 {
+        let t = &self.camber_ratio_at;
+        if fz <= t[0].0 {
+            return t[0].1;
+        }
+        for i in 0..t.len() - 1 {
+            if fz <= t[i + 1].0 {
+                let f = (fz - t[i].0) / (t[i + 1].0 - t[i].0);
+                return t[i].1 + f * (t[i + 1].1 - t[i].1);
+            }
+        }
+        t[t.len() - 1].1
     }
 
     /// Cornering stiffness (N/rad) at a given load -- a headline tyre number.
@@ -293,6 +334,18 @@ impl TyreModel for MagicFormulaTyre {
 
     fn peak_mu(&self, fz: f64) -> (f64, f64) {
         (self.mu_at(self.mu_x, fz), self.mu_at(self.mu_y, fz))
+    }
+
+    fn forces_cambered(&self, slip: Slip, fz: f64, gamma: f64) -> TyreForces {
+        if gamma == 0.0 {
+            return self.forces(slip, fz);
+        }
+        let shifted = Slip { alpha: slip.alpha + self.camber_ratio(fz) * gamma, kappa: slip.kappa };
+        let mut f = self.forces(shifted, fz);
+        let k = (1.0 - self.camber_mu_quad * gamma * gamma).max(0.5);
+        f.fx *= k;
+        f.fy *= k;
+        f
     }
 
     fn relaxation_length(&self) -> f64 {
@@ -400,6 +453,28 @@ mod tests {
                 assert!(r <= 1.05, "outside the friction ellipse: {r}");
             }
         }
+    }
+
+    #[test]
+    fn camber_thrust_leans_the_way_the_wheel_does() {
+        let t = MagicFormulaTyre::sdm26();
+        let fz = 655.0;
+        let lean = 2.0_f64.to_radians();
+        let f = t.forces_cambered(Slip { alpha: 0.0, kappa: 0.0 }, fz, lean);
+        assert!(f.fy > 0.0, "camber thrust {} N should follow the lean", f.fy);
+        // A degree of camber is worth about 0.107 deg of slip at this load.
+        let eq = t.forces(Slip { alpha: 0.107 * lean, kappa: 0.0 }, fz);
+        let k = 1.0 - 18.66 * lean * lean;
+        assert!((f.fy - eq.fy * k).abs() < 1e-9);
+        // And costs peak grip, a little.
+        let peak0 = t.forces(Slip { alpha: t.peak_alpha, kappa: 0.0 }, fz).fy;
+        let mut peak3: f64 = 0.0;
+        for i in 0..400 {
+            let a = i as f64 * 0.0005;
+            peak3 = peak3.max(t.forces_cambered(Slip { alpha: a, kappa: 0.0 }, fz, 3.0_f64.to_radians()).fy);
+        }
+        let loss = 1.0 - peak3 / peak0;
+        assert!((0.04..0.06).contains(&loss), "3 deg of camber cost {:.1} % of peak", loss * 100.0);
     }
 
     #[test]
