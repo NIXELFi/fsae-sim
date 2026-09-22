@@ -150,7 +150,7 @@ export class NativeCar {
       wheelInertiaFrontKgM2: p.wheelInertiaFrontKgM2, wheelInertiaRearKgM2: p.wheelInertiaRearKgM2,
       crr: p.crr, cdaM2: p.cdaM2, claM2: p.claM2, aeroFrontFrac: p.aeroFrontFrac,
       airDensityKgM3: p.airDensityKgM3,
-      rsdFront: p.roll.rsdFront, hRollArmM: p.roll.hRollArmM, rcFrontM: p.roll.rcFrontM, rcRearM: p.roll.rcRearM,
+      rsdFront: p.roll.rsdFront, rcFrontM: p.roll.rcFrontM, rcRearM: p.roll.rcRearM,
       brakeTorqueMaxNm: p.brakeTorqueMaxNm, brakeBiasFront: p.brakeBiasFront,
       maxSteerDeg: p.maxSteerDeg,
       steerLagS: servo ? servo.lagS : p.steerLagS,

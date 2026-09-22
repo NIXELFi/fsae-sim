@@ -94,7 +94,7 @@ impl SuspensionModel for ElasticGeometricSuspension {
         let front_share = v.roll.rsd_front;
 
         // Elastic: the sprung mass rolling about the roll axis.
-        let elastic = m_sprung * ay * v.roll.roll_arm_m;
+        let elastic = m_sprung * ay * v.roll_arm();
         let elastic_f = elastic * front_share / v.track_front_m.max(1e-6);
         let elastic_r = elastic * (1.0 - front_share) / v.track_rear_m.max(1e-6);
 
@@ -382,10 +382,13 @@ mod tests {
         let ay = 9.81 * 1.5;
         let got = s.lateral_transfer(&v, ay);
         let total = got.front_n + got.rear_n;
+        // With the roll arm derived from the sprung CG and the roll axis, the
+        // three paths sum to the free-body answer exactly on equal tracks and
+        // to within the track difference otherwise.
         let track = 0.5 * (v.track_front_m + v.track_rear_m);
         let expected = v.mass_kg * ay * v.cg_height_m / track;
         let err = (total - expected).abs() / expected;
-        assert!(err < 0.20, "total {total:.0} N against rigid-body {expected:.0} N");
+        assert!(err < 0.01, "total {total:.0} N against rigid-body {expected:.0} N");
     }
 
     #[test]

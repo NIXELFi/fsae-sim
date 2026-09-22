@@ -172,10 +172,10 @@ impl DoubleTrackSolver {
         let ms_r = ms * (1.0 - p.weight_dist_front);
         let unsprung_f = 2.0 * p.unsprung_front_kg;
         let unsprung_r = 2.0 * p.unsprung_rear_kg;
-        let d_fz_f = (ms * self.ay * p.roll.roll_arm_m * p.roll.rsd_front) / p.track_front_m
+        let d_fz_f = (ms * self.ay * p.roll_arm() * p.roll.rsd_front) / p.track_front_m
             + (ms_f * self.ay * p.roll.rc_front_m) / p.track_front_m
             + (unsprung_f * self.ay * p.tyre_radius_m) / p.track_front_m;
-        let d_fz_r = (ms * self.ay * p.roll.roll_arm_m * (1.0 - p.roll.rsd_front)) / p.track_rear_m
+        let d_fz_r = (ms * self.ay * p.roll_arm() * (1.0 - p.roll.rsd_front)) / p.track_rear_m
             + (ms_r * self.ay * p.roll.rc_rear_m) / p.track_rear_m
             + (unsprung_r * self.ay * p.tyre_radius_m) / p.track_rear_m;
 
@@ -202,8 +202,12 @@ impl DoubleTrackSolver {
             // Velocity of this contact patch in the body frame.
             let vx = u - r * half_t[i];
             let vy = v + r * arm[i];
-            let vx_safe = vx.abs().max(0.6);
-            let alpha_raw = steer[i] - vy.atan2(vx_safe);
+            // Slip angle in the wheel's own frame (see bicycle.rs): the
+            // small-angle `steer - atan2(vy, |vx|)` passes 90 deg in a slide.
+            let (cs, ss) = (steer[i].cos(), steer[i].sin());
+            let vx_w = vx * cs + vy * ss;
+            let vy_w = vy * cs - vx * ss;
+            let alpha_raw = -vy_w.atan2(vx_w.abs().max(0.6));
             self.alpha_lag[i] += (alpha_raw - self.alpha_lag[i]) * blend;
 
             let k_den = vx.abs().max(2.0);
@@ -237,8 +241,10 @@ impl DoubleTrackSolver {
         let fz_sum: f64 = fz.iter().sum();
         let roll_res = p.crr * fz_sum * if u >= 0.0 { 1.0 } else { -1.0 };
 
-        let du = (fx_body - drag - roll_res) / m + v * r;
-        let dv = fy_body / m - u * r;
+        // Drag against the velocity, not the nose (see bicycle.rs).
+        let (drag_x, drag_y) = if speed > 1e-9 { (drag * u / speed, drag * v / speed) } else { (0.0, 0.0) };
+        let du = (fx_body - drag_x - roll_res) / m + v * r;
+        let dv = (fy_body - drag_y) / m - u * r;
         let dr = mz / p.izz_kg_m2;
 
         // ---- driveline: open diff, equal torque to both rears ----

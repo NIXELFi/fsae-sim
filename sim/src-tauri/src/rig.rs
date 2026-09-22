@@ -34,19 +34,19 @@ use std::time::{Duration, Instant};
 
 use crate::wheel::{self, DeviceCaps, DeviceInfo, DeviceState, Wheel, AXES_PER_DEVICE, BUTTON_WORDS, HATS_PER_DEVICE, MAX_DEVICES};
 
-/// Aligning-torque weight vs speed: 0 below 0.3 m/s, 1 from 1.8 m/s, smooth between.
+/// How much of the tyres' aligning torque the solver is delivering at this
+/// speed, 0..1: its own low-speed lateral-force fade, speed / 3 m/s.
 ///
-/// The fade exists because the solver clamps forward speed at 3.0 m/s inside
-/// the slip-angle calculation, so below walking pace any drift is a full-size
-/// slip angle and a full-size torque that flips sign as the car wriggles. It
-/// used to run to 4 m/s, which threw away every cue in the slow autocross
-/// elements and left the paddock weightless. What the tyre model cannot
-/// supply down there is supplied instead by the standstill scrub and the
-/// caster/KPI jacking terms in the mixer, which are real and do not depend
-/// on speed at all.
+/// The solver already fades the tyre force -- and so the aligning torque --
+/// in below 3 m/s (it bounds the lateral loop gain at a crawl), and the
+/// mixer used to fade the torque AGAIN with its own 0.3-1.8 m/s smoothstep.
+/// The two multiplied: 9 % of the model's torque reached the rim at 1 m/s and
+/// 60 % at 1.8 m/s, where the standstill terms had already handed over. Now
+/// the tyre torque arrives as the solver makes it, and this is used only to
+/// hand over to the standstill scrub and jacking terms, which fade in exactly
+/// as the tyre torque fades out. Same curve as `forceFeedback.js`.
 fn low_speed_fade(speed: f64) -> f64 {
-    let x = ((speed - 0.3) / 1.5).clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
+    (speed / 3.0).clamp(0.0, 1.0)
 }
 
 /// Normalised command through a gamma lift and a tanh soft knee.
@@ -368,7 +368,6 @@ pub struct ParamSet {
     pub aero_front_frac: Option<f64>,
     pub air_density_kg_m3: Option<f64>,
     pub rsd_front: Option<f64>,
-    pub h_roll_arm_m: Option<f64>,
     pub rc_front_m: Option<f64>,
     pub rc_rear_m: Option<f64>,
     pub brake_torque_max_nm: Option<f64>,
@@ -1125,7 +1124,7 @@ impl Loop {
                 wheel_inertia_front_kg_m2 => v.wheel_inertia_front_kg_m2, wheel_inertia_rear_kg_m2 => v.wheel_inertia_rear_kg_m2,
                 crr => v.crr, cda_m2 => v.aero.cda_m2, cla_m2 => v.aero.cla_m2, aero_front_frac => v.aero.front_frac,
                 front_grip_factor => v.front_grip_factor,
-                air_density_kg_m3 => v.aero.air_density, rsd_front => v.roll.rsd_front, h_roll_arm_m => v.roll.roll_arm_m,
+                air_density_kg_m3 => v.aero.air_density, rsd_front => v.roll.rsd_front,
                 rc_front_m => v.roll.rc_front_m, rc_rear_m => v.roll.rc_rear_m,
                 brake_torque_max_nm => v.brakes.max_torque_nm, brake_bias_front => v.brakes.bias_front,
                 diff_power_lock => v.diff.power_lock, diff_coast_lock => v.diff.coast_lock,
@@ -1142,9 +1141,11 @@ impl Loop {
             if let Some(x) = p.caster_deg { v.steering.caster_rad = x.to_radians(); }
             if p.torque_ratio.is_some() { v.steering.torque_ratio = p.torque_ratio; }
         }
-        let nominal = self.car.params().nominal_tyre_load();
+        // The tyre's reference load (`nominal_load`) is deliberately NOT reset
+        // here. It is a property of the tyre fit, not of the car: re-centring
+        // it on mass * g / 4 at every edit meant a heavier car lost none of
+        // the grip load sensitivity says it should.
         if let Some(t) = self.car.tyre_mut().as_any_mut().and_then(|a| a.downcast_mut::<MagicFormulaTyre>()) {
-            t.nominal_load = nominal;
             if let Some(x) = p.mu_lat { t.mu_y = x; }
             if let Some(x) = p.mu_long { t.mu_x = x; }
             if let Some(x) = p.tire_load_sensitivity { t.load_sensitivity = x; }
@@ -1249,14 +1250,15 @@ impl Loop {
         let throttle = self
             .assists
             .throttle(throttle_demand.clamp(0.0, 1.0), prev.kappa[RL].max(prev.kappa[RR]));
-        // ABS watches both rears too, for the same reason traction control does.
-        // The front is single-track so FL is FR, but RR is genuinely
-        // independent -- its own load, its own half of the rear brake torque --
-        // so a lightly loaded inner rear can lock while RL is fine, and
-        // reading only RL meant ABS never saw it.
+        // ABS watches every wheel. Both rears, because each has its own load
+        // and its own half of the rear brake torque, so a lightly loaded inner
+        // rear can lock while the other is fine. And both FRONTS: with one
+        // front rotor FL is FR, but steering model 3 splits them, and reading
+        // only FL left ABS blind to the inside front locking in every
+        // right-hand corner.
         let brake = self.assists.brake(
             brake_demand.clamp(0.0, 1.0),
-            prev.kappa[FL],
+            prev.kappa[FL].min(prev.kappa[FR]),
             prev.kappa[RL].min(prev.kappa[RR]),
         );
 
@@ -1324,22 +1326,43 @@ impl Loop {
         tel.rim_torque_nm = kingpin_nm * rim_ratio;
 
         // ---- force feedback ----
-        // Caster/KPI jacking: turning the wheel lifts that corner of the car,
-        // so gravity pulls the rim back toward centre. About 1.2 N.m at the rim
-        // at the car's 46 deg full lock, and 0.65 N.m at half lock -- small,
-        // but at a standstill it is 100% of the return torque, because the
-        // tyre's aligning torque has faded to nothing.
+        // Caster/KPI jacking: the moment the front corner loads put on the
+        // steering axis as the wheels turn about an inclined kingpin.
         //
-        // (This comment said 0.6 N.m at full lock for a while. That was the
-        // half-lock figure: the number was right for 23 deg and full lock is
-        // 46. Recomputed from the code's own inputs -- fz_f 1270.3 N, arm
-        // 5.435 mm, rim ratio road_per_rim(179) x 0.85 = 0.2404.)
+        // Rotating the patch (scrub s outboard, mechanical trail t behind the
+        // axis's ground point) about an axis tilted by KPI (lambda) and
+        // caster (nu), a wheel's corner of the car rises by
+        //
+        //   h = +-(s sin nu + t sin lambda) sin(delta)
+        //       + (s sin lambda - t sin nu)(1 - cos delta)
+        //
+        // (+ for the left wheel, - for the right, delta left-positive), and
+        // the moment on the pair is -sum(Fz dh/d delta):
+        //
+        //   M = -(FzL + FzR)(s sin lambda - t sin nu) sin(delta)
+        //       -(FzL - FzR)(s sin nu + t sin lambda) cos(delta)
+        //
+        // The first term is the familiar return-to-centre: it lifts BOTH
+        // corners, so it scales with the axle load. Caster REDUCES it -- on its
+        // own a castered wheel lowers the car as it turns. The second lifts
+        // one corner and drops the other, so it cancels with equal loads and
+        // exists only with load transfer. It used to be modelled as a caster
+        // term added to the first (`s sin lambda + t sin nu`, times the axle
+        // load): 2.3x the return torque at rest, and nothing at all for the
+        // load-transfer term that model 3 carries at speed. In a corner the
+        // loaded outside wheel wins that term and it steers the wheels INTO
+        // the turn, lightening the rim by about 4 N.m at the kingpin at 1.5 g.
+        //
+        // At a standstill, equal loads: fz_f 1270 N, arm 2.32 mm, 46 deg of
+        // lock, road_per_rim(179) x 0.85 = 0.2404 -> about 0.5 N.m at the rim.
         let jacking_nm = {
             let p = self.car.params();
-            let fz_f = tel.fz[FL] + tel.fz[FR];
-            let arm = p.steering.scrub_m * p.steering.kpi_rad.sin()
-                + p.mechanical_trail() * p.steering.caster_rad.sin();
-            -fz_f * arm * tel.steer_rad.sin() * rim_ratio
+            let (s, t) = (p.steering.scrub_m, p.mechanical_trail());
+            let (sin_l, sin_n) = (p.steering.kpi_rad.sin(), p.steering.caster_rad.sin());
+            let d = tel.steer_rad;
+            let lift = -(tel.fz[FL] + tel.fz[FR]) * (s * sin_l - t * sin_n) * d.sin();
+            let tilt = -(tel.fz[FL] - tel.fz[FR]) * (s * sin_n + t * sin_l) * d.cos();
+            (lift + tilt) * rim_ratio
         };
         let feel = Feel {
             spin: ((tel.kappa[RL].max(tel.kappa[RR]) - 0.2).max(0.0) * 2.5).min(1.0),
@@ -1516,17 +1539,18 @@ impl FfbMixer {
         let rate = self.rim_rate_deg_s.to_radians();
 
         // Tyres. The model is left-positive; the wheel is clockwise-positive.
-        // Faded out at walking pace: the solver clamps forward speed at
-        // 3.0 m/s inside the slip-angle calculation, so below a few m/s any
-        // drift or wheelspin is a full-size slip angle and a full-size torque
-        // that flips sign as the car wriggles (+-5..10 N.m at 0.4-3 m/s on
-        // the rig). Same curve as `forceFeedback.js` `lowSpeedFade`.
+        // Not faded here: the solver already fades the tyre force, and with it
+        // this torque, below 3 m/s. `fade` is that same curve, used only to
+        // hand over to the standstill terms below.
         let fade = low_speed_fade(tel.speed);
-        out.align = -tel.rim_torque_nm * cfg.align_torque_gain * fade;
+        out.align = -tel.rim_torque_nm * cfg.align_torque_gain;
         // Understeer effect: the rim goes lighter than the trail alone says
-        // once the front is past its peak. Off at 0 (see `FfbConfig`).
+        // once the front is past its peak. Off at 0 (see `FfbConfig`). Both
+        // fronts: with steering model 3 they are separate wheels, and reading
+        // FL alone made the effect differ between left and right corners.
         if cfg.understeer_effect > 0.0 {
-            let past = smoothstep(tel.utilisation[FL], UNDERSTEER_SLIP_START, UNDERSTEER_SLIP_FULL);
+            let front = tel.utilisation[FL].max(tel.utilisation[FR]);
+            let past = smoothstep(front, UNDERSTEER_SLIP_START, UNDERSTEER_SLIP_FULL);
             out.align *= 1.0 - cfg.understeer_effect.clamp(0.0, 1.0) * past;
         }
         // Oversteer effect: a push toward counter-steer as the rear runs
@@ -1760,7 +1784,9 @@ mod tests {
         assert_eq!(mix(&tel(12.0, 0.0, 15.0)).oversteer, 0.0);
         assert_eq!(mix(&tel(12.0, 0.1, 15.0)).oversteer, 0.0);
         // Standing still the slip angles mean nothing: faded out with the tyres.
-        assert_eq!(mix(&tel(12.0, 0.8, 0.1)).oversteer, 0.0);
+        assert_eq!(mix(&tel(12.0, 0.8, 0.0)).oversteer, 0.0);
+        // And it fades in with the tyres, as speed / 3 m/s.
+        assert!((mix(&tel(12.0, 0.8, 1.5)).oversteer - 0.5 * 5.5 * 0.5).abs() < 1e-9);
     }
 
     #[test]

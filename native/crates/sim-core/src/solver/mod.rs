@@ -182,6 +182,29 @@ pub fn build(fidelity: Fidelity, chassis: Chassis) -> Box<dyn Solver> {
     }
 }
 
+/// Torque a friction brake applies to a wheel this substep (N.m, positive
+/// opposes positive wheel speed).
+///
+/// A brake is a friction element, not a torque source. Applying `sign(w) * tb`
+/// is right while the wheel turns and wrong at rest: Rust's `0.0.signum()` is
+/// +1, so a stopped, braked wheel was driven BACKWARDS by the full pedal
+/// torque every substep. With the car held on the brakes and any throttle
+/// (which keeps the stop-snap from firing) the fronts turned at -0.8 rad/s
+/// and the car crept backwards off the line at 2.5 cm/s -- and JS, whose
+/// `Math.sign(0)` is 0, dropped the brake entirely at rest and crept forward.
+///
+/// So the brake supplies what it takes to bring the wheel to rest in this
+/// step -- `t_free` is every other torque on it, `inertia` the effective
+/// inertia the step is taken against -- and never more than the pedal's
+/// torque. A turning wheel sees exactly `sign(w) * tb` as before; a stopped
+/// one is held; nothing overshoots through zero.
+pub(crate) fn brake_torque(w: f64, t_free: f64, inertia: f64, tb: f64, dt: f64) -> f64 {
+    if tb <= 0.0 {
+        return 0.0;
+    }
+    (t_free + inertia * w / dt).clamp(-tb, tb)
+}
+
 /// Steering actuator shared by every solver: a rate- and acceleration-limited
 /// servo behind a first-order lag, standing in for the driver's hands and rack
 /// compliance. `rate` is the servo's own state (rad/s) and is updated in

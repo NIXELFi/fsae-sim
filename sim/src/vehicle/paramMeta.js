@@ -11,7 +11,7 @@
 // Values are read live off SDM26 rather than retyped, so this sheet can never
 // disagree with what the physics is actually running.
 
-import { SDM26, lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad } from "./params.js";
+import { SDM26, lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad, rollArm } from "./params.js";
 import { TIRE_INFO } from "./tire.js";
 
 export const PROVENANCE = {
@@ -157,7 +157,7 @@ export function parameterGroups() {
         "From the team's PAC2002 TTC fit of the R20: PDY2/PDY1 = 12.1% of peak lateral mu lost per 100% of load (longitudinal 10.5%). Was Helios' 0.15 estimate."),
       p("Pneumatic trail at 700 N", TIRE_INFO.pneumaticTrailM * 1000, "mm", "team",
         "Fitted to the raw TTC Round 9 Mz channel for this tyre at 12 psi (sim/tools/ttc_trail.py); zero by 15 deg of slip, square root of load."),
-      p("Nominal tyre load (Fz0)", Math.round(nominalTyreLoad(v)), "N", "team", "Static corner load, the reference for load sensitivity."),
+      p("Nominal tyre load (Fz0)", Math.round(nominalTyreLoad(v)), "N", "team", "The tyre's reference load for load sensitivity: SDM26's static corner load as shipped. A tyre property, so it does not move with a mass edit."),
       p("Loaded radius", v.tireRadiusM, "m", "team", "Hoosier 16x7.5-10."),
       p("Peak slip angle", n(TIRE_INFO.peakSlipAngleDeg, 1), "deg", "estimate",
         "Model shape choice. The team's TTC fit of this tyre peaks at 12.4-12.9 deg (222-1112 N) and Oracle's MF6.1.2 at 13-16 deg, which is fine for a peak-grip lap sim but makes steering feel vague to drive."),
@@ -179,8 +179,8 @@ export function parameterGroups() {
     rows("Roll balance", [
       p("Roll stiffness distribution, front", v.roll.rsdFront * 100, "%", "team",
         "Team setup choice, between the measured blade settings: front 1-1 / rear 1-1 is 46%, front 4-7 / rear 1-1 is 51%.", { path: "roll.rsdFront", min: 30, max: 70, step: 0.1, factor: 100 }),
-      p("CG to roll-axis arm", v.roll.hRollArmM * 1000, "mm", "team",
-        "Matches the SDM25 RSD test sheet's measured 10.34 in."),
+      p("CG to roll-axis arm", rollArm(v) * 1000, "mm", "team",
+        "Derived: sprung-CG height less the roll axis under it, so it follows CG-height and roll-centre edits. Was a stored 262.6 mm (the SDM25 RSD sheet's 10.34 in), which used the total CG height."),
       p("Roll centre, front", v.roll.rcFrontM * 1000, "mm", "team", "", { path: "roll.rcFrontM", min: -60, max: 160, step: 0.5, factor: 1000 }),
       p("Roll centre, rear", v.roll.rcRearM * 1000, "mm", "team", "", { path: "roll.rcRearM", min: -60, max: 160, step: 0.5, factor: 1000 }),
       p("Roll gradient", v.rollGradientDegG, "deg/g", "team", "Validated with-tyre figure from the Helios Setup module.", { path: "rollGradientDegG", min: 0, max: 3, step: 0.005 }),

@@ -14,7 +14,7 @@
 //! is driven by the previous substep's measured accelerations so it settles
 //! rather than teleporting.
 
-use super::{advance_steer_capped, Chassis, ChassisState, Controls, Fidelity, Solver, Telemetry, SUBSTEP};
+use super::{advance_steer_capped, brake_torque, Chassis, ChassisState, Controls, Fidelity, Solver, Telemetry, SUBSTEP};
 use crate::powertrain::PowertrainModel;
 use crate::tyre::{Slip, TyreModel};
 use crate::vehicle::{VehicleParams, G};
@@ -81,10 +81,10 @@ impl BicycleSolver {
         let unsprung_f = 2.0 * p.unsprung_front_kg;
         let unsprung_r = 2.0 * p.unsprung_rear_kg;
 
-        let d_f = (ms * ay * p.roll.roll_arm_m * p.roll.rsd_front) / p.track_front_m
+        let d_f = (ms * ay * p.roll_arm() * p.roll.rsd_front) / p.track_front_m
             + (ms_f * ay * p.roll.rc_front_m) / p.track_front_m
             + (unsprung_f * ay * p.tyre_radius_m) / p.track_front_m;
-        let d_r = (ms * ay * p.roll.roll_arm_m * (1.0 - p.roll.rsd_front)) / p.track_rear_m
+        let d_r = (ms * ay * p.roll_arm() * (1.0 - p.roll.rsd_front)) / p.track_rear_m
             + (ms_r * ay * p.roll.rc_rear_m) / p.track_rear_m
             + (unsprung_r * ay * p.tyre_radius_m) / p.track_rear_m;
         (d_f, d_r)
@@ -277,8 +277,20 @@ impl BicycleSolver {
 
         let (d_fz_f, d_fz_r) = self.lateral_transfer(self.ay);
 
-        // Slip angles with relaxation lag.
-        let a_f_raw = d - (v + p_a * r).atan2(u_kin);
+        // Slip angles with relaxation lag, each from the velocity in its own
+        // wheel's frame. The front used to be `d - atan2(v + a r, |u|)`, the
+        // small-angle form: right while the car rolls forwards, wrong once it
+        // does not. Sliding sideways at lock it passed 90 deg (110 measured,
+        // against a true 46), where tan() changes sign and the front tyre
+        // pushed WITH the slide; rolling backwards it kept the steer's
+        // forward sign, so steering acted the wrong way. Resolved through the
+        // steer angle and measured against |vx|, it is the angle between the
+        // wheel plane and the patch velocity, in (-90, 90) deg, always.
+        let (cd, sd) = (d.cos(), d.sin());
+        let vy_f = v + p_a * r;
+        let vx_fw = u * cd + vy_f * sd;
+        let vy_fw = vy_f * cd - u * sd;
+        let a_f_raw = -vy_fw.atan2(vx_fw.abs().max(0.5));
         let a_r_raw = -(v - p_b * r).atan2(u_kin);
         let relax_len = self.c.tyre.relaxation_length();
         // On the distance rolled in ANY direction, so a slide relaxes too.
@@ -290,10 +302,13 @@ impl BicycleSolver {
         self.a_f += (a_f_raw - self.a_f) * blend;
         self.a_r += (a_r_raw - self.a_r) * blend;
 
-        // Slip ratios from the wheel-speed states.
+        // Slip ratios from the wheel-speed states. The front against its
+        // speed ALONG THE STEERED WHEEL, not the body's u: at full lock the two
+        // differ by cos(46 deg), and the front wheel speed read 30 % low.
         let k_den = u.abs().max(2.0);
         let radius = self.c.params.tyre_radius_m;
-        let k_f = (self.w_f * radius - u) / k_den;
+        let k_den_f = vx_fw.abs().max(2.0);
+        let k_f = (self.w_f * radius - vx_fw) / k_den_f;
         // Split front axle (FFB model v2.1): each front wheel its own speed
         // state and its own forward speed, u - r*y with left positive, exactly
         // as the rear. Otherwise both fronts share the one rotor's slip ratio.
@@ -301,8 +316,8 @@ impl BicycleSolver {
         let half_track_f = self.c.params.track_front_m * 0.5;
         let (k_fl, k_fr) = if split {
             (
-                (self.w_fl * radius - (u - r * half_track_f)) / k_den,
-                (self.w_fr * radius - (u + r * half_track_f)) / k_den,
+                (self.w_fl * radius - ((u - r * half_track_f) * cd + vy_f * sd)) / k_den_f,
+                (self.w_fr * radius - ((u + r * half_track_f) * cd + vy_f * sd)) / k_den_f,
             )
         } else {
             (k_f, k_f)
@@ -362,7 +377,6 @@ impl BicycleSolver {
         let (fx_r, fy_r, fzi_r, fzo_r) = (ar.fx, ar.fy, ar.inner_fz, ar.outer_fz);
 
         // Resolve the front through the steer angle.
-        let (cd, sd) = (d.cos(), d.sin());
         let fx_fb = fx_f * cd - fy_f * sd;
         let fy_fb = fx_f * sd + fy_f * cd;
 
@@ -384,8 +398,13 @@ impl BicycleSolver {
         // always left this out, so it stays out there (bit-identical).
         let n_front = if split { half_track_f * (af.fx_right - af.fx_left) * cd } else { 0.0 };
 
-        let du = (fx_fb + fx_r - drag - roll_res) / m + v * r;
-        let dv = (fy_fb + fy_r) / m - u * r;
+        // Drag acts against the velocity, not against the nose. Taken off u
+        // alone, a car sliding sideways at 20 m/s lost 1.1 m/s^2 of FORWARD
+        // speed and none sideways, and one travelling backwards in a spin
+        // was pushed further backwards by it.
+        let (drag_x, drag_y) = if speed > 1e-9 { (drag * u / speed, drag * v / speed) } else { (0.0, 0.0) };
+        let du = (fx_fb + fx_r - drag_x - roll_res) / m + v * r;
+        let dv = (fy_fb + fy_r - drag_y) / m - u * r;
         let dr = (p_a * fy_fb - p_b * fy_r + n_diff + n_front) / self.c.params.izz_kg_m2;
 
         // Driveline. The carrier turns at the mean of the two side gears, so
@@ -426,10 +445,12 @@ impl BicycleSolver {
         let dfx_f = ((self.axle_forces(self.a_f, k_f + KAPPA_H, k_f + KAPPA_H, fz_f, d_fz_f).fx - fx_f) / KAPPA_H).max(0.0);
         let dfx_rl = ((self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rl + KAPPA_H }, fz_rl).fx - f_rl.fx) / KAPPA_H).max(0.0);
         let dfx_rr = ((self.c.tyre.forces(Slip { alpha: self.a_r, kappa: k_rr + KAPPA_H }, fz_rr).fx - f_rr.fx) / KAPPA_H).max(0.0);
-        let stiff_f = dt * radius * radius * dfx_f / k_den;
+        let stiff_f = dt * radius * radius * dfx_f / k_den_f;
         let stiff_rl = dt * radius * radius * dfx_rl / k_den;
         let stiff_rr = dt * radius * radius * dfx_rr / k_den;
-        let mut dw_f = (-fx_f * radius - self.w_f.signum() * tb_f) / (iw_f + stiff_f);
+        let t_free_f = -fx_f * radius;
+        let tb_f_now = brake_torque(self.w_f, t_free_f, iw_f + stiff_f, tb_f, dt);
+        let dw_f = (t_free_f - tb_f_now) / (iw_f + stiff_f);
 
         // Split front axle: each front wheel with its own inertia, its own
         // tyre Fx and HALF the front brake torque -- equal line pressure, so
@@ -440,17 +461,13 @@ impl BicycleSolver {
             let iw = self.c.params.wheel_inertia_front_kg_m2;
             let s_of = |k: f64, fz: f64, fx: f64| {
                 let d = ((self.c.tyre.forces(Slip { alpha: self.a_f, kappa: k + KAPPA_H }, fz).fx - fx) / KAPPA_H).max(0.0);
-                dt * radius * radius * d / k_den
+                dt * radius * radius * d / k_den_f
             };
             let stiff_fl = s_of(k_fl, af.fz_left, af.fx_left);
             let stiff_fr = s_of(k_fr, af.fz_right, af.fx_right);
-            dw_fl = (-af.fx_left * radius - self.w_fl.signum() * tb_f_side) / (iw + stiff_fl);
-            dw_fr = (-af.fx_right * radius - self.w_fr.signum() * tb_f_side) / (iw + stiff_fr);
-            for (w, dw) in [(self.w_fl, &mut dw_fl), (self.w_fr, &mut dw_fr)] {
-                if tb_f_side > 0.0 && ((w > 0.0 && w + *dw * dt < 0.0) || (w < 0.0 && w + *dw * dt > 0.0)) {
-                    *dw = -w / dt;
-                }
-            }
+            let (tfl, tfr) = (-af.fx_left * radius, -af.fx_right * radius);
+            dw_fl = (tfl - brake_torque(self.w_fl, tfl, iw + stiff_fl, tb_f_side, dt)) / (iw + stiff_fl);
+            dw_fr = (tfr - brake_torque(self.w_fr, tfr, iw + stiff_fr, tb_f_side, dt)) / (iw + stiff_fr);
         }
 
         // The two rear wheels, solved together. The driveline's reflected
@@ -504,22 +521,19 @@ impl BicycleSolver {
         // is taken out of them, which the coupled solve does.
         let t_rl = 0.5 * t_in + t_lock;
         let t_rr = 0.5 * t_in - t_lock;
-        let p_l = t_rl - f_rl.fx * radius - self.w_rl.signum() * tb_r_side;
-        let p_r = t_rr - f_rr.fx * radius - self.w_rr.signum() * tb_r_side;
-        let mut dw_rl = (p_l * (i_r + q) - q * p_r) / det;
-        let mut dw_rr = (p_r * (i_l + q) - q * p_l) / det;
-        if self.w_f > 0.0 && self.w_f + dw_f * dt < 0.0 && tb_f > 0.0 {
-            dw_f = -self.w_f / dt;
-        }
-        if self.w_f < 0.0 && self.w_f + dw_f * dt > 0.0 && tb_f > 0.0 {
-            dw_f = -self.w_f / dt;
-        }
-        if self.w_rl > 0.0 && self.w_rl + dw_rl * dt < 0.0 && tb_r_side > 0.0 && t_rl <= 0.0 {
-            dw_rl = -self.w_rl / dt;
-        }
-        if self.w_rr > 0.0 && self.w_rr + dw_rr * dt < 0.0 && tb_r_side > 0.0 && t_rr <= 0.0 {
-            dw_rr = -self.w_rr / dt;
-        }
+        // Rear brakes as friction elements too (see `brake_torque`), through
+        // the coupled pair: the torque each side needs to stop in this step
+        // is read off the pair's equations with both wheels' target
+        // accelerations set to -w/dt, then capped at that side's pedal torque.
+        let p_l_free = t_rl - f_rl.fx * radius;
+        let p_r_free = t_rr - f_rr.fx * radius;
+        let (stop_l, stop_r) = (-self.w_rl / dt, -self.w_rr / dt);
+        let tb_rl = brake_torque(0.0, p_l_free - (i_l + q) * stop_l - q * stop_r, 1.0, tb_r_side, dt);
+        let tb_rr = brake_torque(0.0, p_r_free - q * stop_l - (i_r + q) * stop_r, 1.0, tb_r_side, dt);
+        let p_l = p_l_free - tb_rl;
+        let p_r = p_r_free - tb_rr;
+        let dw_rl = (p_l * (i_r + q) - q * p_r) / det;
+        let dw_rr = (p_r * (i_l + q) - q * p_l) / det;
 
         self.s.u += du * dt;
         self.s.v += dv * dt;

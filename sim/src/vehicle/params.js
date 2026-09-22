@@ -170,7 +170,8 @@ export const SDM26 = {
     // 2026-09-21 (Nick): set to 0.48, between the 1-1/1-1 baseline (0.46) and
     // the 4-7/1-1 setting (0.51) this ran at before.
     rsdFront: 0.48,
-    hRollArmM: 0.2626, // sprung-CG to roll-axis arm
+    // The sprung-CG to roll-axis arm is derived (`rollArm` below) from the
+    // CG height and these roll centres, so an edit to either moves it.
     rcFrontM: 0.0186,  // front roll-centre height
     rcRearM: 0.0251,   // rear roll-centre height
   },
@@ -393,6 +394,45 @@ export const SDM26 = {
   headYawDegPerG: 1.1,
 };
 
+// The rack map is a monotone cubic (PCHIP, Fritsch-Carlson) through the
+// measured points rather than straight lines between them: the linear map's
+// slope -- the local ratio, and so the rim/kingpin TORQUE ratio -- jumped by up
+// to 3.6 % at every 5 deg of rim, notches on a direct-drive base. The cubic
+// passes through every point, cannot overshoot between them, and its
+// derivative is continuous. Port of `vehicle.rs`; the two must agree.
+
+function steerSegSlope(t, i) {
+  return (t[i + 1] - t[i]) / 5;
+}
+
+// Node slope: the first secant at the centre (the map is odd about zero), the
+// last at the far end (so the curve joins the over-travel ramp without a
+// kink), and the harmonic mean of the neighbouring secants in between.
+function steerNodeSlope(t, k) {
+  const n = t.length;
+  if (k === 0) return steerSegSlope(t, 0);
+  if (k >= n - 1) return steerSegSlope(t, n - 2);
+  const d0 = steerSegSlope(t, k - 1), d1 = steerSegSlope(t, k);
+  return d0 * d1 <= 0 ? 0 : 2 / (1 / d0 + 1 / d1);
+}
+
+// The cubic on segment `i` at local position `u` in 0..1: [road deg, slope].
+function steerHermite(t, i, u) {
+  const h = 5;
+  const y0 = t[i], y1 = t[i + 1];
+  const m0 = steerNodeSlope(t, i), m1 = steerNodeSlope(t, i + 1);
+  const u2 = u * u, u3 = u * u * u;
+  const y = (2 * u3 - 3 * u2 + 1) * y0
+    + (u3 - 2 * u2 + u) * h * m0
+    + (-2 * u3 + 3 * u2) * y1
+    + (u3 - u2) * h * m1;
+  const dy = ((6 * u2 - 6 * u) * y0
+    + (3 * u2 - 4 * u + 1) * h * m0
+    + (-6 * u2 + 6 * u) * y1
+    + (3 * u2 - 2 * u) * h * m1) / h;
+  return [y, dy];
+}
+
 /**
  * Road-wheel angle (deg, signed) for a rim angle, through the measured rack.
  *
@@ -410,11 +450,10 @@ export function roadFromRimDeg(steering, rimDeg) {
   if (x >= n - 1) {
     // Past the table: hold the last slope, so over-travel is a ramp and not a
     // cliff. The end stop is what should be resisting by then.
-    const slope = (t[n - 1] - t[n - 2]) / step;
-    return sign * (t[n - 1] + slope * (mag - (n - 1) * step));
+    return sign * (t[n - 1] + steerSegSlope(t, n - 2) * (mag - (n - 1) * step));
   }
   const i = Math.floor(x);
-  return sign * (t[i] + (x - i) * (t[i + 1] - t[i]));
+  return sign * steerHermite(t, i, x - i)[0];
 }
 
 /**
@@ -438,29 +477,40 @@ export function rimFromRoadDeg(steering, roadDeg) {
   const mag = Math.abs(roadDeg);
   const last = t[n - 1];
   if (mag >= last) {
-    const slope = (last - t[n - 2]) / step;
+    const slope = steerSegSlope(t, n - 2);
     if (slope <= 0) return sign * (n - 1) * step;
     return sign * ((n - 1) * step + (mag - last) / slope);
   }
-  // Monotonic table; a scan over 37 entries is clearer than a binary search.
+  // Monotonic table and a monotonic cubic through it: find the segment by its
+  // end points, then bisect inside it -- sixty halvings, exactly as Rust does.
   for (let i = 0; i < n - 1; i++) {
     const a = t[i];
     const b = t[i + 1];
     if (mag <= b) {
-      const f = Math.abs(b - a) < 1e-12 ? 0 : (mag - a) / (b - a);
-      return sign * (i + f) * step;
+      if (Math.abs(b - a) < 1e-12) return sign * i * step;
+      let lo = 0, hi = 1;
+      for (let k = 0; k < 60; k++) {
+        const mid = 0.5 * (lo + hi);
+        if (steerHermite(t, i, mid)[0] < mag) lo = mid; else hi = mid;
+      }
+      return sign * (i + 0.5 * (lo + hi)) * step;
     }
   }
   return sign * (n - 1) * step;
 }
 
-/** Local d(road)/d(rim) at a rim angle -- the reciprocal of the local ratio. */
+/**
+ * Local d(road)/d(rim) at a rim angle -- the reciprocal of the local ratio.
+ * The derivative of the same cubic, so it is continuous.
+ */
 export function roadPerRimDeg(steering, rimDeg) {
   const t = steering?.rimToRoadDeg;
   if (!t || t.length < 2) return 1 / (steering?.ratio ?? 4.411);
-  const step = 5;
-  const i = Math.min(t.length - 2, Math.floor(Math.abs(rimDeg) / step));
-  return (t[i + 1] - t[i]) / step;
+  const n = t.length;
+  const x = Math.abs(rimDeg) / 5;
+  if (x >= n - 1) return steerSegSlope(t, n - 2);
+  const i = Math.floor(x);
+  return steerHermite(t, i, x - i)[1];
 }
 
 /** Distance CG -> front axle (m). */
@@ -473,9 +523,43 @@ export function lengthToRearAxle(v) {
   return v.wheelbaseM * v.weightDistFront;
 }
 
-/** Nominal per-tyre static load (N) -- the reference for load sensitivity. */
-export function nominalTyreLoad(v) {
-  return (v.massKg * 9.81) / 4;
+/**
+ * The tyre's reference load Fz0 (N) -- the load its mu is quoted at, and the
+ * point load sensitivity is measured from.
+ *
+ * A property of the TYRE FIT, so a constant: SDM26's static corner load as
+ * shipped (267 kg / 4). It used to be recomputed from the live mass, which
+ * moved the tyre's reference with the car -- add 20 kg of ballast and the
+ * tyre re-centred on the heavier load, and the car lost none of the grip load
+ * sensitivity says it should (about 0.9 %). The argument is kept so callers
+ * do not change; it is ignored. Rust: `MagicFormulaTyre::sdm26`, `nominal_load`.
+ */
+export const TYRE_FZ0_N = (267 * 9.81) / 4;
+export function nominalTyreLoad(_v) {
+  return TYRE_FZ0_N;
+}
+
+/**
+ * Height of the SPRUNG mass's CG (m). `cgHeightM` is the whole car's; the
+ * unsprung mass sits at the wheel centre, below it.
+ */
+export function sprungCgHeight(v) {
+  const mu = 2 * (v.unsprungFrontKg + v.unsprungRearKg);
+  return (v.massKg * v.cgHeightM - mu * v.tireRadiusM) / Math.max(v.massKg - mu, 1e-6);
+}
+
+/**
+ * Sprung-CG to roll-axis arm (m), derived rather than stored. Port of
+ * `VehicleParams::roll_arm`: it used to be a stored 0.2626 m -- the TOTAL CG
+ * height less the roll axis, 4 % short of the sprung one -- and being stored it
+ * ignored CG-height and roll-centre edits, so raising a roll centre added
+ * transfer without taking any from the springs. Derived, elastic + geometric
+ * + unsprung sums to m.ay.h/t whatever is edited.
+ */
+export function rollArm(v) {
+  const a = v.wheelbaseM * (1 - v.weightDistFront);
+  const axis = v.roll.rcFrontM + (v.roll.rcRearM - v.roll.rcFrontM) * a / v.wheelbaseM;
+  return sprungCgHeight(v) - axis;
 }
 
 /** Total reduction engine -> wheel in gear index `g` (0-based). */

@@ -25,10 +25,16 @@
 // right. If a particular driver has it backwards, `forceFeedback.invert` in
 // the profile flips it and nothing else has to know.
 
-/** Aligning-torque weight vs speed: 0 below 0.3 m/s, 1 from 1.8 m/s, smooth between. */
+/**
+ * How much of the tyres' aligning torque the vehicle model is delivering at
+ * this speed, 0..1: its own low-speed lateral-force fade, speed / 3 m/s. The
+ * model already fades the torque; this is only the hand-over to the
+ * standstill terms, which fade in as it fades out. It used to be a second
+ * 0.3-1.8 m/s fade ON the torque, and the two multiplied (9 % at 1 m/s). Same
+ * curve as `low_speed_fade` in `rig.rs`.
+ */
 export function lowSpeedFade(speed) {
-  const x = Math.max(0, Math.min(1, (speed - 0.3) / 1.5));
-  return x * x * (3 - 2 * x);
+  return Math.max(0, Math.min(1, speed / 3));
 }
 
 /**
@@ -175,11 +181,9 @@ export class ForceFeedback {
     // 1. Self-aligning torque from the tyres, the signal itself. The model is
     //    left-positive; flip into the wheel's frame.
     //
-    //    Faded out at walking pace. The solver clamps forward speed at 3.0 m/s
-    //    inside the slip-angle calculation, so below a few m/s any sideways
-    //    drift or wheelspin is a full-size slip angle and a full-size torque
-    //    that flips sign as the car wriggles -- measured as +-5..10 N.m at
-    //    0.4-3 m/s on the rig. Nothing a driver reads lives there.
+    //    Not faded here: the model already fades the tyre force, and with it
+    //    this torque, below 3 m/s. `fade` is that same curve, used only to
+    //    hand over to the standstill terms further down.
     const fade = lowSpeedFade(tel.speed);
     //    FFB model v2 adds the front brake forces through the scrub radius
     //    (`scrubRimNm`, from the JS model). The native rig folds it into its
@@ -188,7 +192,7 @@ export class ForceFeedback {
     //    v2.1 (model 3) is v2 here: its split front axle lives in the native
     //    solver only, and its at-speed jacking needs the rig's geometry.
     const scrubNm = cfg.model >= 2 ? (tel.scrubRimNm ?? 0) : 0;
-    out.align = -(tel.rimTorqueNm + scrubNm) * cfg.alignTorqueGain * fade;
+    out.align = -(tel.rimTorqueNm + scrubNm) * cfg.alignTorqueGain;
 
     // 1b. Understeer effect. The tyre model's own cue is small: with 19 mm
     //     of mechanical trail under a pneumatic trail that collapses, the

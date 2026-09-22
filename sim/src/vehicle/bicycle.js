@@ -32,7 +32,7 @@
 // That keeps the balance sensitive to the ARB setting even though there are
 // only two contact patches in the equations.
 
-import { lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad } from "./params.js";
+import { lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad, rollArm } from "./params.js";
 import { axleMu, muAtLoad, pneumaticTrail, tyreForces } from "./tire.js";
 
 const G = 9.81;
@@ -42,6 +42,20 @@ const SUBSTEP = 1 / 500;
 const KAPPA_H = 1e-4;
 /** Speed above which the steering slip cap is at its full (narrow) width. */
 const SLIP_CAP_FULL_MPS = 8;
+
+/**
+ * Torque a friction brake applies to a wheel this substep (N.m, positive
+ * opposes positive wheel speed). Port of `brake_torque` in sim-core's
+ * `solver/mod.rs` -- see the note there. In short: `Math.sign(w) * tb` drops
+ * the brake entirely on a stopped wheel (Math.sign(0) is 0), so a car held on
+ * the brakes with any throttle crept forward, and Rust's `signum` (+1 at 0)
+ * crept it backward. A brake supplies what stops the wheel in this step and
+ * never more than the pedal's torque.
+ */
+function brakeTorque(w, tFree, inertia, tb, dt) {
+  if (tb <= 0) return 0;
+  return Math.min(tb, Math.max(-tb, tFree + inertia * w / dt));
+}
 
 export class BicycleModel {
   constructor(params, powertrain) {
@@ -283,11 +297,11 @@ export class BicycleModel {
     const unsprungR = 2 * p.unsprungRearKg;
     const ay = this.ay;
     const dFzF =
-      (this.mSprung * ay * p.roll.hRollArmM * p.roll.rsdFront) / tF +
+      (this.mSprung * ay * rollArm(p) * p.roll.rsdFront) / tF +
       (msF * ay * p.roll.rcFrontM) / tF +
       (unsprungF * ay * p.tireRadiusM) / tF;
     const dFzR =
-      (this.mSprung * ay * p.roll.hRollArmM * (1 - p.roll.rsdFront)) / tR +
+      (this.mSprung * ay * rollArm(p) * (1 - p.roll.rsdFront)) / tR +
       (msR * ay * p.roll.rcRearM) / tR +
       (unsprungR * ay * p.tireRadiusM) / tR;
 
@@ -297,7 +311,16 @@ export class BicycleModel {
     const muXR = axleMu(p.muLong, FzR, dFzR, this.Fz0, p.tireLoadSensitivity);
 
     // ---- slip angles with relaxation-length lag ----
-    const aFraw = d - Math.atan2(v + this.a * r, uKin);
+    // Each from the velocity in its own wheel's frame. The small-angle
+    // `d - atan2(v + a r, |u|)` passed 90 deg sliding sideways at lock (110
+    // measured, against a true 46), where tan() flips sign and the front tyre
+    // pushed WITH the slide, and rolling backwards it kept the steer's
+    // forward sign. See bicycle.rs; same operations, same order.
+    const cdK = Math.cos(d), sdK = Math.sin(d);
+    const vyF = v + this.a * r;
+    const vxFw = u * cdK + vyF * sdK;
+    const vyFw = vyF * cdK - u * sdK;
+    const aFraw = -Math.atan2(vyFw, Math.max(Math.abs(vxFw), 0.5));
     const aRraw = -Math.atan2(v - this.b * r, uKin);
     // On the distance the tyre rolls in ANY direction: a car sliding sideways
     // is rolling its tyres sideways, and a lag that only counted forward
@@ -307,8 +330,11 @@ export class BicycleModel {
     this.aR += (aRraw - this.aR) * Math.min(1, relaxRate * dt);
 
     // ---- slip ratios from the wheel-speed states ----
+    // The front against its speed ALONG THE STEERED WHEEL, not the body's u:
+    // at full lock they differ by cos(46 deg) and the front read 30 % slow.
     const kDen = Math.max(Math.abs(u), 2.0);
-    const kF = (this.wF * p.tireRadiusM - u) / kDen;
+    const kDenF = Math.max(Math.abs(vxFw), 2.0);
+    const kF = (this.wF * p.tireRadiusM - vxFw) / kDenF;
 
     // ---- the rear axle, one wheel at a time ----
     // Each rear wheel carries its own load, its own forward speed and so its
@@ -375,8 +401,13 @@ export class BicycleModel {
     // one rear rotor both of those are exactly zero.
     const nDiff = halfTrackR * (fRR.fx - fRL.fx);
 
-    const du = (FxFb + FxRb - drag - rollRes) / p.massKg + v * r;
-    const dv = (FyFb + FyRb) / p.massKg - u * r;
+    // Drag against the velocity, not the nose: off u alone, a car sliding
+    // sideways lost forward speed to it and one going backwards was pushed
+    // further back.
+    const dragX = V > 1e-9 ? drag * u / V : 0;
+    const dragY = V > 1e-9 ? drag * v / V : 0;
+    const du = (FxFb + FxRb - dragX - rollRes) / p.massKg + v * r;
+    const dv = (FyFb + FyRb - dragY) / p.massKg - u * r;
     const dr = (this.a * FyFb - this.b * FyRb + nDiff) / p.izzKgM2;
 
     // ---- driveline ----
@@ -420,10 +451,12 @@ export class BicycleModel {
     const dFxF = Math.max(0, (tyreForces(this.aF, kF + KAPPA_H, FzF, muYF, muXF).fx - fF.fx) / KAPPA_H);
     const dFxRL = Math.max(0, (tyreForces(this.aR, kRL + KAPPA_H, FzRL, muYRL, muXRL).fx - fRL.fx) / KAPPA_H);
     const dFxRR = Math.max(0, (tyreForces(this.aR, kRR + KAPPA_H, FzRR, muYRR, muXRR).fx - fRR.fx) / KAPPA_H);
-    const stiffF = dt * R * R * dFxF / kDen;
+    const stiffF = dt * R * R * dFxF / kDenF;
     const stiffRL = dt * R * R * dFxRL / kDen;
     const stiffRR = dt * R * R * dFxRR / kDen;
-    let dwF = (-fF.fx * R - Math.sign(this.wF) * tbF) / (this.IwF + stiffF);
+    const tFreeF = -fF.fx * R;
+    const tbFnow = brakeTorque(this.wF, tFreeF, this.IwF + stiffF, tbF, dt);
+    const dwF = (tFreeF - tbFnow) / (this.IwF + stiffF);
 
     // The two rear wheels, solved together. The driveline's reflected inertia
     // hangs on the CARRIER, which turns at the mean of the two side gears, so
@@ -476,20 +509,18 @@ export class BicycleModel {
     // of them, which the coupled solve does.
     const tRL = 0.5 * tIn + tLock;
     const tRR = 0.5 * tIn - tLock;
-    const pL = tRL - fRL.fx * R - Math.sign(this.wRL) * tbRside;
-    const pR = tRR - fRR.fx * R - Math.sign(this.wRR) * tbRside;
-    let dwRL = (pL * (iR + qD) - qD * pR) / det;
-    let dwRR = (pR * (iL + qD) - qD * pL) / det;
-
-    // Clamp so braking stops a wheel instead of reversing it inside one step.
-    if (this.wF > 0 && this.wF + dwF * dt < 0 && tbF > 0) dwF = -this.wF / dt;
-    if (this.wF < 0 && this.wF + dwF * dt > 0 && tbF > 0) dwF = -this.wF / dt;
-    if (this.wRL > 0 && this.wRL + dwRL * dt < 0 && tbRside > 0 && tRL <= 0) {
-      dwRL = -this.wRL / dt;
-    }
-    if (this.wRR > 0 && this.wRR + dwRR * dt < 0 && tbRside > 0 && tRR <= 0) {
-      dwRR = -this.wRR / dt;
-    }
+    // Rear brakes as friction elements too, through the coupled pair: the
+    // torque each side needs to stop in this step, read off the pair's
+    // equations with both targets at -w/dt, capped at the pedal's torque.
+    const pLfree = tRL - fRL.fx * R;
+    const pRfree = tRR - fRR.fx * R;
+    const stopL = -this.wRL / dt, stopR = -this.wRR / dt;
+    const tbRL = brakeTorque(0, pLfree - (iL + qD) * stopL - qD * stopR, 1, tbRside, dt);
+    const tbRR = brakeTorque(0, pRfree - qD * stopL - (iR + qD) * stopR, 1, tbRside, dt);
+    const pL = pLfree - tbRL;
+    const pR = pRfree - tbRR;
+    const dwRL = (pL * (iR + qD) - qD * pR) / det;
+    const dwRR = (pR * (iL + qD) - qD * pL) / det;
 
     // ---- integrate ----
     this.u += du * dt;

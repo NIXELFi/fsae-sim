@@ -21,8 +21,9 @@ pub struct AeroParams {
 pub struct RollParams {
     /// Front share of total roll stiffness. The single biggest balance knob.
     pub rsd_front: f64,
-    /// Sprung-CG to roll-axis arm (m).
-    pub roll_arm_m: f64,
+    // The sprung-CG to roll-axis arm is NOT stored: it is
+    // [`VehicleParams::roll_arm`], derived from the CG height and the roll
+    // centres, so editing either one moves it the way the car would.
     pub rc_front_m: f64,
     pub rc_rear_m: f64,
 }
@@ -150,7 +151,60 @@ pub const STEER_MAP_ROAD_DEG: [f64; 37] = [
     46.2288,
 ];
 
-/// Road-wheel angle (deg, signed) for a rim angle, by linear interpolation.
+// The map is a monotone cubic (PCHIP, Fritsch-Carlson) through the measured
+// points, not straight lines between them. With linear interpolation the
+// position was only C0, so its slope -- the local ratio, and with it the
+// rim/kingpin TORQUE ratio -- jumped by up to 3.6 % every 5 deg of rim: about
+// 0.5 N.m of step at 14 N.m, felt as notches on a direct-drive base. The
+// cubic passes through every measured point, cannot overshoot between them,
+// and its derivative is continuous; `road_per_rim` is that derivative, so the
+// angle and the torque come from one curve. `sim/src/vehicle/params.js`
+// carries the same construction and the two must agree.
+
+/// Secant slope of segment `i` (deg road per deg rim).
+fn steer_seg_slope(i: usize) -> f64 {
+    (STEER_MAP_ROAD_DEG[i + 1] - STEER_MAP_ROAD_DEG[i]) / STEER_MAP_STEP_DEG
+}
+
+/// PCHIP node slope at point `k`. The map is odd about zero, so the slope at
+/// the centre is the first secant (the mirrored point makes the two secants
+/// either side equal); at the far end it is the last secant, so the curve
+/// joins the straight over-travel ramp without a kink.
+fn steer_node_slope(k: usize) -> f64 {
+    let n = STEER_MAP_ROAD_DEG.len();
+    if k == 0 {
+        return steer_seg_slope(0);
+    }
+    if k >= n - 1 {
+        return steer_seg_slope(n - 2);
+    }
+    let (d0, d1) = (steer_seg_slope(k - 1), steer_seg_slope(k));
+    if d0 * d1 <= 0.0 {
+        0.0
+    } else {
+        2.0 / (1.0 / d0 + 1.0 / d1)
+    }
+}
+
+/// The cubic on segment `i` at local position `t` in 0..1: (road deg, slope).
+fn steer_hermite(i: usize, t: f64) -> (f64, f64) {
+    let h = STEER_MAP_STEP_DEG;
+    let (y0, y1) = (STEER_MAP_ROAD_DEG[i], STEER_MAP_ROAD_DEG[i + 1]);
+    let (m0, m1) = (steer_node_slope(i), steer_node_slope(i + 1));
+    let (t2, t3) = (t * t, t * t * t);
+    let y = (2.0 * t3 - 3.0 * t2 + 1.0) * y0
+        + (t3 - 2.0 * t2 + t) * h * m0
+        + (-2.0 * t3 + 3.0 * t2) * y1
+        + (t3 - t2) * h * m1;
+    let dy = ((6.0 * t2 - 6.0 * t) * y0
+        + (3.0 * t2 - 4.0 * t + 1.0) * h * m0
+        + (-6.0 * t2 + 6.0 * t) * y1
+        + (3.0 * t2 - 2.0 * t) * h * m1)
+        / h;
+    (y, dy)
+}
+
+/// Road-wheel angle (deg, signed) for a rim angle.
 pub fn road_from_rim_deg(rim_deg: f64) -> f64 {
     let n = STEER_MAP_ROAD_DEG.len();
     let sign = if rim_deg < 0.0 { -1.0 } else { 1.0 };
@@ -160,16 +214,14 @@ pub fn road_from_rim_deg(rim_deg: f64) -> f64 {
         // Past the table: hold the last slope, so over-travel is a ramp and
         // not a cliff. The end stop is what should be resisting by then.
         let last = STEER_MAP_ROAD_DEG[n - 1];
-        let slope = (last - STEER_MAP_ROAD_DEG[n - 2]) / STEER_MAP_STEP_DEG;
-        return sign * (last + slope * (mag - (n - 1) as f64 * STEER_MAP_STEP_DEG));
+        return sign * (last + steer_seg_slope(n - 2) * (mag - (n - 1) as f64 * STEER_MAP_STEP_DEG));
     }
     let i = x.floor() as usize;
-    let t = x - i as f64;
-    sign * (STEER_MAP_ROAD_DEG[i] + t * (STEER_MAP_ROAD_DEG[i + 1] - STEER_MAP_ROAD_DEG[i]))
+    sign * steer_hermite(i, x - i as f64).0
 }
 
 /// Rim angle (deg, signed) that produces a given road-wheel angle -- the
-/// inverse of [`road_from_rim_deg`], by the same linear interpolation.
+/// inverse of [`road_from_rim_deg`], on the same curve.
 ///
 /// This exists so the SOFT LOCK and the FFB END STOP can be the same place.
 /// The soft lock clamps the road-wheel angle at the car's live `max_steer_rad`,
@@ -186,19 +238,32 @@ pub fn rim_from_road_deg(road_deg: f64) -> f64 {
     if mag >= last {
         // Past the table, hold the last slope -- the mirror of what
         // `road_from_rim_deg` does out there.
-        let slope = (last - STEER_MAP_ROAD_DEG[n - 2]) / STEER_MAP_STEP_DEG;
+        let slope = steer_seg_slope(n - 2);
         if slope <= 0.0 {
             return sign * (n - 1) as f64 * STEER_MAP_STEP_DEG;
         }
         return sign * ((n - 1) as f64 * STEER_MAP_STEP_DEG + (mag - last) / slope);
     }
-    // The table is monotonic, so a scan is enough and is clearer than a
-    // binary search over 37 entries.
+    // The table is monotonic and so is the cubic through it: find the segment
+    // by its end points, then bisect inside it. Sixty halvings of one 5 deg
+    // segment is far below double precision, and deterministic -- the JS port
+    // does exactly the same.
     for i in 0..n - 1 {
         let (a, b) = (STEER_MAP_ROAD_DEG[i], STEER_MAP_ROAD_DEG[i + 1]);
         if mag <= b {
-            let t = if (b - a).abs() < 1e-12 { 0.0 } else { (mag - a) / (b - a) };
-            return sign * (i as f64 + t) * STEER_MAP_STEP_DEG;
+            if (b - a).abs() < 1e-12 {
+                return sign * i as f64 * STEER_MAP_STEP_DEG;
+            }
+            let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if steer_hermite(i, mid).0 < mag {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            return sign * (i as f64 + 0.5 * (lo + hi)) * STEER_MAP_STEP_DEG;
         }
     }
     sign * (n - 1) as f64 * STEER_MAP_STEP_DEG
@@ -208,11 +273,15 @@ pub fn rim_from_road_deg(road_deg: f64) -> f64 {
 /// ratio, and with it the rim/kingpin torque ratio at that angle. About 1/5.27
 /// on centre and 1/3.4 past 90 deg, so the rim gets roughly 16 % less torque
 /// per unit kingpin moment on centre than the nominal ratio says, and ~30 %
-/// more in a hairpin.
+/// more in a hairpin. Continuous: it is the derivative of the same cubic.
 pub fn road_per_rim(rim_deg: f64) -> f64 {
     let n = STEER_MAP_ROAD_DEG.len();
-    let i = ((rim_deg.abs() / STEER_MAP_STEP_DEG).floor() as usize).min(n - 2);
-    (STEER_MAP_ROAD_DEG[i + 1] - STEER_MAP_ROAD_DEG[i]) / STEER_MAP_STEP_DEG
+    let x = rim_deg.abs() / STEER_MAP_STEP_DEG;
+    if x >= (n - 1) as f64 {
+        return steer_seg_slope(n - 2);
+    }
+    let i = x.floor() as usize;
+    steer_hermite(i, x - i as f64).1
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,6 +343,34 @@ impl VehicleParams {
 
     pub fn sprung_mass(&self) -> f64 {
         self.mass_kg - 2.0 * (self.unsprung_front_kg + self.unsprung_rear_kg)
+    }
+
+    /// Height of the SPRUNG mass's CG (m). `cg_height_m` is the whole car's,
+    /// unsprung included; the unsprung mass sits at the wheel centre, well
+    /// below it, so the sprung CG is higher than the total one.
+    pub fn sprung_cg_height(&self) -> f64 {
+        let mu = 2.0 * (self.unsprung_front_kg + self.unsprung_rear_kg);
+        (self.mass_kg * self.cg_height_m - mu * self.tyre_radius_m) / self.sprung_mass().max(1e-6)
+    }
+
+    /// Roll-axis height under the CG (m), on the line between the two roll
+    /// centres.
+    pub fn roll_axis_height_at_cg(&self) -> f64 {
+        self.roll.rc_front_m + (self.roll.rc_rear_m - self.roll.rc_front_m) * self.a() / self.wheelbase_m
+    }
+
+    /// Sprung-CG to roll-axis arm (m): the lever the elastic (spring and bar)
+    /// load transfer works through.
+    ///
+    /// Derived, not a parameter. It used to be a stored 0.2626 m -- which is
+    /// the TOTAL CG height less the roll axis, so the elastic path ran 4 % short
+    /// and total lateral transfer 3.4 % under the rigid-body m.ay.h/t -- and,
+    /// being stored, it ignored edits to the CG height and the roll centres:
+    /// raising a roll centre added geometric transfer without taking any from
+    /// the elastic path, which no car does. With it derived, elastic +
+    /// geometric + unsprung sums to exactly m.ay.h/t whatever is edited.
+    pub fn roll_arm(&self) -> f64 {
+        self.sprung_cg_height() - self.roll_axis_height_at_cg()
     }
 
     pub fn weight(&self) -> f64 {
@@ -340,7 +437,6 @@ pub fn sdm26() -> VehicleParams {
             // and front roll stiffness is the most direct lever.
             // 2026-09-21 (Nick): 0.48, between the two; see params.js.
             rsd_front: 0.48,
-            roll_arm_m: 0.2626,
             rc_front_m: 0.0186,
             rc_rear_m: 0.0251,
         },
@@ -412,6 +508,37 @@ mod steer_map_tests {
     fn it_is_odd_about_zero() {
         for road in [1.0_f64, 12.5, 30.0, 46.2288, 60.0] {
             assert!((rim_from_road_deg(-road) + rim_from_road_deg(road)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn map_passes_through_every_measured_point() {
+        for (k, want) in STEER_MAP_ROAD_DEG.iter().enumerate() {
+            let got = road_from_rim_deg(k as f64 * STEER_MAP_STEP_DEG);
+            assert!((got - want).abs() < 1e-9, "point {k}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn torque_ratio_has_no_steps() {
+        // The old linear map's slope jumped up to 3.6 % at every table point.
+        let mut prev = road_per_rim(0.0);
+        let mut rim = 0.05;
+        while rim <= 200.0 {
+            let now = road_per_rim(rim);
+            assert!(now > 0.0, "slope went non-positive at {rim}");
+            assert!(((now - prev) / prev).abs() < 0.002, "step of {:.3} % at rim {rim}", (now / prev - 1.0) * 100.0);
+            prev = now;
+            rim += 0.05;
+        }
+    }
+
+    #[test]
+    fn slope_is_the_derivative_of_the_map() {
+        for rim in [0.3_f64, 7.0, 44.9, 91.0, 150.0, 178.0] {
+            let h = 1e-5;
+            let fd = (road_from_rim_deg(rim + h) - road_from_rim_deg(rim - h)) / (2.0 * h);
+            assert!((fd - road_per_rim(rim)).abs() < 1e-6, "rim {rim}: fd {fd} vs {}", road_per_rim(rim));
         }
     }
 

@@ -557,6 +557,47 @@ console.log("\nRUST PARITY  (sim-core golden vectors vs the JS model)");
   check("golden drive exercises the scrub term", peakScrub, 0.05, 1e3, " N.m");
 }
 
+// ------------------------------------------------------ physics review 0922 ---
+// Regressions for the 2026-09-22 review, mirroring sim-core's
+// `tests/physics_review_0922.rs`. Each reproduces a defect measured before
+// the fix.
+console.log("\nPHYSICS REVIEW 0922  (regressions)");
+{
+  // Held on the brakes with the throttle open, the car must not move. JS crept
+  // FORWARD (Math.sign(0) dropped the brake on a stopped wheel); Rust crept
+  // backward (signum(0) is +1).
+  const { car } = fresh();
+  car.respawn(0, 0, 0, 0);
+  for (let i = 0; i < 1500; i++) car.step(0.002, { steer: 0, throttle: 0.3, brake: 1 });
+  check("braked car at the line does not creep", Math.abs(car.X), 0, 1e-6, " m");
+  check("braked front wheel is still", Math.abs(car.wF), 0, 1e-9, " rad/s");
+}
+{
+  // A locked stop keeps the braked wheel at zero rather than flickering.
+  const { car } = fresh();
+  car.pt.gear = 2;
+  car.respawn(0, 0, 0, 20);
+  car.pt.syncToWheel(20 / 0.2);
+  let worst = 0;
+  for (let i = 0; i < 3000 && car.u > 1; i++) {
+    car.step(0.002, { steer: 0, throttle: 0, brake: 1 });
+    worst = Math.max(worst, Math.abs(Math.min(0, car.wF)));
+  }
+  check("locked front wheel never runs backwards", worst, 0, 1e-9, " rad/s");
+}
+{
+  // Sliding sideways at full lock: the front slip angle stays under 90 deg and
+  // the tyres push against the slide. It read 110 deg and pushed with it.
+  const { car } = fresh();
+  car.respawn(0, 0, 0, 0);
+  for (let i = 0; i < 100; i++) {
+    car.u = 0.3; car.v = -8; car.r = 0;
+    car.step(0.002, { steer: 1, throttle: 0, brake: 0 });
+  }
+  check("front slip angle under 90 deg in a slide at lock", Math.abs(car.telemetry.slipF), 0, 89.999, " deg");
+  check("tyres push against a sideways slide", car.telemetry.ayG, 0, 99, " g");
+}
+
 // ------------------------------------------------------------- differential ---
 // SDM26 runs a Drexler Formula Student V3, a 1.5-way Salisbury LSD. These are
 // the physics invariants the team's own study asks for as regression guards --
