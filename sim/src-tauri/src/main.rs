@@ -19,7 +19,8 @@ mod wheel;
 /// line. Everything is optional; the launch screen fills in the rest.
 ///
 /// ```text
-/// fsae-sim [--track autocross|endurance|mis|gen-ax-SEED|gen-en-SEED] [--profile keyboard|gamepad-xbox|gamepad-ps|wheel]
+/// fsae-sim [--track autocross|endurance|skidpad|accel|mis|gen-ax-SEED|gen-en-SEED] [--profile keyboard|gamepad-xbox|gamepad-ps|wheel]
+///          [--model bicycle|4wheel]
 ///          [--tc on|off] [--abs on|off] [--auto-shift on|off]
 ///          [--driver NAME] [--driver-id ID] [--replay RUN] [--ghost RUN]
 ///          [--replay-lap N] [--ghost-lap M] [--sector I]
@@ -58,6 +59,10 @@ struct LaunchOptions {
     /// Who is driving. Stamped into every run this launch records, so a
     /// leaderboard can be a leaderboard rather than a list of files.
     driver: Option<String>,
+    /// Which vehicle model drives this session: 2 the bicycle, 3 the 4-wheel
+    /// beta (`--model bicycle|4wheel`, or 2/3). For this session only, like
+    /// the rest of a launch; the rig's saved choice is left alone.
+    vehicle_model: Option<u8>,
     /// The launcher's ID for that person -- a Helios account id. A run
     /// carrying one was started by somebody Helios had signed in; a run
     /// without one was somebody typing a name into the simulator, and the
@@ -163,6 +168,14 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> LaunchOptions {
         match key {
             "--track" => o.track = take(),
             "--profile" => o.profile = take(),
+            "--model" | "--vehicle-model" => {
+                let v = take();
+                match v.as_deref().map(|s| s.to_ascii_lowercase()) {
+                    Some(ref s) if s == "bicycle" || s == "2" => o.vehicle_model = Some(2),
+                    Some(ref s) if s == "4wheel" || s == "4-wheel" || s == "double-track" || s == "3" => o.vehicle_model = Some(3),
+                    _ => o.unknown.push(format!("--model {}", v.unwrap_or_default())),
+                }
+            }
             "--tc" | "--traction" => o.traction = on_off(take().as_ref()),
             "--abs" => o.abs = on_off(take().as_ref()),
             "--auto-shift" | "--auto" => o.auto_shift = on_off(take().as_ref()),
@@ -527,6 +540,17 @@ mod tests {
         let o = parse_args(args("--bogus --track endurance"));
         assert_eq!(o.unknown, vec!["--bogus".to_string()]);
         assert_eq!(o.track.as_deref(), Some("endurance"));
+    }
+
+    #[test]
+    fn model_picks_the_vehicle_model_for_the_session() {
+        assert_eq!(parse_args(args("--model 4wheel")).vehicle_model, Some(3));
+        assert_eq!(parse_args(args("--model bicycle")).vehicle_model, Some(2));
+        assert_eq!(parse_args(args("--vehicle-model 3 --track skidpad")).vehicle_model, Some(3));
+        let bad = parse_args(args("--model hovercraft --track accel"));
+        assert_eq!(bad.vehicle_model, None);
+        assert_eq!(bad.track.as_deref(), Some("accel"), "and parsing carried on past it");
+        assert!(!bad.unknown.is_empty());
     }
 
     #[test]

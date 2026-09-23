@@ -3743,6 +3743,13 @@ async function boot() {
     if (o.profile && game.input.settings.ids().includes(o.profile)) {
       game.input.useProfileForSession(o.profile);
     }
+    // Which car model drives this session (Helios's "Launch 4-wheel"). For
+    // the session, like the rest of a launch; the rig's saved choice stands.
+    if (o.vehicleModel === 2 || o.vehicleModel === 3) {
+      writeParam("vehicleModel", o.vehicleModel);
+      game.pushParams?.();
+      game.refreshTimeCounts?.();
+    }
     if (o.driver) game.driverName = String(o.driver).slice(0, 64);
     if (o.driverId) game.driverId = String(o.driverId).slice(0, 64);
     if (o.session) game.sessionLabel = String(o.session).slice(0, 96);
@@ -3786,6 +3793,7 @@ async function boot() {
     if (![...q.keys()].length) return null;
     return {
       track: q.get("track"), profile: q.get("profile"),
+      vehicleModel: ({ bicycle: 2, "2": 2, "4wheel": 3, "4-wheel": 3, "3": 3 })[String(q.get("model") ?? "").toLowerCase()],
       traction: onOff(q.get("tc")), abs: onOff(q.get("abs")), autoShift: onOff(q.get("auto")),
       driver: q.get("driver"), driverId: q.get("driverId"), session: q.get("session"),
       noRecord: onOff(q.get("record")) === false ? true : onOff(q.get("norecord")),
