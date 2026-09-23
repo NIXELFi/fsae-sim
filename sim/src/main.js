@@ -7,7 +7,7 @@ import { loadCarModel, loadWheelModel, loadBodyModel } from "./render/glbcar.js"
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
-import { loadTrack, TRACKS, trackSpec, isTrackId, generatedTrack, skidpad } from "./track/track.js";
+import { loadTrack, TRACKS, trackSpec, isTrackId, generatedTrack, skidpad, accel } from "./track/track.js";
 import { generatedTrackId, parseGeneratedId, randomSeed, normaliseSeed, describeGenerated, EVENTS as GEN_EVENTS } from "./track/generate.js";
 import { loadVenue } from "./track/venue.js";
 import { Renderer } from "./render/renderer.js";
@@ -395,6 +395,7 @@ class Game {
         // half a second for an endurance lap that was hard to close.
         : spec.kind === "generated" ? Promise.resolve().then(() => generatedTrack(spec.id))
         : spec.kind === "skidpad" ? Promise.resolve().then(() => skidpad())
+        : spec.kind === "accel" ? Promise.resolve().then(() => accel())
         : loadTrack(spec.url),
       // Optional CAD bodywork. Absent is the normal case, not an error, so
       // this resolves to null rather than rejecting and taking the load with

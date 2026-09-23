@@ -305,6 +305,7 @@ export const TRACK_DATUMS = {
   // The skidpad is built from the rulebook, not traced from a site; it sits
   // on the same nominal MIS infield fix as a generated course.
   skidpad: { lat: 42.06700, lon: -84.24300, bearingDeg: 0, name: "Skidpad (rulebook layout, nominal datum, MIS infield)" },
+  accel: { lat: 42.06700, lon: -84.24300, bearingDeg: 0, name: "Acceleration (rulebook layout, nominal datum, MIS infield)" },
   // A generated course exists nowhere. It is placed on the MIS infield so the
   // GPS channels stay plausible for anything that maps them, and named so
   // nobody mistakes the fix for a survey.

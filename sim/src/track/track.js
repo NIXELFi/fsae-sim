@@ -10,6 +10,7 @@ import { SDM26 } from "../vehicle/params.js";
 import { bodyBoxFor } from "../render/carmesh.js";
 import { generateTrack, parseGeneratedId, EVENTS as GEN_EVENTS } from "./generate.js";
 import { skidpadTrack } from "./skidpad.js";
+import { accelTrack } from "./accel.js";
 
 const CELL = 12; // m, spatial hash cell size
 
@@ -384,10 +385,14 @@ export function generatedTrack(id) {
 /** The skidpad, built from the rulebook (see skidpad.js). */
 export function skidpad() { return new Track(skidpadTrack()); }
 
+/** The 75 m acceleration event, built from the rulebook (see accel.js). */
+export function accel() { return new Track(accelTrack()); }
+
 export const TRACKS = [
   { id: "autocross", label: "Autocross 2026", url: "./data/track-autocross.json" },
   { id: "endurance", label: "Endurance 2026", url: "./data/track-endurance.json" },
   { id: "skidpad", label: "Skidpad (FSAE D.10)", kind: "skidpad" },
+  { id: "accel", label: "Acceleration (FSAE D.9)", kind: "accel" },
   { id: "mis", label: "Michigan International Speedway", url: "./data/venue-mis.json",
     kind: "venue" },
 ];

@@ -225,8 +225,11 @@ export class Timing {
     if (this.state === "finished") return;
 
     if (this.state === "staged") {
-      // The clock starts the moment the car moves off the line.
-      if (speedMps > MOVING_MPS) {
+      // The clock starts the moment the car moves off the line -- or, where
+      // the course says where the line is (acceleration, D.9.2.3: staged
+      // 0.30 m behind it), when the car crosses it.
+      const startS = this.track.scoring?.startS;
+      if (startS != null ? loc.s >= startS : speedMps > MOVING_MPS) {
         this.state = "running";
         this.lap = 1;
         this.lapStart = 0;
@@ -380,7 +383,7 @@ export class Timing {
         if (this.passedHalf) this.completeLap();
         this.passedHalf = false;
       }
-    } else if (loc.s >= L - 3 && this.prevS < loc.s) {
+    } else if (loc.s >= (this.track.scoring?.finishS ?? L - 3) && this.prevS < loc.s) {
       this.completeLap();
       this.state = "finished";
       const last = this.laps[this.laps.length - 1];
