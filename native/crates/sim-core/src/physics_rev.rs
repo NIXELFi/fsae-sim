@@ -10,8 +10,12 @@
 //! The rule, enforced by `tests/physics_rev.rs`:
 //!
 //! * Each model has a FINGERPRINT: the bicycle's is its golden drive
-//!   (`sim/data/vehicle-golden.json`), the double track's a handful of
-//!   quantised limit numbers (steer-ramp peaks, 75 m, a stop).
+//!   (`sim/data/vehicle-golden.json`) PLUS a handful of limit numbers
+//!   (steer-ramp peaks, a standing 75 m, a stop from 25 m/s, compared within
+//!   a driver's tolerance) -- the golden drive is gentle by design and
+//!   cannot see a launch or a grip change; the double track's is the same
+//!   limit numbers. The double track also has a golden drive of its own
+//!   (`tests/double_track_frozen.rs`) that catches any change at all.
 //! * If a change moves a fingerprint, the test fails. Then decide:
 //!   - lap times move (a real physics change): BUMP that model's revision here
 //!     AND in physicsRev.js, and re-record the fingerprint -- a new era;
@@ -19,7 +23,10 @@
 //!     and say in the commit why times are unaffected.
 //!
 //! Revision history:
-//!   bicycle      1  everything up to and including simulator 0.7.3
+//!   bicycle      1  everything up to and including simulator 0.7.3, and
+//!                   the 2026-09-23 physics-review fixes (no phantom wheel
+//!                   inertia, step-independent diff; standing 75 m 4.86 ->
+//!                   4.75 s) -- kept in era 1 by owner decision
 //!   double track 1  0.6.13 .. 0.7.2 (beta; ~8 % grippier than the bicycle)
 //!                2  0.7.3 (grip pinned to the bicycle's steady limit)
 

@@ -30,6 +30,7 @@ import { dirname, join } from "node:path";
 import { SDM26, roadPerRimDeg, rimFromRoadDeg } from "../src/vehicle/params.js";
 import { Powertrain } from "../src/vehicle/powertrain.js";
 import { BicycleModel } from "../src/vehicle/bicycle.js";
+import { defaultGainFor } from "../src/game/wheelPresets.js";
 import { compress, smoothstep, UNDERSTEER_SLIP_START, UNDERSTEER_SLIP_FULL, OVERSTEER_BALANCE_START, OVERSTEER_BALANCE_FULL } from "../src/game/forceFeedback.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -44,13 +45,13 @@ const cfg = { gamma: flags.gamma ?? 0.75, knee: flags.knee ?? 0.6, understeer: f
 
 // The preset's gain for each base (`defaultGainFor`): the torque peak at full output.
 const BASES = [
-  { name: "R5 5.5", rated: 5.5, gain: 0.37 },
-  { name: "20 N.m", rated: 20, gain: 1.0 },
+  { name: "R5 5.5", rated: 5.5, gain: defaultGainFor(5.5) },
+  { name: "20 N.m", rated: 20, gain: defaultGainFor(20) },
 ];
 
 /** Rim torque as the rig computes it natively: through the LOCAL rack slope. */
 function rigRimTorque(tel, rimDeg) {
-  return tel.kingpinTorqueNm * roadPerRimDeg(SDM26.steering, rimDeg) * SDM26.steering.rackEfficiency;
+  return tel.kingpinTorqueNm * roadPerRimDeg(SDM26.steering, rimDeg) * SDM26.steering.rackEfficiency * (SDM26.steering.feelScale ?? 1);
 }
 
 /** The mixer's tyre path for one base: effects, gain, compressor. N.m at the hands, wheel frame. */

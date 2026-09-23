@@ -109,11 +109,23 @@ export function asphaltTexture(cfg, tel, feel) {
   return { frac: Math.min(1, amount) * ASPHALT_MAX_FRAC * fade, hz };
 }
 
+/** Where the gamma lift stops being a power law at zero (`GAMMA_TOE` in rig.rs). */
+export const GAMMA_TOE = 0.03;
+
+/**
+ * Normalised command through a gamma lift and a tanh soft knee. The lift is
+ * `((m + t)^g - t^g) / ((1 + t)^g - t^g)`, not a bare `m^g`, whose slope is
+ * infinite at zero and multiplied a parked car's noise ~4x. Same as
+ * `compress` in rig.rs.
+ */
 export function compress(x, gamma = 1, knee = 1) {
   if (!x || !Number.isFinite(x)) return 0;
   const sign = x < 0 ? -1 : 1;
   let m = Math.abs(x);
-  if (gamma > 0 && Math.abs(gamma - 1) > 1e-9) m = Math.pow(m, gamma);
+  if (gamma > 0 && Math.abs(gamma - 1) > 1e-9) {
+    const t0 = Math.pow(GAMMA_TOE, gamma);
+    m = (Math.pow(m + GAMMA_TOE, gamma) - t0) / (Math.pow(1 + GAMMA_TOE, gamma) - t0);
+  }
   const k = Math.max(0, Math.min(1, knee));
   if (m > k) {
     const span = 1 - k;
@@ -121,6 +133,11 @@ export function compress(x, gamma = 1, knee = 1) {
   }
   return sign * m;
 }
+
+/** See rig.rs: friction ignores rim speeds under this (rad/s). */
+export const FRICTION_DEADBAND_RAD_S = 0.08;
+/** See rig.rs: the minimum-force floor fades in between these speeds, m/s. */
+export const MIN_FORCE_FADE = [0.5, 2.0];
 
 export class ForceFeedback {
   constructor() {
@@ -225,7 +242,11 @@ export class ForceFeedback {
 
     // 3. Friction, a Coulomb term with a soft sign so it does not buzz at
     //    rest. Stands in for the rack, the column bearings and the rod ends.
-    const target = Math.tanh(rateRadS / 0.3);
+    //    A soft deadband on the rim speed: a rim nobody is turning has
+    //    nothing for friction to oppose, and its "speed" is sensor noise
+    //    (`FRICTION_DEADBAND_RAD_S` in rig.rs).
+    const fr = Math.abs(rateRadS);
+    const target = Math.sign(rateRadS) * Math.tanh(Math.max(0, fr - FRICTION_DEADBAND_RAD_S) / 0.3);
     this._frictionState += (target - this._frictionState) * Math.min(1, dt / 0.03);
     out.friction = -cfg.friction * rated * this._frictionState;
 
@@ -302,10 +323,14 @@ export class ForceFeedback {
     out.clipped = Math.abs(base) > 1;
     let cmd = compress(base, cfg.gamma ?? 1, cfg.knee ?? 1);
     // The floor lifts tiny commands to where the motor's own cogging and
-    // friction do not swallow them. On the final command, after the gain,
-    // and only while the tyres are actually saying something.
-    if (cfg.minForce > 0 && Math.abs(out.align) > 1e-3 && Math.abs(cmd) < cfg.minForce) {
-      cmd = Math.sign(cmd) * cfg.minForce;
+    // friction do not swallow them: a smooth OFFSET in the direction of the
+    // tyre torque, `floor * tanh(tyre / floor)`, faded in with speed. It
+    // used to snap any small command to +-floor by its sign, a step of twice
+    // the floor at every zero crossing. Same as rig.rs.
+    if (cfg.minForce > 0) {
+      const tyre = (out.align * cfg.gain) / rated;
+      const w = Math.max(cfg.minForce, 1e-3);
+      cmd += cfg.minForce * Math.tanh(tyre / w) * smoothstep(tel.speed, MIN_FORCE_FADE[0], MIN_FORCE_FADE[1]);
     }
     cmd = Math.max(-1, Math.min(1, cmd + stopNorm));
     // Texture rides on top; keep it inside the remaining headroom.

@@ -46,6 +46,17 @@ export class NativeCar {
     this.boundaryHit = false;
     this.moneyShiftBlocked = false;
     /**
+     * The physics clock, seconds: SIMULATED time since the rig started or
+     * the last respawn (the rig's `Snapshot::sim_time_s`). The rig steps the
+     * solver in fixed 2 ms substeps off its own accumulator, so this is the
+     * time the car actually drove -- monotonic between respawns, frozen while
+     * paused or held, and free of both the OS's tick jitter and the page's
+     * frame rate. Time laps on it, not on `performance.now()` or summed frame
+     * dt. It moves in 2 ms steps and arrives a frame late, like the pose.
+     * `BicycleModel.simTimeS` is the same clock in the browser build.
+     */
+    this.simTimeS = 0;
+    /**
      * The respawn token we last sent, against the one coming back.
      *
      * `respawn` sets the pose here immediately so the course sees it this
@@ -163,6 +174,7 @@ export class NativeCar {
       steeringRatio: p.steeringRatio,
       casterDeg: p.steering.casterDeg, kingpinOffsetTrailM: p.steering.kingpinOffsetTrailM,
       rackEfficiency: p.steering.rackEfficiency, torqueRatio: p.steering.torqueRatio ?? undefined,
+      steerFeelScale: p.steering.feelScale,
       diffPowerLock: p.diff?.powerLock, diffCoastLock: p.diff?.coastLock,
       diffPreloadNm: p.diff?.preloadNm,
       dtToeInFrontDeg: p.dt?.toeInFrontDeg, dtToeInRearDeg: p.dt?.toeInRearDeg,
@@ -201,14 +213,14 @@ export class NativeCar {
     rigNative.command({
       kind: "ffb",
       enabled: ffb.enabled !== false,
-      gain: ffb.gain ?? 0.37, alignTorqueGain: ffb.alignTorqueGain ?? 1,
-      roadTextureGain: ffb.roadTextureGain ?? 0.35, damping: ffb.damping ?? 0.10,
-      friction: ffb.friction ?? 0.04, softLockGain: ffb.softLockGain ?? 1,
+      gain: ffb.gain ?? 0.64, alignTorqueGain: ffb.alignTorqueGain ?? 1,
+      roadTextureGain: ffb.roadTextureGain ?? 0.35, damping: ffb.damping ?? 0.058,
+      friction: ffb.friction ?? 0.023, softLockGain: ffb.softLockGain ?? 1,
       minForce: ffb.minForce ?? 0, maxForceNm: ffb.maxForceNm ?? 5.5, invert: !!ffb.invert,
       // Defaulted here as well as in the profile: a settings file written
       // before these existed must still get the compressor, not a hard clip.
       gamma: ffb.gamma ?? 0.75, knee: ffb.knee ?? 0.6,
-      parkFriction: ffb.parkFriction ?? 0.10, stopDamping: ffb.stopDamping ?? 0.35,
+      parkFriction: ffb.parkFriction ?? 0.058, stopDamping: ffb.stopDamping ?? 0.35,
       understeerEffect: ffb.understeerEffect ?? 0, oversteerEffect: ffb.oversteerEffect ?? 0,
       asphaltVibration: ffb.asphaltVibration ?? 0,
       // 1 = v1, 2 = v2, 3 = v2.1 (see `FfbConfig::model` in rig.rs).
@@ -312,6 +324,7 @@ export class NativeCar {
       this._respawnSeq = s.respawnSeq;
     }
     const st = s.state, t = s.tel;
+    if (typeof s.simTimeS === "number") this.simTimeS = s.simTimeS;
     this.X = st.x; this.Y = st.y; this.psi = st.psi;
     this.u = st.u; this.v = st.v; this.r = st.r;
     this.appliedAt = performance.now();
@@ -345,6 +358,7 @@ export class NativeCar {
     this.delta = 0;
     this.telemetry = blankTelemetry();
     this.appliedAt = 0;
+    this.simTimeS = 0;
     // Everything the rig sends back until it has applied this is from the
     // drive we just ended. 400 ms is many round trips at any frame rate.
     this._respawnSeq = (this._respawnSeq + 1) >>> 0;

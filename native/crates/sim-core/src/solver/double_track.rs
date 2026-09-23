@@ -30,7 +30,7 @@
 //! here changes it.
 
 use super::{
-    advance_steer_capped, brake_torque, Chassis, ChassisState, Controls, Fidelity, Solver,
+    advance_steer_capped, brake_torque, chassis_coupling, clutch_torque, Chassis, ChassisState, Controls, Fidelity, Solver,
     Telemetry, SUBSTEP, FL, FR, RL, RR,
 };
 use crate::powertrain::PowertrainModel;
@@ -283,7 +283,8 @@ impl Solver for DoubleTrackSolver {
     }
 
     fn step(&mut self, dt: f64, controls: Controls) {
-        let mut remaining = dt.min(0.1);
+        let mut remaining = super::step_span(dt); // never more than 100 ms of catch-up
+        let controls = controls.sanitized();
         while remaining > 1e-9 {
             let h = SUBSTEP.min(remaining);
             self.substep(h, controls);
@@ -516,6 +517,9 @@ impl DoubleTrackSolver {
 
         let mut kappa = [0.0f64; 4];
         let mut stiff = [0.0f64; 4];
+        // Each patch's speed along its wheel, for the implicit term's chassis
+        // half (`chassis_coupling`).
+        let mut vxw = [0.0f64; 4];
         let mut fx = [0.0f64; 4];
         let mut fy = [0.0f64; 4];
         let mut util = [0.0f64; 4];
@@ -532,6 +536,7 @@ impl DoubleTrackSolver {
 
             let k_den = vx_w.abs().max(2.0);
             kappa[i] = (self.w[i] * radius - vx_w) / k_den;
+            vxw[i] = vx_w;
 
             let slip = Slip { alpha: self.alpha_lag[i], kappa: kappa[i] };
             let f = self.c.tyre.forces_cambered(slip, fz[i], gamma[i]);
@@ -586,17 +591,28 @@ impl DoubleTrackSolver {
         let tb_f = brake_total * p.brakes.bias_front * 0.5;
         let tb_r = brake_total * (1.0 - p.brakes.bias_front) * 0.5;
 
+        // The chassis half of each wheel's implicit slip-stiffness term: the
+        // patch's speed along its wheel changes this step too, and leaving
+        // that out made the term a phantom wheel inertia (~40 kg per driven
+        // axle at 500 Hz off the line). See `chassis_coupling`.
+        let mut cpl = [0.0f64; 4];
+        for i in 0..4 {
+            let (cs, ss) = (steer[i].cos(), steer[i].sin());
+            let dvx_w = (du - dr * half_t[i]) * cs + (dv + dr * arm[i]) * ss;
+            cpl[i] = chassis_coupling(stiff[i], kappa[i], vxw[i], dvx_w, radius);
+        }
+
         // Fronts: free wheels with friction brakes.
         let mut dw = [0.0f64; 4];
         for i in [FL, FR] {
             let inertia = p.wheel_inertia_front_kg_m2 + stiff[i];
-            let t_free = -fx[i] * radius;
+            let t_free = -fx[i] * radius + cpl[i];
             dw[i] = (t_free - brake_torque(self.w[i], t_free, inertia, tb_f, dt)) / inertia;
         }
 
         // Rears: the Salisbury pair, exactly as the bicycle solver has it --
-        // driveline inertia on the carrier, the clutch torque limited so it
-        // cannot overshoot, brakes as friction through the coupled pair.
+        // driveline inertia on the carrier, the clutch integrated implicitly,
+        // brakes as friction through the coupled pair.
         let dfp = &p.diff;
         let t_in = drive.wheel_torque_nm;
         let lock_frac = if t_in >= 0.0 { dfp.power_lock } else { dfp.coast_lock };
@@ -607,14 +623,17 @@ impl DoubleTrackSolver {
         let i_r = p.wheel_inertia_rear_kg_m2 + stiff[RR];
         let det = (i_l * i_r + q * (i_l + i_r)).max(1e-9);
         let anti_j = det / (i_l + i_r + 4.0 * q).max(1e-9);
-        let t_spring = 0.5 * t_cap * (d_w_rear / dfp.stick_rad_s.max(1e-4)).tanh();
-        let t_stop = anti_j * d_w_rear.abs() / dt;
-        let t_lock = t_spring.signum() * t_spring.abs().min(t_stop);
+        // Implicit clutch against everything else on the antisymmetric mode
+        // (`clutch_torque`), so its stick band does not depend on dt.
+        let a_l = 0.5 * t_in - fx[RL] * radius + cpl[RL];
+        let a_r = 0.5 * t_in - fx[RR] * radius + cpl[RR];
+        let a_acc = (a_r * (i_l + 2.0 * q) - a_l * (i_r + 2.0 * q)) / det;
+        let t_lock = clutch_torque(t_cap, dfp.stick_rad_s, d_w_rear, a_acc, anti_j, dt);
         self.t_lock_last = t_lock;
         let t_rl = 0.5 * t_in + t_lock;
         let t_rr = 0.5 * t_in - t_lock;
-        let p_l_free = t_rl - fx[RL] * radius;
-        let p_r_free = t_rr - fx[RR] * radius;
+        let p_l_free = t_rl - fx[RL] * radius + cpl[RL];
+        let p_r_free = t_rr - fx[RR] * radius + cpl[RR];
         let (stop_l, stop_r) = (-self.w[RL] / dt, -self.w[RR] / dt);
         let tb_rl = brake_torque(0.0, p_l_free - (i_l + q) * stop_l - q * stop_r, 1.0, tb_r, dt);
         let tb_rr = brake_torque(0.0, p_r_free - q * stop_l - (i_r + q) * stop_r, 1.0, tb_r, dt);

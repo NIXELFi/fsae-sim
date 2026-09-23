@@ -52,6 +52,25 @@ pub struct Controls {
     pub brake: f64,
 }
 
+impl Controls {
+    /// The controls as the solver may use them: every non-finite value is
+    /// zero (a NaN pedal is a pedal nobody is pressing), throttle and brake
+    /// are in [0, 1] and steer in [-1, 1]. One NaN reaching the integrator
+    /// poisons the state for good -- every later substep is NaN -- so the
+    /// solvers take their controls through this, whatever the caller sent.
+    pub fn sanitized(self) -> Self {
+        let f = |x: f64, lo: f64, hi: f64| if x.is_finite() { x.clamp(lo, hi) } else { 0.0 };
+        Self { steer: f(self.steer, -1.0, 1.0), throttle: f(self.throttle, 0.0, 1.0), brake: f(self.brake, 0.0, 1.0) }
+    }
+}
+
+/// How much of a requested `step` a solver integrates: non-finite or
+/// negative is nothing (a NaN `dt` would otherwise pass `min(0.1)` as
+/// 100 ms), and never more than 100 ms of catch-up.
+pub(crate) fn step_span(dt: f64) -> f64 {
+    if dt.is_finite() && dt > 0.0 { dt.min(0.1) } else { 0.0 }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChassisState {
     /// Body-frame longitudinal velocity (m/s).
@@ -212,10 +231,77 @@ pub fn build(fidelity: Fidelity, chassis: Chassis) -> Box<dyn Solver> {
 /// torque. A turning wheel sees exactly `sign(w) * tb` as before; a stopped
 /// one is held; nothing overshoots through zero.
 pub(crate) fn brake_torque(w: f64, t_free: f64, inertia: f64, tb: f64, dt: f64) -> f64 {
-    if tb <= 0.0 {
+    // `!(tb > 0)` also catches a NaN pedal torque.
+    if !(tb > 0.0 && tb.is_finite()) {
         return 0.0;
     }
-    (t_free + inertia * w / dt).clamp(-tb, tb)
+    let want = t_free + inertia * w / dt;
+    // A non-finite demand (a NaN tyre force) must not become a NaN brake:
+    // `clamp` passes NaN straight through.
+    if want.is_finite() { want.clamp(-tb, tb) } else { 0.0 }
+}
+
+/// The chassis half of a wheel's implicit slip-stiffness term (N.m).
+///
+/// Each solver integrates wheel speed implicitly in the tyre's longitudinal
+/// stiffness: it divides by `I + S`, `S = dt R^2 (dFx/dkappa) / k_den`,
+/// which is Fx(kappa) linearised in the wheel's OWN speed change. But the
+/// slip ratio `(R w - vx) / k_den` moves with the contact patch's speed too,
+/// and that half was left out -- so while the car accelerated, the
+/// linearisation predicted a slip the chassis was already taking away, and
+/// `S` acted as extra wheel inertia: `S / R^2 = dt C / k_den`, about 40 kg
+/// per driven axle at 500 Hz near standstill, vanishing as dt -> 0. It is
+/// what made the standing 75 m depend on the step (4.859 s at 500 Hz, 4.748
+/// at 8 kHz).
+///
+/// With the patch speed's change this step, `dvx * dt` (from the explicit
+/// chassis accelerations, already known), the linearisation is complete:
+///
+///   (I + S) dw = T - R Fx + S c dvx / R,   c = d(-kappa)/d(vx) * k_den
+///
+/// where `c` is 1 while `k_den` is its 2 m/s floor and `1 + kappa sgn(vx)`
+/// above it. Tracking the car, `dw = dvx / R` and the `S` terms cancel: no
+/// phantom inertia at any step. This returns `S c dvx / R`, to be added to
+/// the wheel's free torque. `bicycle.js` has the same function
+/// (`chassisCoupling`), operation for operation.
+pub(crate) fn chassis_coupling(stiff: f64, kappa: f64, vx: f64, dvx: f64, radius: f64) -> f64 {
+    let c = if vx.abs() > 2.0 { 1.0 + kappa * vx.signum() } else { 1.0 };
+    stiff * c * dvx / radius
+}
+
+/// The Salisbury clutch pack's transfer torque this substep (N.m, positive
+/// moves torque from the right rear wheel to the left).
+///
+/// The pack is Coulomb friction with a soft sign: `0.5 t_cap tanh(dw / s)`
+/// of the wheels' speed difference `dw = w_R - w_L`, which inside the stick
+/// band `s` is a stiff spring on a tiny inertia -- the antisymmetric mode,
+///
+///   d(dw)/dt = a_acc - t / anti_j,
+///
+/// `a_acc` the speed difference's acceleration from everything BUT the
+/// clutch (the two sides' tyre, drive and coupling torques) and `anti_j`
+/// the inertia the clutch works against. Explicitly it is unstable by an
+/// order of magnitude at 500 Hz (a period-2 oscillation that never decayed).
+/// It used to be held stable by a cap -- never more than would stop `dw` in
+/// this step, `anti_j |dw| / dt` -- but that cap ignored `a_acc`, so in a
+/// steady corner, where the tyres push the wheels apart, the clutch could
+/// only hold them by letting `dw` grow in proportion to dt: the pack was
+/// looser at 500 Hz than at 2 kHz and the steady yaw rate moved with the
+/// step (29.65 / 29.32 / 29.10 deg/s at 500 / 1k / 2k Hz).
+///
+/// Now it is integrated linearly implicitly (backward Euler on the spring,
+/// linearised at this step's `dw`), which is unconditionally stable and
+/// converges to the continuous law: in steady state `t = anti_j a_acc`
+/// whatever the step. Never more than the pack's capacity `0.5 t_cap`.
+/// `bicycle.js` has the same function (`clutchTorque`).
+pub(crate) fn clutch_torque(t_cap: f64, stick_rad_s: f64, dw: f64, a_acc: f64, anti_j: f64, dt: f64) -> f64 {
+    let s = stick_rad_s.max(1e-4);
+    let th = (dw / s).tanh();
+    let t_spring = 0.5 * t_cap * th;
+    let k = 0.5 * t_cap / s * (1.0 - th * th);
+    let t = (t_spring + dt * k * a_acc) / (1.0 + dt * k / anti_j);
+    let cap = 0.5 * t_cap.abs();
+    t.clamp(-cap, cap)
 }
 
 /// Steering actuator shared by every solver: a rate- and acceleration-limited

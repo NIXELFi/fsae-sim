@@ -759,14 +759,25 @@ console.log("\nWHEEL PRESETS");
   check("DD2 recognised", presetFor("Fanatec Podium Wheel Base DD2").ratedNm, 25, 25, " N.m");
   check("Simucube Pro recognised", presetFor("Simucube 2 Pro").ratedNm, 25, 25, " N.m");
   check("unknown falls back", presetFor("Some Wheel Co Model X").ratedNm, 5, 5, " N.m");
-  // The divisor is the rim torque at the PEAK of the aligning curve (~15 N.m
-  // at 4 deg of front slip), not the ~9 N.m/g the old 11 came from: the point
-  // is that the peak lands at full output, so the fall-off past it is still
-  // inside the motor instead of buried in a clip.
-  check("gain on a 5.5 N.m base", defaultGainFor(5.5), 0.35, 0.40, "");
-  check("gain on a 12 N.m base", defaultGainFor(12), 0.78, 0.82, "");
-  check("gain unity from 15 N.m up", defaultGainFor(15), 1, 1, "");
-  check("gain floor on a 2 N.m base", defaultGainFor(2.2), 0.3, 0.3, "");
+  // The divisor is the model's rim torque at the PEAK of the aligning curve
+  // (~8.6 N.m at 4 deg of front slip since the steering-feel calibration to
+  // the design report; it was ~15): the peak lands at full output, so the
+  // fall-off past it is still inside the motor instead of buried in a clip.
+  // Capped at 1 (a base that can make the real torque gets the real torque),
+  // and no 0.3 floor.
+  check("gain on a 5.5 N.m base", defaultGainFor(5.5), 0.62, 0.66, "");
+  check("gain unity from 8.6 N.m up", defaultGainFor(9), 1, 1, "");
+  check("gain unity on a 25 N.m base", defaultGainFor(25), 1, 1, "");
+  check("no gain floor on a 2.2 N.m base", defaultGainFor(2.2), 0.25, 0.27, "");
+  {
+    const { migrateFfbGains } = await import("../src/game/controlProfiles.js");
+    const o = { wheel: { forceFeedback: { gain: 0.37, maxForceNm: 5.5 } }, pad: { forceFeedback: { gain: 0.5, maxForceNm: 5.5 } } };
+    migrateFfbGains(o);
+    check("a preset gain migrates to the new preset gain", o.wheel.forceFeedback.gain, defaultGainFor(5.5), defaultGainFor(5.5), "");
+    check("a chosen gain keeps its feel (0.5 / 0.61)", o.pad.forceFeedback.gain, 0.82, 0.82, "");
+    // Damping and friction go through the gain: their product is kept.
+    check("damping x gain kept across the migration", o.wheel.forceFeedback.damping * o.wheel.forceFeedback.gain, 0.1 * 0.37 - 1e-3, 0.1 * 0.37 + 1e-3, "");
+  }
   let bad = 0;
   for (const p of WHEEL_PRESETS) {
     const paths = presetPaths(p);

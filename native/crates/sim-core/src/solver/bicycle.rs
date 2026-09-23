@@ -14,7 +14,7 @@
 //! is driven by the previous substep's measured accelerations so it settles
 //! rather than teleporting.
 
-use super::{advance_steer_capped, brake_torque, Chassis, ChassisState, Controls, Fidelity, Solver, Telemetry, SUBSTEP};
+use super::{advance_steer_capped, brake_torque, chassis_coupling, clutch_torque, Chassis, ChassisState, Controls, Fidelity, Solver, Telemetry, SUBSTEP};
 use crate::powertrain::PowertrainModel;
 use crate::tyre::{Slip, TyreModel};
 use crate::vehicle::{VehicleParams, G};
@@ -174,7 +174,8 @@ impl Solver for BicycleSolver {
     }
 
     fn step(&mut self, dt: f64, controls: Controls) {
-        let mut remaining = dt.min(0.1); // never simulate more than 100 ms of catch-up
+        let mut remaining = super::step_span(dt); // never more than 100 ms of catch-up
+        let controls = controls.sanitized();
         while remaining > 1e-9 {
             let h = SUBSTEP.min(remaining);
             self.substep(h, controls);
@@ -448,7 +449,16 @@ impl BicycleSolver {
         let stiff_f = dt * radius * radius * dfx_f / k_den_f;
         let stiff_rl = dt * radius * radius * dfx_rl / k_den;
         let stiff_rr = dt * radius * radius * dfx_rr / k_den;
-        let t_free_f = -fx_f * radius;
+        // The patch speeds' change this step, from the explicit chassis
+        // accelerations above: the half of the slip-ratio change the implicit
+        // term needs besides the wheel's own (see `chassis_coupling`). The
+        // front's along the steered wheel, the rears' at their own track.
+        let dvx_f = du * cd + (dv + p_a * dr) * sd;
+        let dvx_rl = du - dr * half_track_r;
+        let dvx_rr = du + dr * half_track_r;
+        let cpl_rl = chassis_coupling(stiff_rl, k_rl, u, dvx_rl, radius);
+        let cpl_rr = chassis_coupling(stiff_rr, k_rr, u, dvx_rr, radius);
+        let t_free_f = -fx_f * radius + chassis_coupling(stiff_f, k_f, vx_fw, dvx_f, radius);
         let tb_f_now = brake_torque(self.w_f, t_free_f, iw_f + stiff_f, tb_f, dt);
         let dw_f = (t_free_f - tb_f_now) / (iw_f + stiff_f);
 
@@ -465,7 +475,12 @@ impl BicycleSolver {
             };
             let stiff_fl = s_of(k_fl, af.fz_left, af.fx_left);
             let stiff_fr = s_of(k_fr, af.fz_right, af.fx_right);
-            let (tfl, tfr) = (-af.fx_left * radius, -af.fx_right * radius);
+            let vx_fl = (u - r * half_track_f) * cd + vy_f * sd;
+            let vx_fr = (u + r * half_track_f) * cd + vy_f * sd;
+            let dvx_fl = (du - dr * half_track_f) * cd + (dv + p_a * dr) * sd;
+            let dvx_fr = (du + dr * half_track_f) * cd + (dv + p_a * dr) * sd;
+            let tfl = -af.fx_left * radius + chassis_coupling(stiff_fl, k_fl, vx_fl, dvx_fl, radius);
+            let tfr = -af.fx_right * radius + chassis_coupling(stiff_fr, k_fr, vx_fr, dvx_fr, radius);
             dw_fl = (tfl - brake_torque(self.w_fl, tfl, iw + stiff_fl, tb_f_side, dt)) / (iw + stiff_fl);
             dw_fr = (tfr - brake_torque(self.w_fr, tfr, iw + stiff_fr, tb_f_side, dt)) / (iw + stiff_fr);
         }
@@ -487,7 +502,7 @@ impl BicycleSolver {
         let i_r = iw_r_side + stiff_rr;
         let det = (i_l * i_r + q * (i_l + i_r)).max(1e-9);
 
-        // ---- the clutch pack's torque, limited so it cannot overshoot ----
+        // ---- the clutch pack's torque, integrated implicitly ----
         //
         // Feeding `t_lock` into the pair above, the ANTISYMMETRIC mode obeys
         //
@@ -504,17 +519,22 @@ impl BicycleSolver {
         // and aliasing into the 100 Hz log as unexplainable noise on
         // `sim.kappa_r*` and `imu.yaw_rate`.
         //
-        // The limit is what a stick constraint does: never apply more torque
-        // than would bring the relative speed to zero in this step. Inside the
-        // band that makes the spring a proper stick and is unconditionally
-        // stable at any dt; outside it, where `tanh` has saturated and the
-        // pack is genuinely slipping, the limit is far larger than
-        // `0.5 t_cap` and nothing changes. Same order of operations as
+        // It was held stable by a cap -- never more than would stop the
+        // relative speed in this step -- which ignored the tyres pushing the
+        // wheels apart and so made the pack looser the longer the step (the
+        // steady yaw rate moved with dt). Now the spring is integrated
+        // linearly implicitly against everything else on the antisymmetric
+        // mode (`clutch_torque`): stable at any dt, and in steady state the
+        // same torque whatever the step. Same order of operations as
         // bicycle.js so the two ports stay comparable.
         let anti_j = det / (i_l + i_r + 4.0 * q).max(1e-9);
-        let t_spring = 0.5 * t_cap * (d_w_rear / dfp.stick_rad_s.max(1e-4)).tanh();
-        let t_stop = anti_j * d_w_rear.abs() / dt;
-        let t_lock = t_spring.signum() * t_spring.abs().min(t_stop);
+        // Each side's torque but the clutch's: half the drive, the tyre, and
+        // the chassis half of the implicit term. Brakes are equal per side
+        // and left out of the antisymmetric mode.
+        let a_l = 0.5 * t_in - f_rl.fx * radius + cpl_rl;
+        let a_r = 0.5 * t_in - f_rr.fx * radius + cpl_rr;
+        let a_acc = (a_r * (i_l + 2.0 * q) - a_l * (i_r + 2.0 * q)) / det;
+        let t_lock = clutch_torque(t_cap, dfp.stick_rad_s, d_w_rear, a_acc, anti_j, dt);
         self.t_lock_last = t_lock;
         // Torque leaves the faster wheel and arrives at the slower one. These
         // are the torques the diff delivers BEFORE the driveline's own inertia
@@ -525,8 +545,8 @@ impl BicycleSolver {
         // the coupled pair: the torque each side needs to stop in this step
         // is read off the pair's equations with both wheels' target
         // accelerations set to -w/dt, then capped at that side's pedal torque.
-        let p_l_free = t_rl - f_rl.fx * radius;
-        let p_r_free = t_rr - f_rr.fx * radius;
+        let p_l_free = t_rl - f_rl.fx * radius + cpl_rl;
+        let p_r_free = t_rr - f_rr.fx * radius + cpl_rr;
         let (stop_l, stop_r) = (-self.w_rl / dt, -self.w_rr / dt);
         let tb_rl = brake_torque(0.0, p_l_free - (i_l + q) * stop_l - q * stop_r, 1.0, tb_r_side, dt);
         let tb_rr = brake_torque(0.0, p_r_free - q * stop_l - (i_r + q) * stop_r, 1.0, tb_r_side, dt);

@@ -338,7 +338,21 @@ pub struct SteeringParams {
     /// 0 = parallel steer, 1 = full Ackermann. Only the double-track solver
     /// can use this; a bicycle model has one front wheel by definition.
     pub ackermann: f64,
+    /// Steering-feel calibration: the fraction of the modelled tyre moment
+    /// that reaches the driver's hands, on top of `rack_efficiency`. Feel
+    /// only -- it scales `rim_torque_ratio` (and the rig's local-ratio rim
+    /// torque), never the kingpin moment, so nothing about the car's motion
+    /// depends on it. See `sdm26()` for how it was set.
+    pub feel_scale: f64,
 }
+
+/// The radius at which the driver holds the rim (m), for turning a rim
+/// FORCE into a torque: 5.7 in, MEASURED on the SDM26 steering wheel
+/// (2026-09-23). The design report's "Steer Force Targets" plot (SDM26
+/// design report p.20, a design calculation, not a measurement) is in
+/// pounds-force at the rim and does not say where the force acts; this is
+/// where the driver's hands are. `feel_scale` was calibrated through it.
+pub const STEER_RIM_GRIP_RADIUS_M: f64 = 0.1448;
 
 // ------------------------------------------------------------ steering map --
 
@@ -606,10 +620,17 @@ impl VehicleParams {
         self.tyre_radius_m * self.steering.caster_rad.tan() + self.steering.kingpin_offset_trail_m
     }
 
-    /// Rim torque per unit kingpin torque, losses included.
-    pub fn rim_torque_ratio(&self) -> f64 {
+    /// Rim torque per unit kingpin torque through the rack, losses included:
+    /// the mechanical path, for torques that are not the tyres' (jacking).
+    pub fn rim_mech_ratio(&self) -> f64 {
         let r = self.steering.torque_ratio.unwrap_or(1.0 / self.steering.ratio.max(1e-6));
         r * self.steering.rack_efficiency
+    }
+
+    /// Rim torque per unit kingpin torque of the TYRES' moment: the
+    /// mechanical path times the steering-feel calibration `feel_scale`.
+    pub fn rim_torque_ratio(&self) -> f64 {
+        self.rim_mech_ratio() * self.steering.feel_scale
     }
 
     /// Downforce and drag at a given speed (N).
@@ -700,6 +721,26 @@ pub fn sdm26() -> VehicleParams {
             rack_efficiency: 0.85,
             torque_ratio: None,
             ackermann: 0.0,
+            // Steering-feel calibration, 2026-09-23. The modelled rim torque
+            // was well above the design target: SDM26 design report p.20
+            // "Steer Force Targets" (a design calculation, not a
+            // measurement), autocross curve 12.5 lbf at 10 deg of
+            // steering-wheel angle, 11.7 at 40, 16.2 at 170 -- 8.05 / 7.54
+            // / 10.43 N.m at the measured 0.1448 m grip radius
+            // (`STEER_RIM_GRIP_RADIUS_M`). The model, in steady cornering at
+            // 1.0 g (below the front's limit; the report's calculation has
+            // no tyre saturation), made 12.00 / 12.11 / 17.82 N.m at those
+            // angles through the measured rack (examples/steer_torque.rs,
+            // AY=1.0). Least squares over the three points: 0.61. The shape
+            // already agreed -- flat to ~40 deg, rising toward lock as the
+            // progressive rack gains leverage -- apart from the report's
+            // small hump at 10 deg (a 6 % dip to 40 deg; the model's is 4 %,
+            // at 20) and a steeper rise to lock (x1.48 from 10 to 170 deg
+            // against the report's x1.30). Where the rest goes is not
+            // modelled: the TTC flat-belt pneumatic trail, column and rack
+            // friction and reverse efficiency are all candidates. Feel only
+            // (see the field).
+            feel_scale: 0.61,
         },
     }
 }

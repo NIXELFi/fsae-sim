@@ -53,8 +53,42 @@ const SLIP_CAP_FULL_MPS = 8;
  * never more than the pedal's torque.
  */
 function brakeTorque(w, tFree, inertia, tb, dt) {
-  if (tb <= 0) return 0;
-  return Math.min(tb, Math.max(-tb, tFree + inertia * w / dt));
+  if (!(tb > 0 && Number.isFinite(tb))) return 0;
+  const want = tFree + inertia * w / dt;
+  return Number.isFinite(want) ? Math.min(tb, Math.max(-tb, want)) : 0;
+}
+
+/**
+ * The chassis half of a wheel's implicit slip-stiffness term (N.m). Port of
+ * `chassis_coupling` in sim-core's `solver/mod.rs`, operation for operation;
+ * see the note there. The implicit term linearised Fx in the wheel's own
+ * speed only, so while the car accelerated it acted as a phantom wheel
+ * inertia (dt C / kDen: ~40 kg per driven axle at 500 Hz off the line) and
+ * the launch depended on the step. Adding the patch speed's change this step
+ * makes the linearisation complete, and the phantom cancels.
+ */
+function chassisCoupling(stiff, kappa, vx, dvx, R) {
+  const c = Math.abs(vx) > 2.0 ? 1.0 + kappa * Math.sign(vx) : 1.0;
+  return stiff * c * dvx / R;
+}
+
+/**
+ * The Salisbury clutch pack's transfer torque (N.m, positive moves torque
+ * from the right rear to the left). Port of `clutch_torque` in sim-core's
+ * `solver/mod.rs`; see the note there. Linearly implicit on the stick
+ * spring against everything else on the antisymmetric mode (`aAcc`), so it
+ * is stable at any dt AND its steady state does not depend on dt -- the old
+ * cap (never more than stops the speed difference this step) ignored the
+ * tyres pushing the wheels apart and made the pack looser at 500 Hz.
+ */
+function clutchTorque(tCap, stickRadS, dw, aAcc, antiJ, dt) {
+  const s = Math.max(stickRadS, 1e-4);
+  const th = Math.tanh(dw / s);
+  const tSpring = 0.5 * tCap * th;
+  const k = 0.5 * tCap / s * (1.0 - th * th);
+  const t = (tSpring + dt * k * aAcc) / (1.0 + dt * k / antiJ);
+  const cap = 0.5 * Math.abs(tCap);
+  return Math.min(cap, Math.max(-cap, t));
 }
 
 export class BicycleModel {
@@ -92,6 +126,12 @@ export class BicycleModel {
   steeringServo = null;
 
   reset(X, Y, psi) {
+    /**
+     * The physics clock, s: simulated time since the last reset/respawn,
+     * the sum of every substep taken. Same meaning as `NativeCar.simTimeS`
+     * (the rig's `sim_time_s`), so lap timing reads one field in both builds.
+     */
+    this.simTimeS = 0;
     this.u = 0; this.v = 0; this.r = 0;
     this.X = X; this.Y = Y; this.psi = psi;
     this.wF = 0;
@@ -157,7 +197,13 @@ export class BicycleModel {
    *        steer -1..1 (left positive), throttle/brake 0..1
    */
   step(dt, input) {
-    let remaining = Math.min(dt, 0.1); // never simulate more than 100 ms of catch-up
+    // Never more than 100 ms of catch-up, and a non-finite or negative dt is
+    // no step at all. Non-finite controls are zero and every control is in
+    // range: one NaN reaching the integrator leaves the car NaN for good.
+    // Same as `Controls::sanitized` / `step_span` in sim-core.
+    let remaining = Number.isFinite(dt) && dt > 0 ? Math.min(dt, 0.1) : 0;
+    const fin = (x, lo, hi) => (Number.isFinite(x) ? clamp(x, lo, hi) : 0);
+    input = { ...input, steer: fin(input.steer, -1, 1), throttle: fin(input.throttle, 0, 1), brake: fin(input.brake, 0, 1) };
     while (remaining > 1e-6) {
       const h = Math.min(SUBSTEP, remaining);
       this.substep(h, input);
@@ -454,7 +500,16 @@ export class BicycleModel {
     const stiffF = dt * R * R * dFxF / kDenF;
     const stiffRL = dt * R * R * dFxRL / kDen;
     const stiffRR = dt * R * R * dFxRR / kDen;
-    const tFreeF = -fF.fx * R;
+    // The patch speeds' change this step, from the explicit chassis
+    // accelerations above: the other half of the slip-ratio change (see
+    // `chassisCoupling`). The front's along the steered wheel, the rears' at
+    // their own track.
+    const dvxF = du * cd + (dv + this.a * dr) * sd;
+    const dvxRL = du - dr * halfTrackR;
+    const dvxRR = du + dr * halfTrackR;
+    const cplRL = chassisCoupling(stiffRL, kRL, u, dvxRL, R);
+    const cplRR = chassisCoupling(stiffRR, kRR, u, dvxRR, R);
+    const tFreeF = -fF.fx * R + chassisCoupling(stiffF, kF, vxFw, dvxF, R);
     const tbFnow = brakeTorque(this.wF, tFreeF, this.IwF + stiffF, tbF, dt);
     const dwF = (tFreeF - tbFnow) / (this.IwF + stiffF);
 
@@ -475,7 +530,7 @@ export class BicycleModel {
     const iR = IwRside + stiffRR;
     const det = Math.max(iL * iR + qD * (iL + iR), 1e-9);
 
-    // ---- the clutch pack's torque, limited so it cannot overshoot ----
+    // ---- the clutch pack's torque, integrated implicitly ----
     //
     // Feeding `tLock` into the pair above, the ANTISYMMETRIC mode obeys
     //
@@ -493,16 +548,20 @@ export class BicycleModel {
     // of peak-to-peak garbage into `imu.yaw_rate`, and at 100 Hz it aliased
     // into the log as noise nobody could account for.
     //
-    // The limit is what a stick constraint actually does: never apply more
-    // torque than would bring the relative speed to zero in this step. Inside
-    // the band that turns the spring into a proper stick, and it is
-    // unconditionally stable at any dt. Outside it -- once the pack is slipping
-    // and `tanh` has saturated -- the limit is far larger than `0.5 tCap` and
-    // nothing changes, so the modelled slip behaviour is untouched.
+    // It was held stable by a cap -- never more torque than would stop the
+    // relative speed in this step -- but the cap ignored the tyres pushing
+    // the wheels apart, so the pack was looser the longer the step and the
+    // steady yaw rate moved with dt. Now the spring is integrated linearly
+    // implicitly against everything else on the antisymmetric mode
+    // (`clutchTorque`): stable at any dt, the same steady state at every dt.
     const antiJ = det / Math.max(iL + iR + 4 * qD, 1e-9);
-    const tSpring = 0.5 * tCap * Math.tanh(dWrear / Math.max(dfp.stickRadS, 1e-4));
-    const tStop = antiJ * Math.abs(dWrear) / dt;
-    const tLock = Math.sign(tSpring) * Math.min(Math.abs(tSpring), tStop);
+    // Each side's torque but the clutch's: half the drive, the tyre, and the
+    // chassis half of the implicit term. Brakes are equal per side and left
+    // out of the antisymmetric mode.
+    const aL = 0.5 * tIn - fRL.fx * R + cplRL;
+    const aR = 0.5 * tIn - fRR.fx * R + cplRR;
+    const aAcc = (aR * (iL + 2.0 * qD) - aL * (iR + 2.0 * qD)) / det;
+    const tLock = clutchTorque(tCap, dfp.stickRadS, dWrear, aAcc, antiJ, dt);
     this._tLock = tLock;
     // Torque leaves the faster wheel and arrives at the slower one. These are
     // what the diff delivers BEFORE the driveline's own inertia is taken out
@@ -512,8 +571,8 @@ export class BicycleModel {
     // Rear brakes as friction elements too, through the coupled pair: the
     // torque each side needs to stop in this step, read off the pair's
     // equations with both targets at -w/dt, capped at the pedal's torque.
-    const pLfree = tRL - fRL.fx * R;
-    const pRfree = tRR - fRR.fx * R;
+    const pLfree = tRL - fRL.fx * R + cplRL;
+    const pRfree = tRR - fRR.fx * R + cplRR;
     const stopL = -this.wRL / dt, stopR = -this.wRR / dt;
     const tbRL = brakeTorque(0, pLfree - (iL + qD) * stopL - qD * stopR, 1, tbRside, dt);
     const tbRR = brakeTorque(0, pRfree - qD * stopL - (iR + qD) * stopR, 1, tbRside, dt);
@@ -557,6 +616,7 @@ export class BicycleModel {
     this.X += (this.u * Math.cos(this.psi) - this.v * Math.sin(this.psi)) * dt;
     this.Y += (this.u * Math.sin(this.psi) + this.v * Math.cos(this.psi)) * dt;
     this.psi += this.r * dt;
+    this.simTimeS += dt;
 
     // ---- telemetry ----
     const t = this.telemetry;
@@ -629,10 +689,13 @@ export class BicycleModel {
     t.mechTrailM = mechTrail;
     t.kingpinTorqueNm = kingpin;
     const torqueRatio = geo.torqueRatio ?? 1 / Math.max(p.steeringRatio, 1e-6);
-    t.rimTorqueNm = kingpin * torqueRatio * geo.rackEfficiency;
+    // `feelScale` is the steering-feel calibration (`feel_scale` in
+    // sim-core): feel only, the motion never sees it.
+    const feel = geo.feelScale ?? 1;
+    t.rimTorqueNm = kingpin * torqueRatio * geo.rackEfficiency * feel;
     t.scrubMomentNm = scrub;
     // At the rim through the same ratio, for the force-feedback mixer.
-    t.scrubRimNm = scrub * torqueRatio * geo.rackEfficiency;
+    t.scrubRimNm = scrub * torqueRatio * geo.rackEfficiency * feel;
   }
 
   /**

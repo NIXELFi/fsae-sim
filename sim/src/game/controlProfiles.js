@@ -34,8 +34,49 @@
 
 import { defaultKeys, UNBOUND, unboundSetupButtons } from "./controlBindings.js";
 import WHEEL_BRANDS from "./wheelBrands.json" with { type: "json" };
+import { defaultGainFor } from "./wheelPresets.js";
 
 const STORAGE_KEY = "fsae-sim.controls.v1";
+
+/**
+ * Revision of the model's rim-torque SCALE that stored force feedback gains
+ * were set against. 2 (2026-09-23): the model's rim torque was calibrated to
+ * the design report's steer-force targets (`steering.feelScale` = 0.61 in
+ * params.js) -- ~8.6 N.m at the peak, not ~14. A gain
+ * saved before that is migrated once on load (`migrateFfbGains`).
+ */
+const FFB_SCALE_REV = 2;
+const FFB_FEEL_SCALE_V2 = 0.61;
+/** The shipped knob values the old gains were tuned with (rev 1). */
+const FFB_REV1_KNOBS = { damping: 0.10, friction: 0.04, parkFriction: 0.10 };
+
+/**
+ * Carry stored force feedback gains across the rim-torque recalibration.
+ *
+ * A gain the wheel preset set (the old `defaultGainFor`: rated / 15, floored
+ * at 0.3) becomes the new preset gain for the same base, so the torque PEAK
+ * still lands at full output. A gain the driver chose is divided by the
+ * scale change, so the rim feels exactly as it did. Exported for the tests.
+ */
+export function migrateFfbGains(overrides) {
+  for (const tree of Object.values(overrides || {})) {
+    const ffb = tree && tree.forceFeedback;
+    if (!ffb || typeof ffb.gain !== "number") continue;
+    const rated = typeof ffb.maxForceNm === "number" ? ffb.maxForceNm : null;
+    const oldPreset = rated == null ? null : Math.round(Math.min(1, Math.max(0.3, rated / 15)) * 100) / 100;
+    const oldGain = ffb.gain;
+    ffb.gain = rated != null && Math.abs(oldGain - oldPreset) < 1e-9
+      ? defaultGainFor(rated)
+      : Math.min(3, Math.round((oldGain / FFB_FEEL_SCALE_V2) * 100) / 100);
+    // Damping and the two frictions are multiplied by the gain too: keep
+    // what they put in the driver's hands where it was.
+    const k = oldGain / Math.max(ffb.gain, 1e-6);
+    for (const [key, old] of Object.entries(FFB_REV1_KNOBS)) {
+      const v = typeof ffb[key] === "number" ? ffb[key] : old;
+      ffb[key] = Math.round(v * k * 1000) / 1000;
+    }
+  }
+}
 
 /**
  * Steering servo limits.
@@ -502,24 +543,31 @@ export const PROFILES = {
       /**
        * Master gain on the whole mix. 1.0 = the model's torque, unscaled.
        *
-       * SDM26 puts about 12 N.m per g into the rim through its 4.411 rack,
-       * and the aligning torque peaks near 15 N.m at about 4 degrees of front
-       * slip. An unscaled mix therefore clips a small base from under 1 g --
-       * and the clip erases the very thing worth feeling, the rim going light
-       * as the front starts to slide. The preset derives this from the rated
-       * torque (`defaultGainFor`) so the TORQUE PEAK lands at full output:
-       * about 0.37 on a 5.5 N.m base, 1.0 from 15 N.m up. Above that the
-       * `gamma` and `knee` below keep the shape inside the motor.
+       * SDM26 puts about 7.3 N.m per g into the rim (the model calibrated to
+       * the design report's steer-force targets), and the aligning torque
+       * peaks near 8.6 N.m at about 4 degrees of front slip. An unscaled mix
+       * therefore clips a small base before the peak -- and the clip erases
+       * the very thing worth feeling, the rim going light as the front starts
+       * to slide. The preset derives this from the rated torque
+       * (`defaultGainFor`) so the TORQUE PEAK lands at full output: about
+       * 0.64 on a 5.5 N.m base, 1.0 from 8.6 N.m up. Above that the `gamma`
+       * and `knee` below keep the shape inside the motor.
        */
-      gain: 0.37,
+      gain: 0.64,
       /** Self-aligning torque from the front tyres. The signal itself. */
       alignTorqueGain: 1.0,
       /** Wheelspin, lockup, kerbs and grass, as vibration. */
       roadTextureGain: 0.35,
-      /** Rim-speed damping: fraction of rated torque at 10 rad/s of rim. */
-      damping: 0.10,
-      /** Coulomb friction, fraction of rated torque. The rack and the column. */
-      friction: 0.04,
+      /**
+       * Rim-speed damping: fraction of rated torque at 10 rad/s of rim,
+       * BEFORE the gain (damping, friction and the standstill friction go
+       * through `gain` like the tyre torque). Scaled by 0.37 / 0.64 with the
+       * 2026-09-23 rescale (the default gain went 0.37 -> 0.64) so the rim
+       * feels as it did.
+       */
+      damping: 0.058,
+      /** Coulomb friction, fraction of rated torque before the gain. The rack and the column. */
+      friction: 0.023,
       /**
        * Power-law lift on the normalised command, applied before the knee.
        * Below 1.0 it raises the small on-centre torques toward where the motor
@@ -540,7 +588,7 @@ export const PROFILES = {
        * aligning torque fades out below walking pace, so the paddock has
        * weight instead of feeling like a menu.
        */
-      parkFriction: 0.10,
+      parkFriction: 0.058,
       /** Damping inside the end stop only, so the stop does not bounce. */
       stopDamping: 0.35,
       /**
@@ -780,7 +828,7 @@ export class ControlSettings {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ activeId: this.activeId, pinned: this.pinned, overrides: this.overrides }),
+        JSON.stringify({ activeId: this.activeId, pinned: this.pinned, overrides: this.overrides, ffbScaleRev: FFB_SCALE_REV }),
       );
     } catch {
       // Private browsing, or storage disabled. Settings just do not persist.
@@ -796,6 +844,10 @@ export class ControlSettings {
       if (data && typeof data.pinned === "boolean") this.pinned = data.pinned;
       if (data && data.overrides && typeof data.overrides === "object") {
         this.overrides = data.overrides;
+        if ((data.ffbScaleRev ?? 1) < FFB_SCALE_REV) {
+          migrateFfbGains(this.overrides);
+          this.save();
+        }
       }
     } catch {
       // Corrupt or from an incompatible version: fall back to defaults rather
@@ -883,7 +935,7 @@ export function editableSettings(profile) {
         { path: "forceFeedback.maxForceNm", label: "Wheel rated torque", unit: " N.m",
           min: 1, max: 35, step: 0.5, note: "What the base is rated for. Set from the preset when the base is recognised." },
         { path: "forceFeedback.gain", label: "Overall gain", unit: "",
-          min: 0, max: 3, step: 0.05, note: "1.0 is the model unscaled (~12 N.m per g at the rim). Small bases clip sooner; the preset picks a fit." },
+          min: 0, max: 3, step: 0.05, note: "1.0 is the model unscaled (~7.3 N.m per g at the rim, ~8.6 at the peak). Small bases clip sooner; the preset picks a fit." },
         { path: "forceFeedback.alignTorqueGain", label: "Tyre aligning torque", unit: "",
           min: 0, max: 2, step: 0.05 },
         { path: "forceFeedback.roadTextureGain", label: "Slip and surface texture", unit: "",
