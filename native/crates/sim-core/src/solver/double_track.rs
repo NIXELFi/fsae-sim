@@ -42,6 +42,16 @@ const KAPPA_H: f64 = 1e-4;
 
 // Grip calibration (`SuspensionParams::front_grip_scale` / `rear_grip_scale`).
 //
+// 2026-09-23 (third pass): pinned to the STEADY-STATE LIMIT on the skidpad
+// circle (examples/peak_compare.rs), front 1.08 / rear 1.00. Pinning to the
+// robot's timed skidpad (below) left this model ~8 % grippier than the
+// bicycle: the robot's cautious line could not use it, a person could --
+// Nick drove it 0.2 s quicker round the figure of eight than the bicycle.
+// Now both hold 1.294 g at 8.6 m; on the steer ramp this model is +2 / +4.5
+// / +6 % at 10 / 15 / 20 m/s (its ride-height aero), and pushes by +0.32 /
+// +0.38 / +0.22. The rear needs no correction since the per-load peak slip
+// stopped extrapolating. The second pass, for the record:
+//
 // 2026-09-22 (second pass): pinned to the TIMED skidpad (tests/common/
 // skidpad.rs) at the bicycle's own number on the same harness -- both models
 // then answer to the same real run through the same driver. The tyre's mu_y

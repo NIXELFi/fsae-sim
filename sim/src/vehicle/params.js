@@ -362,8 +362,8 @@ export const SDM26 = {
     /** EST: road-wheel deg per 100 N.m about each kingpin. 0 = rigid. */
     steerComplianceDegPer100Nm: 0.5,
     /** Grip calibration against the timed skidpad (see double_track.rs). */
-    frontGripScale: 1.13,
-    rearGripScale: 1.09,
+    frontGripScale: 1.08,
+    rearGripScale: 1.00,
     /** 1 = aero follows ride height (2026 CFD map), 0 = fixed split. */
     aeroRideMap: 1,
     /** Damping, fraction of critical at 50 mm/s (OVDR spec table). */
