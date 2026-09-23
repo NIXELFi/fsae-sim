@@ -148,6 +148,8 @@
     background: var(--panel-2); border: 1px solid var(--line);
   }
   .seed-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; margin-top: 10px; }
+  .seed-row[hidden] { display: none; }
+  #hsetMark { position: absolute; width: 0; height: 0; overflow: hidden; } /* a <symbol> sheet only: `hidden` does not hide an <svg> sized by CSS, and display:none can break <use> */
   .seed-row .field { margin: 0; }
   .seed-row input[type="text"] { font-family: var(--mono); text-transform: uppercase; letter-spacing: .08em; }
   .seed-row button.secondary { padding: 7px 12px; white-space: nowrap; }
@@ -499,6 +501,12 @@
   #padStatus.ok { color: var(--ok); }
 
   .actions { margin-top: 16px; display: grid; gap: 8px; }
+  /* Start stays on screen however tall the panel gets (it sat below the fold
+     at 1280x720): the buttons stick to the bottom of the scrolling panel. */
+  .session .actions {
+    position: sticky; bottom: -18px; margin-bottom: -18px; padding: 10px 0 18px;
+    background: var(--panel); z-index: 1;
+  }
   button#start {
     background: var(--gold); color: #14100a; border: 0; font-weight: 700;
     font-size: 16px; padding: 14px 20px; border-radius: 10px; cursor: pointer;

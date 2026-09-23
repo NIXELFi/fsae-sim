@@ -46,6 +46,17 @@ export async function saveRun(runId, manifest, csv) {
 }
 
 /**
+ * Keep a run being driven on disk (desktop only; see `checkpoint_run`).
+ * `csv` is the next slice of rows, the header included when `fresh`.
+ */
+export async function checkpointRun(runId, csv, fresh, manifest = null) {
+  if (!isDesktop) return null;
+  return invoke("checkpoint_run", {
+    runId, telemetry: csv, fresh, manifest: manifest ? JSON.stringify(manifest, null, 2) : null,
+  });
+}
+
+/**
  * Read a run back. `run` may be an id, a directory, or a manifest path.
  *
  * In a browser there is no shell to ask, so runs are served as static files

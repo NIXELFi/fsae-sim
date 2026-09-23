@@ -151,7 +151,10 @@ export function parameterGroups() {
         { path: "dt.steerComplianceDegPer100Nm", min: 0, max: 5, step: 0.05 }),
       p("Front grip scale", v.dt.frontGripScale, "", "calibrated",
         "Front lateral grip x the front grip factor. Pinned so this model's steady-state limit on the skidpad circle equals the bicycle's (1.294 g at 8.6 m) while still pushing at 10/15/20 m/s.",
-        { path: "dt.frontGripScale", min: 0.8, max: 1.4, step: 0.005 }),
+        // Max 1.25: the solver caps front grip at the tyre's own mu
+        // (front grip factor 0.80 x scale <= 1, double_track.rs), so the
+        // slider did nothing past 1/0.80.
+        { path: "dt.frontGripScale", min: 0.8, max: 1.25, step: 0.005 }),
       p("Rear grip scale", v.dt.rearGripScale, "", "calibrated",
         "Rear lateral grip relative to the tyre's mu. 1.0: no correction needed once the per-load peak slip stopped extrapolating.",
         { path: "dt.rearGripScale", min: 0.8, max: 1.4, step: 0.005 }),

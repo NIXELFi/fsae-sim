@@ -119,7 +119,7 @@ export function renderSpecSheet(root, onChange) {
         <p><b>${tally.team + tally.cfd + tally.calibrated}</b> of <b>${total}</b>
            parameters come from the team (${pct("team")}% measured, ${pct("cfd")}% their CFD,
            ${pct("calibrated")}% calibrated to a real run).
-           <b class="warn">${tally.estimate} (${pct("estimate")}%) are estimates I generated</b>
+           <b class="warn">${tally.estimate} (${pct("estimate")}%) are estimates, not measurements</b>
            and no one has measured.</p>
       </div>
     </div>

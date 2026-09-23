@@ -315,6 +315,7 @@ fn main() {
             read_text_file,
             save_setup_file,
             runs::save_run,
+            runs::checkpoint_run,
             runs::load_run,
             runs::list_runs,
             runs::runs_directory,

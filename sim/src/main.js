@@ -36,6 +36,8 @@ import { Recorder, datumFor } from "./game/recorder.js";
 /** Below this many samples the driver never really started, so a dropped
  *  run is not worth mentioning -- they pressed restart on the line. */
 const SAMPLE_HZ_FLOOR = 100;
+// Rows between mid-lap checkpoints of a run to disk: ~10 s at 100 Hz.
+const CHECKPOINT_ROWS = 1000;
 
 /** How often the car's dash panel is repainted. 30 Hz: a real dash updates
  *  about this fast and nobody can read one that changes quicker. */
@@ -59,7 +61,7 @@ const DRAW_AGE_MAX_S = 0.020;
  */
 const FINISH_ROLLOUT_S = 2.0;
 import { DeltaTimer, referenceFromRun, referenceLapOf } from "./game/delta.js";
-import { newRunId, saveRun, runsDirectory, listRuns, loadRun, parseTelemetry } from "./game/runStore.js";
+import { newRunId, saveRun, checkpointRun, runsDirectory, listRuns, loadRun, parseTelemetry } from "./game/runStore.js";
 import { Replay } from "./game/replay.js";
 import { ReplayPanel, ghostGap } from "./game/replayPanel.js";
 
@@ -567,6 +569,9 @@ class Game {
       entry.vehicleModel = this.drivenModel();
       entry.setup = lapSetup(readParam);
       this.recorder?.recordLap(entry, sectors, sectorCones);
+      // From the first completed lap on, the run is kept on disk as it is
+      // driven: a crash now costs seconds, not the drive.
+      this.checkpointRun(true);
       // The lap that just closed was scored on the verdict it was driven
       // under. The NEXT lap starts fresh: a car put back to legal counts from
       // here on (the latch in `refreshTimeCounts` is per lap).
@@ -649,6 +654,29 @@ class Game {
   }
 
   /**
+   * Append the rows logged since the last checkpoint to the run on disk, and
+   * with `withManifest` (a lap just completed) rewrite its manifest too. Only
+   * once a lap exists -- a run with no lap is not saved at all -- and in
+   * slices of ~10 s of rows between laps, so no single write builds a big
+   * string on the frame. Writes are chained so they land in order.
+   */
+  checkpointRun(withManifest) {
+    const rec = this.recorder;
+    if (!isDesktop || !rec || rec.finished || rec.laps.length === 0) return;
+    const from = rec.checkpointed ?? 0;
+    if (!withManifest && rec.samples - from < CHECKPOINT_ROWS) return;
+    const to = rec.samples;
+    const csv = rec.csvRows(from, to, from === 0);
+    rec.checkpointed = to;
+    const manifest = withManifest ? { ...rec.toManifest(), finishedReason: "interrupted" } : null;
+    const runId = rec.meta.runId;
+    const fresh = from === 0;
+    rec.checkpointChain = (rec.checkpointChain ?? Promise.resolve())
+      .then(() => checkpointRun(runId, csv, fresh, manifest))
+      .catch((err) => console.warn("run checkpoint failed", err));
+  }
+
+  /**
    * Close the current recording and write it out. Safe to call at any time
    * and from anywhere -- a second call is a no-op, and a run too short to
    * mean anything is dropped rather than filed.
@@ -673,8 +701,10 @@ class Game {
     const manifest = rec.toManifest();
     const csv = rec.toCsv();
     // Fire and forget: the driver is already on to the next thing, and a
-    // failed write must not take the game down with it.
-    const p = saveRun(runId, manifest, csv)
+    // failed write must not take the game down with it. After any checkpoint
+    // still in flight, so the final files are the last ones written.
+    const p = (rec.checkpointChain ?? Promise.resolve())
+      .then(() => saveRun(runId, manifest, csv))
       .then((res) => {
         this.lastSavedRun = { ...res, stats: manifest.stats, track: manifest.trackName };
         this.saveError = null;
@@ -1110,6 +1140,7 @@ class Game {
     // whatever it held halfway through it.
     if (this.recorder) {
       this.recorder.tick(dt, this.recorderContext(dt, inp, throttle, brake, loc, hits), { last: justFinished });
+      this.checkpointRun(false);
       // An autocross run ends at the finish line. Bank it HERE, after the
       // tick, and not in `onRunFinished` where it used to be: `endRun` nulls
       // the recorder, so ending the run up there meant the finishing step was
@@ -2194,6 +2225,9 @@ class Game {
           // No +20 s on the skidpad: an off course, or the wrong laps, is a
           // DNF under the rulebook too (D.10.3.2, D.10.3.3).
           rows.push(`<span class="v total pen">DNF - ${entry.off > 0 ? "OFF COURSE" : "TIMED LAPS NOT RUN"}</span>`);
+        } else if (this.track?.scoring?.kind === "accel") {
+          // Nor on accel: an off course there is a DNF (D.9.3), not +20 s.
+          rows.push('<span class="v total pen">DNF - OFF COURSE</span>');
         } else {
           rows.push('<span class="v total pen">NO TIME - OFF COURSE</span>');
           const fsae = entry.raw + entry.cones * pen
@@ -3439,6 +3473,7 @@ async function boot() {
   refreshRuns();
 
   const enterSim = (fresh) => {
+    game.hasDriven = true;
     game.exitReplay({ keepMenu: true });
     // Before the recording opens, so the manifest carries the aids the driver
     // is actually about to drive with.
@@ -3738,7 +3773,9 @@ async function boot() {
   // Esc on the home screen with a run behind it goes back to the run, the
   // way Esc from the run comes here.
   addEventListener("keydown", (e) => {
-    if (e.code === "Escape" && !game.replaying && !dom.menu.hidden && game.started && !game.etcEditor.isOpen &&
+    // `game.started` is true from boot (loading a course places the car), so
+    // "a run behind it" means the driver has actually been in the car.
+    if (e.code === "Escape" && !game.replaying && !dom.menu.hidden && game.started && game.hasDriven && !game.etcEditor.isOpen &&
         !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName ?? "")) {
       enterSim(false);
     }
@@ -3761,6 +3798,13 @@ async function boot() {
   const onOff = (v) => (v == null ? undefined : /^(1|on|true|yes)$/i.test(String(v)) ? true : /^(0|off|false|no)$/i.test(String(v)) ? false : undefined);
   const applyLaunch = async (o) => {
     if (!o) return;
+    // A launch that asked for something this build does not have says so,
+    // instead of quietly putting the driver on Autocross with their defaults.
+    const ignored = [];
+    if (o.track && !isTrackId(o.track)) ignored.push(`no course called "${o.track}"`);
+    if (o.profile && !game.input.settings.ids().includes(o.profile)) ignored.push(`no control profile "${o.profile}"`);
+    if (Array.isArray(o.unknown) && o.unknown.length) ignored.push(`unknown ${o.unknown.join(" ")}`);
+    if (ignored.length) toast(`Launch: ${ignored.join("; ")}. Using the menu's choice instead.`, { error: true, ms: 6000 });
     if (o.track && isTrackId(o.track) && trackSpec(o.track).id !== selectedTrackId(dom)) {
       selectTrackInMenu(dom, o.track);
       if (!(await loadCourse())) return;
@@ -3791,7 +3835,9 @@ async function boot() {
     if (o.driverId) game.driverId = String(o.driverId).slice(0, 64);
     if (o.session) game.sessionLabel = String(o.session).slice(0, 96);
     if (o.noRecord != null) game.recording = !o.noRecord;
-    if (o.driver || o.session || o.profile || o.track || o.noRecord != null) {
+    // Logging on/off alone (a dev URL with ?norecord=1) is not a launcher
+    // deciding who is driving, so it does not mark the session as launched.
+    if (o.driver || o.session || o.profile || o.track) {
       game.launchedBy = "launcher";
     }
     if (o.traction != null) dom.tcToggle.checked = o.traction;

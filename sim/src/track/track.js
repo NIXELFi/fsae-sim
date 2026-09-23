@@ -125,7 +125,7 @@ export class Track {
     this.cones.forEach((c, i) => this.coneGrid.add(c.x, c.y, i));
 
     this.lastIndex = 0;
-    this._nearOut = null; // conesNear cache, see below
+    this._near = null; // conesNear cache per range, see below
   }
 
   /** Course width at centreline index `i`: the nominal width, or the local
@@ -350,9 +350,12 @@ export class Track {
    */
   conesNear(x, y, range) {
     const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
-    if (this._nearOut && cx === this._nearCx && cy === this._nearCy && range === this._nearRange) {
-      return this._nearOut;
-    }
+    // One cached answer PER RANGE: the renderer (280 m) and the gate check
+    // (24 m) both ask every frame, and a single-entry cache let each evict the
+    // other -- two full rebuilds a frame, a third of the frame's garbage.
+    const cache = (this._near ??= new Map());
+    const hit = cache.get(range);
+    if (hit && cx === hit.cx && cy === hit.cy) return hit.out;
     const out = [];
     const cells = Math.ceil(range / CELL);
     for (let i = -cells; i <= cells; i++) {
@@ -361,8 +364,7 @@ export class Track {
         if (a) for (const idx of a) out.push(this.cones[idx]);
       }
     }
-    this._nearCx = cx; this._nearCy = cy; this._nearRange = range;
-    this._nearOut = out;
+    cache.set(range, { cx, cy, out });
     return out;
   }
 }

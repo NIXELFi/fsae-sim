@@ -669,24 +669,31 @@ export class Recorder {
 
   /** The whole log, as a Helios-readable CSV string. */
   toCsv() {
+    return this.csvRows(0, this.samples, true);
+  }
+
+  /** Rows [from, to) as CSV, with the header line when asked (`toCsv`, and
+   *  the slices a run is checkpointed to disk in while it is driven). */
+  csvRows(from, to, withHeader) {
     const header = "time_s," + CHANNEL_IDS.join(",");
     // Column-major to row-major once. Across ~70 columns and tens of
     // thousands of rows this join is the whole cost of saving a run, so it is
     // a single array join rather than repeated string concatenation.
-    const rows = new Array(this.samples);
+    const rows = new Array(Math.max(0, to - from));
     const dps = COLUMNS.map((c) => c.dp);
     const cols = this.columns;
     const nCols = cols.length;
-    for (let r = 0; r < this.samples; r++) {
+    for (let r = from; r < to; r++) {
       const cells = new Array(nCols + 1);
       // Microseconds. The sampler is on the sim clock, so a row lands a
       // fraction of a frame past its nominal instant and two decimals would
       // quantise that away -- which is the error this is here to avoid.
       cells[0] = this.times[r].toFixed(6);
       for (let c = 0; c < nCols; c++) cells[c + 1] = fmtNum(cols[c][r], dps[c]);
-      rows[r] = cells.join(",");
+      rows[r - from] = cells.join(",");
     }
-    return header + "\n" + rows.join("\n") + "\n";
+    const body = rows.length ? rows.join("\n") + "\n" : "";
+    return withHeader ? header + "\n" + body : body;
   }
 
   /** Summary statistics, from the running accumulators. */

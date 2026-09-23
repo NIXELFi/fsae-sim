@@ -136,6 +136,34 @@ pub fn save_run(run_id: String, manifest: String, telemetry: String) -> Result<S
     })
 }
 
+/// Keep a run that is still being driven on disk, so a crash or a killed
+/// window loses at most the last few seconds instead of the whole drive.
+///
+/// `telemetry` is the next slice of CSV rows: it starts the file (header
+/// included) when `fresh`, and is appended otherwise. The manifest, when
+/// given, replaces the one on disk atomically and says `finishedReason:
+/// "interrupted"` until `save_run` writes the real one over it -- so a run
+/// cut off mid-drive lists, replays and ranks on the laps it completed.
+#[tauri::command(async)]
+pub fn checkpoint_run(run_id: String, telemetry: String, fresh: bool, manifest: Option<String>) -> Result<(), String> {
+    let dir = run_path(&run_id)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join(TELEMETRY);
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(!fresh)
+        .truncate(fresh)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    f.write_all(telemetry.as_bytes()).map_err(|e| format!("append {}: {e}", path.display()))?;
+    f.flush().map_err(|e| format!("flush {}: {e}", path.display()))?;
+    if let Some(m) = manifest {
+        write_atomic(&dir.join(MANIFEST), m.as_bytes())?;
+    }
+    Ok(())
+}
+
 /// Write to `<name>.tmp` then rename. A reader either sees the previous file
 /// or the new one, never a partial line.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -334,6 +362,23 @@ mod tests {
         std::env::remove_var("FSAE_SIM_RUNS_DIR");
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    #[test]
+    fn a_checkpointed_run_is_on_disk_and_the_final_save_replaces_it() {
+        let _g = lock_env();
+        let tmp = std::env::temp_dir().join(format!("fsae-ckpt-{}", std::process::id()));
+        std::env::set_var("FSAE_SIM_RUNS_DIR", &tmp);
+        let id = "20260923-120000-autocross-ck01".to_string();
+        checkpoint_run(id.clone(), "time_s,a\n0,1\n".into(), true, None).unwrap();
+        checkpoint_run(id.clone(), "1,2\n".into(), false, Some("{\"finishedReason\":\"interrupted\"}".into())).unwrap();
+        let dir = tmp.join(&id);
+        assert_eq!(fs::read_to_string(dir.join(TELEMETRY)).unwrap(), "time_s,a\n0,1\n1,2\n");
+        assert!(fs::read_to_string(dir.join(MANIFEST)).unwrap().contains("interrupted"));
+        save_run(id.clone(), "{}".into(), "final\n".into()).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(TELEMETRY)).unwrap(), "final\n");
+        std::env::remove_var("FSAE_SIM_RUNS_DIR");
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

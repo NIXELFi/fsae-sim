@@ -1,0 +1,39 @@
+# The test suites, on every push and pull request.
+#
+# `build.yml` only builds, and only on a tag, so until this existed nothing
+# on GitHub ever ran a test: a physics change that broke the golden drive or
+# the era fingerprint (tests/physics_rev.rs) could be tagged and published
+# with every suite red. Windows, because that is where the rig runs and the
+# only platform the suites have ever been run on.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native
+            sim/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Physics core (golden drive, fingerprints, timed skidpad)
+        run: cargo test --release -p sim-core -p engine-audio --manifest-path native/Cargo.toml
+      - name: Desktop app (launch args, rig, run files)
+        run: cargo test --release --manifest-path sim/src-tauri/Cargo.toml
+      - name: Game and JS/Rust parity
+        working-directory: sim
+        run: npm test
