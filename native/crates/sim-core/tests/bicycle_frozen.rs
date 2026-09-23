@@ -11,8 +11,12 @@
 //! Regenerated ONCE since the freeze, with Nick's approval (2026-09-22,
 //! commit e9933c0): the launch clutch / clutch-lock fixes in the shared
 //! powertrain. And again the same night (Nick: "go ahead and add whatever"):
-//! the tyre's longitudinal fall-off past the peak (FX_FALLOFF_KEEP). Any
-//! other regeneration needs the same explicit sign-off.
+//! the tyre's longitudinal fall-off past the peak (FX_FALLOFF_KEEP). And on
+//! 2026-09-23 by owner decision (physics review fix list, no era bump): the
+//! wheels' implicit slip term gets its chassis half (no phantom inertia) and
+//! the diff's clutch is integrated implicitly (step-independent stick band);
+//! then the steering-feel calibration (rim torque). Any other regeneration
+//! needs the same explicit sign-off.
 
 use sim_core::prelude::*;
 

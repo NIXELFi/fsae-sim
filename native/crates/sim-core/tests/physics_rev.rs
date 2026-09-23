@@ -14,11 +14,11 @@ use sim_core::prelude::*;
 /// Recorded fingerprints, and the revision each was recorded at. A revision
 /// bump without re-recording, or a re-record without a bump decision, both
 /// show up here in review.
-const BICYCLE: (u32, u64) = (1, 0x17c4be4f51b2e680);
+const BICYCLE: (u32, u64) = (1, 0x73bc87d5e2016605);
 /// ramp10/15/20 peak g, standing 75 m s, stop from 25 m/s m. Compared within
 /// `DT_TOLERANCE`, not rounded: a value near its rounding edge trips on
 /// noise, and one mid-step lets a real change through.
-const DOUBLE_TRACK: (u32, [f64; 5]) = (2, [1.4744, 1.6461, 1.8712, 4.8720, 19.4129]);
+const DOUBLE_TRACK: (u32, [f64; 5]) = (2, [1.4742, 1.6465, 1.8743, 4.7680, 19.4098]);
 /// What a driver would feel: 0.01 g, 0.01 s, 0.1 m.
 const DT_TOLERANCE: [f64; 5] = [0.01, 0.01, 0.01, 0.01, 0.1];
 
