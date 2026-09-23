@@ -475,6 +475,8 @@ export class Timing {
       cones: this.cones,
       off: this.offCourse,
       total: raw + this.penaltyS,
+      // The clock time the lap took, which is not `raw` on the skidpad.
+      spanS: this.lapTime,
       // An off course is a DNF. The lap is kept and shown -- a driver wants
       // to know what it was worth -- but it is not a time, so nothing that
       // ranks, references or averages may take it.

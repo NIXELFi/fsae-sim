@@ -15,7 +15,12 @@ use sim_core::prelude::*;
 /// bump without re-recording, or a re-record without a bump decision, both
 /// show up here in review.
 const BICYCLE: (u32, u64) = (1, 0x17c4be4f51b2e680);
-const DOUBLE_TRACK: (u32, &str) = (2, "ramp10 1.47 ramp15 1.65 ramp20 1.87 accel75 4.87 stop25 19.4");
+/// ramp10/15/20 peak g, standing 75 m s, stop from 25 m/s m. Compared within
+/// `DT_TOLERANCE`, not rounded: a value near its rounding edge trips on
+/// noise, and one mid-step lets a real change through.
+const DOUBLE_TRACK: (u32, [f64; 5]) = (2, [1.4744, 1.6461, 1.8712, 4.8720, 19.4129]);
+/// What a driver would feel: 0.01 g, 0.01 s, 0.1 m.
+const DT_TOLERANCE: [f64; 5] = [0.01, 0.01, 0.01, 0.01, 0.1];
 
 fn bicycle_fingerprint() -> u64 {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../sim/data/vehicle-golden.json");
@@ -80,14 +85,9 @@ fn accel_and_stop() -> (f64, f64) {
     (t, s.state().x)
 }
 
-/// Quantised so numerical noise does not trip it but a change a driver
-/// would feel does: 0.01 g, 0.01 s, 0.1 m.
-fn double_track_fingerprint() -> String {
+fn double_track_fingerprint() -> [f64; 5] {
     let (acc, stop) = accel_and_stop();
-    format!(
-        "ramp10 {:.2} ramp15 {:.2} ramp20 {:.2} accel75 {:.2} stop25 {:.1}",
-        ramp_peak(10.0), ramp_peak(15.0), ramp_peak(20.0), acc, stop
-    )
+    [ramp_peak(10.0), ramp_peak(15.0), ramp_peak(20.0), acc, stop]
 }
 
 /// The JS mirror (what the recorder stamps on runs) must say the same.
@@ -109,7 +109,7 @@ fn physics_revisions_match_their_fingerprints() {
     let bike = bicycle_fingerprint();
     let dtf = double_track_fingerprint();
     println!("bicycle rev {PHYSICS_REV_BICYCLE}: {bike:#x}");
-    println!("double track rev {PHYSICS_REV_DOUBLE_TRACK}: {dtf}");
+    println!("double track rev {PHYSICS_REV_DOUBLE_TRACK}: {dtf:.4?}");
 
     assert_eq!(
         BICYCLE,
@@ -118,11 +118,11 @@ fn physics_revisions_match_their_fingerprints() {
          If lap times move: bump PHYSICS_REV_BICYCLE (physics_rev.rs + physicsRev.js) -- a new leaderboard era.\n\
          Either way, re-record BICYCLE in tests/physics_rev.rs as ({PHYSICS_REV_BICYCLE}, {bike:#x}).\n"
     );
-    assert_eq!(
-        DOUBLE_TRACK,
-        (PHYSICS_REV_DOUBLE_TRACK, dtf.as_str()),
+    let moved = DOUBLE_TRACK.1.iter().zip(&dtf).zip(&DT_TOLERANCE).any(|((a, b), tol)| (a - b).abs() > *tol);
+    assert!(
+        DOUBLE_TRACK.0 == PHYSICS_REV_DOUBLE_TRACK && !moved,
         "\nThe 4-WHEEL model's physics changed.\n\
          If lap times move: bump PHYSICS_REV_DOUBLE_TRACK (physics_rev.rs + physicsRev.js) -- a new leaderboard era.\n\
-         Either way, re-record DOUBLE_TRACK in tests/physics_rev.rs.\n"
+         Either way, re-record DOUBLE_TRACK in tests/physics_rev.rs as ({PHYSICS_REV_DOUBLE_TRACK}, {dtf:.4?}).\n"
     );
 }

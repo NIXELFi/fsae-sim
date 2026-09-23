@@ -178,7 +178,7 @@ export function buildSectorSync(mineLap, ghostLap, sector) {
   // who scrubs to another lap is watching that lap, not a ghost still pinned
   // to a boundary a minute away.
   const lapStart = mineLap.startedAtS ?? 0;
-  const lapEnd = lapStart + (mineLap.raw ?? (mineExitS - lapStart));
+  const lapEnd = lapStart + (mineLap.spanS ?? mineLap.raw ?? (mineExitS - lapStart));
   return {
     sector,
     mineLap,

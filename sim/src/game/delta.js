@@ -345,7 +345,7 @@ export function referenceFromRun(telemetry, lap, lengthM) {
   const bins = Math.max(2, Math.ceil(lengthM / REF_STEP_M) + 1);
   const out = new Float64Array(bins).fill(NaN);
   const t0 = lap.startedAtS ?? 0;
-  const t1 = t0 + (lap.raw ?? 0);
+  const t1 = t0 + (lap.spanS ?? lap.raw ?? 0);
 
   // Same interpolation as the live timer: bin b holds the time at exactly
   // b * REF_STEP_M, found between the two samples that straddle it.

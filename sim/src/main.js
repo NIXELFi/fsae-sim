@@ -84,7 +84,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.7.4";
+export let SIM_VERSION = "0.7.5";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
@@ -564,13 +564,14 @@ class Game {
     this.timing.onLap = (entry, sectors, sectorCones) => {
       // What this lap was driven on: the model (its board) and the setup
       // (shown beside the time). Stamped before the recorder files it.
-      entry.vehicleModel = SDM26.vehicleModel ?? 2;
+      entry.vehicleModel = this.drivenModel();
       entry.setup = lapSetup(readParam);
       this.recorder?.recordLap(entry, sectors, sectorCones);
       // The lap that just closed was scored on the verdict it was driven
       // under. The NEXT lap starts fresh: a car put back to legal counts from
       // here on (the latch in `refreshTimeCounts` is per lap).
       this.runCounts = timeCounts();
+      this.lapModel = this.drivenModel();
       this.timing.countsForRecords = this.runCounts !== false;
       // Kept for the end-of-run card, and it has to be taken HERE: this hook
       // is the last moment the splits exist. `completeLap` clears them for
@@ -636,11 +637,7 @@ class Game {
       // run-to-run setup list was off as-shipped during it -- mass, power,
       // grip -- with the offending parameters named so a reader does not
       // have to diff two setups to find out why.
-      counted: this.refreshTimeCounts() && !this.runTainted,
-      vehicleModel: SDM26.vehicleModel ?? 2,
-      modelChanges: modelChanges().map((d) => ({
-        path: d.path, label: d.label, unit: d.unit, from: d.from, to: d.to,
-      })),
+      ...this.runHeader(),
       etc: this.etc?.points ? JSON.parse(JSON.stringify(this.etc.points)) : null,
       simVersion: SIM_VERSION,
       // Whatever the delta is already chasing -- a lap Helios loaded, or the
@@ -715,6 +712,32 @@ class Game {
   /** After any vehicle parameter edit: the rig holds its own copy. */
   pushParams() {
     if (this.car?.native) this.car.pushParams();
+    // Every way the car can change -- a slider, a slot (menu, staging card or
+    // Numpad5), an imported .hset, a launch -- pushes here, so the time-counts
+    // latch is checked here and none of them can skip it.
+    this.refreshTimeCounts();
+  }
+
+  /** The model actually driving: the browser build only has the bicycle. */
+  drivenModel() {
+    return this.car?.native ? (SDM26.vehicleModel ?? 2) : 2;
+  }
+
+  /**
+   * What the run's header says about the car. Taken at restart and taken
+   * again every time the car changes before the green, so a car fixed (or
+   * broken) on the staging card is the car the run says it was.
+   */
+  runHeader() {
+    return {
+      counted: timeCounts() !== false && !this.runTainted,
+      vehicleModel: this.drivenModel(),
+      setup: snapshotSetup(),
+      car: carSnapshot(),
+      modelChanges: modelChanges().map((d) => ({
+        path: d.path, label: d.label, unit: d.unit, from: d.from, to: d.to,
+      })),
+    };
   }
 
   /** Put the car back on the centreline where it left the course. */
@@ -1608,8 +1631,16 @@ class Game {
   refreshTimeCounts() {
     const now = timeCounts();
     const running = this.timing?.state === "running";
-    if (!running) this.runCounts = now;
-    else if (!now) {
+    const model = this.drivenModel();
+    if (!running) {
+      this.runCounts = now;
+      this.lapModel = model;
+      // Nothing driven yet: the header follows the car to the green.
+      const rec = this.recorder;
+      if (rec && !rec.finished && rec.laps.length === 0) Object.assign(rec.meta, this.runHeader());
+    } else if (!now || (this.lapModel != null && model !== this.lapModel)) {
+      // Illegal, or the model swapped under a lap: half a lap on each model
+      // is a time for neither board.
       this.runCounts = false;
       this.runTainted = true;
     }
@@ -3255,6 +3286,12 @@ async function boot() {
     if (dom.courseNote) {
       dom.courseNote.textContent = gen
         ? "A procedural course, laid out to the rulebook from the seed: straights, constant turns, hairpins, slaloms and chicanes with the rules' dimensions. Same seed, same course, on any machine. Cones score +2 s each; leaving the course voids the run (autocross) or the lap (endurance)."
+        : track.scoring?.kind === "skidpad"
+        ? "The FSAE skidpad (D.10), built from the rulebook: two laps right, two left. The score is the average of the second right and second left laps; a cone is +0.125 s, and leaving the course is a DNF."
+        : track.scoring?.kind === "accel"
+        ? "The FSAE acceleration event (D.9), built from the rulebook: 75 m, staged 0.3 m back and timed from the nose crossing the start line to the finish. A cone is +2 s; leaving the course is a DNF."
+        : track.kind === "venue"
+        ? "Michigan International Speedway, the oval with its infield and apron. Free driving: nothing here is a competition course."
         : "Traced 2026 Michigan geometry from the Helios lap sim, resampled to 1 m. Cones score +2 s each; leaving the course voids the run (autocross) or the lap (endurance).";
     }
     drawCoursePlan(dom.coursePlan, track);

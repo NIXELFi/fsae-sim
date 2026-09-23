@@ -251,6 +251,19 @@ section("model class, counted and setup ride with each lap and in the stats (0.7
   mixed.recordLap({ lap: 2, raw: 30, cones: 0, off: 0, total: 30, valid: true, counted: true, vehicleModel: 3 }, [30]);
   ok("a run that changed model part way belongs on neither board", mixed.stats().counted === false);
 
+  // What timing.js files for an off-course lap: not valid, and so not counted
+  // either. It is not a time, so it cannot unrank the run's real ones.
+  const offLap = openRecorder({ counted: true });
+  offLap.recordLap({ lap: 1, raw: 60, cones: 0, off: 0, total: 60, valid: true, counted: true, vehicleModel: 2 }, [60]);
+  offLap.recordLap({ lap: 2, raw: 58, cones: 0, off: 1, total: 58, valid: false, counted: false, vehicleModel: 2 }, [58]);
+  ok("an off-course lap does not take the run off the board", offLap.stats().counted === true && offLap.stats().bestLapS === 60);
+
+  const skid = openRecorder({ counted: true, track: "skidpad" });
+  skid.simTime = 26;
+  skid.recordLap({ lap: 1, raw: 5.2, spanS: 25.9, cones: 0, off: 0, total: 5.2, valid: true, vehicleModel: 2 }, [2.7, 5.2, 5.2, 5.2, 5.2, 2.4]);
+  ok("a skidpad lap starts where it was driven from, not score-seconds before the end", Math.abs(skid.laps[0].startedAtS - 0.1) < 0.2 && skid.laps[0].spanS === 25.9);
+  ok("and the skidpad has no theoretical best (its sectors are whole laps)", skid.stats().theoreticalBestS === null);
+
   const legacy = openRecorder({});
   legacy.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true }, [31]);
   ok("a fixture with no stamps reads as a counted bicycle lap", legacy.stats().vehicleModel === 2 && legacy.stats().counted === true);

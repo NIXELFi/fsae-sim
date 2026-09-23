@@ -49,7 +49,7 @@ export class Replay {
     this.sample = {};
     this.laps = (manifest.laps ?? []).map((l) => ({
       ...l,
-      endedAtS: (l.startedAtS ?? 0) + (l.raw ?? 0),
+      endedAtS: (l.startedAtS ?? 0) + (l.spanS ?? l.raw ?? 0),
     }));
     this.bestLap = this.laps.reduce((b, l) => (b == null || l.total < b.total ? l : b), null);
     this.events = manifest.events ?? [];

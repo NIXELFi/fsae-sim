@@ -618,7 +618,11 @@ export class Recorder {
       }),
       // `now`, not `simTime`: the lap ended during THIS frame, and the rows
       // are stamped with the clock after the frame is applied.
-      startedAtS: round(this.now - entry.raw, 3),
+      // The lap's clock time is not its score on the skidpad (the score is
+      // the average of two timed laps), so the start is placed by the time
+      // actually driven. `spanS` is kept wherever the two differ.
+      startedAtS: round(this.now - (entry.spanS ?? entry.raw), 3),
+      ...(entry.spanS != null && Math.abs(entry.spanS - entry.raw) > 1e-6 ? { spanS: round(entry.spanS, 3) } : {}),
     });
     this.event("lap", { lap: entry.lap, total: round(entry.total, 3) });
   }
@@ -757,7 +761,10 @@ export class Recorder {
       fastestRawLapS: fastestRaw ? fastestRaw.raw : null,
       fastestRawLapNumber: fastestRaw ? fastestRaw.lap : null,
       bestSectors: bestSectors.map((s) => (s == null ? null : round(s, 3))),
-      theoreticalBestS: complete ? round(bestSectors.reduce((a, b) => a + b, 0), 3) : null,
+      // Not on the skidpad: its "sectors" are four laps of the circles and
+      // its score is an average, so their sum is not a lap anybody drives.
+      theoreticalBestS: complete && this.meta.track !== "skidpad"
+        ? round(bestSectors.reduce((a, b) => a + b, 0), 3) : null,
       totalCones: this.laps.reduce((a, l) => a + l.cones, 0),
       totalOffCourse: this.laps.reduce((a, l) => a + l.off, 0),
       /** Laps thrown out for leaving the course. `laps` counts them; nothing
@@ -787,8 +794,12 @@ export class Recorder {
   runClass(bestLap) {
     const models = new Set(this.laps.map((l) => l.vehicleModel ?? 2));
     const vehicleModel = models.size === 1 ? [...models][0] : (this.meta.vehicleModel ?? 2);
+    // A lap that left the course is not a time whatever the car was, so it
+    // cannot take the run off the board: only a lap that SCORED on a
+    // modified car does. (0.7.2-0.7.4 read every lap here, and one off in an
+    // endurance stint unranked the whole run as "modified".)
     const counted = this.meta.counted !== false
-      && this.laps.every((l) => l.counted !== false)
+      && this.laps.every((l) => l.valid === false || l.counted !== false)
       && models.size <= 1;
     // One era per run: a run whose laps span two revisions (a build swapped
     // mid-session cannot happen, but a fixture can say so) counts nowhere.
