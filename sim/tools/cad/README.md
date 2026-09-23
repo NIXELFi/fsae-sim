@@ -46,18 +46,27 @@ Sources live in the team vault (Helios, `SDM27/Helios/Sim`):
 
 ## Livery
 
-`build.mjs` gives the painted bodywork (nose, side panels, cowl, the small
-body wings, both wings and their endplates) a UV map: six orthographic
-views -- left, right, top, bottom, front, rear -- at one scale on a square
-texture, each triangle in the view it faces most (the side views by which
-side of the centreline it is on). Each view is drawn as seen from there, so
-text reads the right way round on both sides. The layout is in the scene
-extras (`livery`).
+`build.mjs` UNWRAPS the painted bodywork onto one square texture (layout in
+the scene extras, `livery`):
 
-A livery is `data/livery.png`: a square PNG with alpha, any size, painted
-over the template. It is laid over those panels by its alpha; transparent
-leaves the carbon. No file (or a blank one) and the car is unchanged. Like
-the rest of the team's CAD, it is not in this repo.
+- the body skin -- nose, side panels, cowl -- as one piece: across the image
+  is along the car (nose left), down the image is round it, measured along
+  the surface, cut along the underside. The right side sits above the top
+  centreline, upside down; the left side below it, upright. A stripe drawn
+  straight down the image runs over the car unbroken.
+- wings (seen from above) and endplates (from the side they face) as their
+  own flat pieces underneath.
+
+A livery is `data/livery.png`: square PNG with alpha, any size. It is laid
+over those panels by its alpha; transparent leaves the carbon. No file (or
+a blank one) and the car is unchanged. Not in this repo, like the rest of
+the team's CAD.
+
+6. `node livery_template.mjs out/car.glb out/livery 4096` -- template (the
+   pieces' outlines, labels, top centreline), blank, and a numbered test grid.
+7. `blender -b --python make_paint_blend.py -- out/car.glb out/livery/livery_template.png out/livery/SDM26_livery_paint.blend 4096`
+   -- a Blender file to paint on the 3D car directly (Texture Paint mode;
+   Image > Save As livery.png). Portable Blender 4.5 works.
 
 `inspect.mjs` / `scan.mjs` dump a GLB's tree, sizes and misplaced parts.
 Paths in the scripts point at the scratch folder they were written in.

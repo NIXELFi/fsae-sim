@@ -26,13 +26,17 @@ for (const mesh of doc.getRoot().listMeshes()) for (const p of mesh.listPrimitiv
 console.log("livery triangles", segs.length, "views", Object.keys(views).join(","));
 const b = await chromium.launch();
 const page = await b.newPage();
-const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters }) => {
+const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, topLineV, layout }) => {
   const c = document.createElement("canvas"); c.width = c.height = SIZE;
   const g = c.getContext("2d");
   const S = SIZE;
   if (mode === "template") { g.fillStyle = "#ffffff"; g.fillRect(0, 0, S, S); }
-  const NAMES = { left: "LEFT SIDE  (nose \u2190)", right: "RIGHT SIDE  (nose \u2192)", top: "TOP  (nose \u2190)", bottom: "BOTTOM  (nose \u2192)", front: "FRONT", rear: "REAR" };
-  const HUE = { left: 0, right: 30, top: 200, bottom: 280, front: 120, rear: 60 };
+  const NAMES0 = { left: "LEFT SIDE  (nose \u2190)", right: "RIGHT SIDE  (nose \u2192)", top: "TOP  (nose \u2190)", bottom: "BOTTOM  (nose \u2192)", front: "FRONT", rear: "REAR" };
+  const NAMES = layout === "unwrap" ? {
+    "body skin": "BODY SKIN  (nose ←; right side upside down above the dashed top centreline, left side below)",
+  } : NAMES0;
+  const keys = Object.keys(views);
+  const HUE = Object.fromEntries(keys.map((k, i) => [k, Math.round((i * 360) / keys.length)]));
   for (const [k, [x, y, w, h]] of Object.entries(views)) {
     if (mode === "test") {
       // A numbered grid, one 10 cm cell at a time, tinted per view.
@@ -53,7 +57,7 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters })
       g.strokeRect(x * S, y * S, w * S, h * S);
       // In the margin above the frame, clear of the panels.
       g.fillStyle = "#1a73e8"; g.font = `bold ${Math.round(S / 120)}px sans-serif`;
-      g.fillText(NAMES[k], x * S + 4, y * S - S / 400);
+      g.fillText(NAMES[k] ?? k.toUpperCase(), x * S + 4, y * S - S / 400);
     }
   }
   if (mode === "template" || mode === "test") {
@@ -64,8 +68,16 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters })
     g.stroke();
   }
   if (mode === "template") {
-    // In the empty corner beside TOP and BOTTOM.
-    const fx = views.front[0], fy = views.top[1] + 0.01;
+    if (layout === "unwrap" && topLineV != null) {
+      const [bx, , bw] = views["body skin"];
+      g.save(); g.setLineDash([S / 150, S / 250]); g.strokeStyle = "#e8371a"; g.lineWidth = Math.max(2, S / 1500);
+      g.beginPath(); g.moveTo(bx * S, topLineV * S); g.lineTo((bx + bw) * S, topLineV * S); g.stroke(); g.restore();
+      g.fillStyle = "#e8371a"; g.font = `bold ${Math.round(S / 140)}px sans-serif`;
+      g.fillText("TOP CENTRELINE", (bx + bw) * S - S / 9, topLineV * S - S / 300);
+    }
+    // In the empty space to the right of the pieces.
+    let rx = 0; for (const [x, , w] of Object.values(views)) rx = Math.max(rx, x + w);
+    const fx = layout === "unwrap" ? rx + 0.03 : views.front[0], fy = layout === "unwrap" ? 0.02 : views.top[1] + 0.01;
     g.fillStyle = "#333"; g.font = `bold ${Math.round(S / 80)}px sans-serif`;
     g.fillText("SDM26 livery template", fx * S, fy * S + S / 60);
     g.fillStyle = "#555"; g.font = `${Math.round(S / 125)}px sans-serif`;
@@ -81,13 +93,23 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters })
       "Each view is drawn as you would see it standing",
       "there, so text reads correctly on both sides.",
       "",
-      "A panel belongs to the view it faces most; paint",
-      "a stripe across a view edge in both views.",
+      ...(layout === "unwrap" ? [
+        "The body is unrolled: across the image is along",
+        "the car, down the image is round it, measured on",
+        "the surface. A stripe drawn straight down runs",
+        "over the car unbroken, side to top to side.",
+        "The cut is along the underside.",
+        "Wings are seen from above, endplates from the",
+        "side they face.",
+      ] : [
+        "A panel belongs to the view it faces most; paint",
+        "a stripe across a view edge in both views.",
+      ]),
     ];
     lines.forEach((t, i) => g.fillText(t, fx * S, fy * S + S / 30 + i * S / 95));
   }
   return c.toDataURL("image/png");
-}, { SIZE, views, segs, mode, meters: extras.livery.size });
+}, { SIZE, views, segs, mode, meters: extras.livery.size, topLineV: extras.livery.topLineV ?? null, layout: extras.livery.layout ?? "views" });
 for (const [mode, name] of [["template", "livery_template.png"], ["blank", "livery_blank.png"], ["test", "livery_test.png"]]) {
   const url = await draw(mode);
   fs.writeFileSync(`${outDir}/${name}`, Buffer.from(url.split(",")[1], "base64"));
