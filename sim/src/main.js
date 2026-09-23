@@ -487,6 +487,24 @@ class Game {
         console.info(`CAD dash: ${this.cadDash.stats.triangles.toLocaleString()} triangles`);
       }
     }
+    // A livery for the CAD car's bodywork, if one is there: data/livery.png,
+    // painted on the UV map the CAD pipeline lays out (tools/cad/README.md).
+    // Transparent where the carbon should show. Optional, like the rest.
+    if (this.livery === undefined) {
+      this.livery = null;
+      try {
+        const res = await fetch("./data/livery.png", { cache: "no-cache" });
+        // The desktop asset server answers a missing file with the index
+        // page, so check it really is an image.
+        if (res.ok && (res.headers.get("content-type") ?? "").startsWith("image/")) {
+          this.livery = await createImageBitmap(await res.blob(), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+          console.info(`livery: ${this.livery.width} x ${this.livery.height}`);
+        }
+      } catch (e) {
+        console.warn(`data/livery.png could not be read: ${e?.message ?? e}`);
+      }
+    }
+    this.renderer.useLivery(this.livery);
     // Whichever look the driver picked (Car tab -> Car appearance).
     this.applyVisualCar();
     this.cadWheel = cadWheel ?? null;

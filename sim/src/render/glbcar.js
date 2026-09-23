@@ -168,6 +168,12 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
   const idx = prim.indices !== undefined
     ? readAccessor(doc, bin, prim.indices)
     : null;
+  // Livery UVs (the CAD car's painted bodywork). Every other vertex in the
+  // same mesh gets (-1, -1): "no livery here".
+  const uv = prim.attributes?.TEXCOORD_0 !== undefined
+    ? readAccessor(doc, bin, prim.attributes.TEXCOORD_0)
+    : null;
+  if (uv) out.hasUv = true;
   const colour = materialColour(doc, prim.material);
 
   const vertexCount = pos.length / 3;
@@ -235,19 +241,23 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
       if (nrm) out.normal.push(nrm[v * 3], nrm[v * 3 + 1], nrm[v * 3 + 2]);
       else out.normal.push(fnx, fny, fnz);
       out.color.push(colour[0], colour[1], colour[2]);
+      if (uv) out.uv.push(uv[v * 2], uv[v * 2 + 1]);
+      else out.uv.push(-1, -1);
     }
   }
 }
 
-const empty = () => ({ position: [], normal: [], color: [] });
+const empty = () => ({ position: [], normal: [], color: [], uv: [], hasUv: false });
 
 function finish(acc) {
-  return {
+  const m = {
     position: new Float32Array(acc.position),
     normal: new Float32Array(acc.normal),
     color: new Float32Array(acc.color),
     count: acc.position.length / 3,
   };
+  if (acc.hasUv) m.uv = new Float32Array(acc.uv);
+  return m;
 }
 
 

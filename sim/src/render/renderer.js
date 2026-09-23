@@ -53,6 +53,10 @@ const SHADOW_DEPTH = 90;      // m, half depth range of each cascade along the s
 
 // Attribute locations are fixed so one VAO can be drawn by the lit program
 // and by the depth-only program alike.
+// A_UV shares slot 3 with I_OFFSET: different programs, and the car's is
+// fed from a buffer only on a mesh that has one (the CAD body's livery).
+const A_UV = 3;
+const LIVERY_UNIT = 2;
 const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_CONE = 5, I_DIR = 6;
 /** Floats per prop instance: offset(3), down(1), cone(1), dir(1). The cone
  *  flag tells PROP_FS which props get the reflective collar; it used to be a
@@ -860,16 +864,19 @@ const CAR_VS = `#version 300 es
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec3 aColor;
+layout(location = 3) in vec2 aUV;   // livery; (-1, -1) where there is none
 uniform mat4 uViewProj;
 uniform mat4 uModel;
 out vec3 vColor;
 out vec3 vNormal;
 out vec3 vWorld;
+out vec2 vUV;
 void main() {
   vec4 w = uModel * vec4(aPos, 1.0);
   vWorld = w.xyz;
   vNormal = mat3(uModel) * aNormal;
   vColor = aColor;
+  vUV = aUV;
   gl_Position = uViewProj * w;
 }`;
 
@@ -878,6 +885,9 @@ precision highp float;
 in vec3 vColor;
 in vec3 vNormal;
 in vec3 vWorld;
+in vec2 vUV;
+uniform sampler2D uLivery;
+uniform float uLiveryOn;  // 1 while the livery-carrying body is drawn
 uniform vec4 uOverride;   // rgb to blend toward, alpha = how much
 uniform vec3 uMaterial;   // roughness, metalness, clearcoat
 uniform float uAlpha;     // 1 for the car; less for a ghost, which is blended
@@ -893,6 +903,12 @@ void main() {
   if (!gl_FrontFacing) n = -n;
 
   vec3 base = toLinear(mix(vColor, uOverride.rgb, uOverride.a));
+  // The livery paints over the panel's own colour by its alpha: a clear
+  // pixel leaves the carbon as it is.
+  if (uLiveryOn > 0.5 && vUV.x >= 0.0) {
+    vec4 t = texture(uLivery, vUV);
+    base = mix(base, toLinear(t.rgb), t.a);
+  }
   float sh = shadowAt(vWorld, n);
   vec3 c = shade(base, n, vWorld, sh, uMaterial.x, uMaterial.y, uMaterial.z);
   frag = finish(applyFog(c, vWorld));
@@ -1410,6 +1426,32 @@ export class Renderer {
     this.arms = meshes.arms ?? null;
   }
 
+  /**
+   * The livery: an image laid over the CAD car's painted bodywork through
+   * its UV map (tools/cad/build.mjs, "the livery UV map"), blended by its
+   * alpha. Null takes it off. Drawing only.
+   */
+  useLivery(image) {
+    const gl = this.gl;
+    if (this.liveryTex) { gl.deleteTexture(this.liveryTex); this.liveryTex = null; }
+    if (!image) return;
+    const tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + LIVERY_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const aniso = gl.getExtension("EXT_texture_filter_anisotropic");
+    if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, 8);
+    gl.activeTexture(gl.TEXTURE0);
+    this.liveryTex = tex;
+  }
+
   /** Static mesh drawn with its own model matrix (the car parts, scenery). */
   makeMesh(mesh) {
     const gl = this.gl;
@@ -1428,6 +1470,7 @@ export class Renderer {
       normal: attach(mesh.normal, A_NORMAL, 3),
       color: attach(mesh.color, A_COLOR, 3),
     };
+    if (mesh.uv) buffers.uv = attach(mesh.uv, A_UV, 2);
     gl.bindVertexArray(null);
     return { vao, count: mesh.count, buffers };
   }
@@ -2517,6 +2560,15 @@ export class Renderer {
     this.setCommon(uc, eye);
     gl.uniformMatrix4fv(uc.uViewProj, false, this.viewProj);
     gl.uniform1f(uc.uAlpha, 1);
+    // Meshes without a UV buffer read this constant: "no livery".
+    gl.vertexAttrib2f(A_UV, -1, -1);
+    gl.uniform1i(uc.uLivery, LIVERY_UNIT);
+    gl.uniform1f(uc.uLiveryOn, 0);
+    if (this.liveryTex) {
+      gl.activeTexture(gl.TEXTURE0 + LIVERY_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.liveryTex);
+      gl.activeTexture(gl.TEXTURE0);
+    }
 
     // Material per part: roughness, metalness, clearcoat.
     const part = (mesh, model, ov, mat) => {
@@ -2528,7 +2580,9 @@ export class Renderer {
       this.drawArrays(gl.TRIANGLES, 0, mesh.count);
     };
 
+    if (this.liveryTex) gl.uniform1f(uc.uLiveryOn, 1);
     part(this.car.body, this.chassis, null, MAT.paint);
+    gl.uniform1f(uc.uLiveryOn, 0);
     for (const rp of this.rigParts ?? []) part(rp.mesh, rp.model, null, MAT.paint);
     // The driver rides on the chassis frame. Not from the cockpit camera:
     // that eye is inside the helmet, and a helmet lining is not a view.

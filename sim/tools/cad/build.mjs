@@ -301,6 +301,12 @@ const cockpit = {};
 /** Meshes simplified harder: the engine bay, behind the firewall and under
  *  the engine cover, is seen from a chase camera metres away at best. */
 const coarse = new WeakSet();
+// ---- livery -------------------------------------------------------------------
+// The painted bodywork: nose, side panels, cowl, the small body wings, and
+// both wings with their endplates. These carry TEXCOORD_0 (see `unwrap`);
+// everything else is untextured.
+const LIVERY = /STRU-Hood|STRU-Body-Panels|STRU-Cowl|Aero-Body-Wing|Endplate|Rear-Wing-E_1|Rear-Wing-018-E\d-Shell|FW-013-E\d/i;
+const livery = new WeakSet();
 async function ingest(file, { fromAero, skip, finishes = true, hardware = true, mounts = false, errScale = 1 }) {
   const src = await io.read(file);
   tame = !finishes;
@@ -389,6 +395,7 @@ async function ingest(file, { fromAero, skip, finishes = true, hardware = true, 
       const twin = out.createMesh(leaf + "-mirrored");
       for (const pr of prims) if (pr.getMode() === 4) twin.addPrimitive(bakePrimitive(pr, m, reflectZ, pr.getMaterial(), fromAero, leaf, true));
       bodyMeshes.push(twin);
+      livery.add(twin);
       report.bodyWingMirrored = true;
     }
     // ...and the right wing is missing its outboard rib (the left has ribs
@@ -409,6 +416,7 @@ async function ingest(file, { fromAero, skip, finishes = true, hardware = true, 
     const ctl = mounts ? controlOf(name, cc) : null;
     const outMesh = out.createMesh(leaf);
     if (errScale > 1) coarse.add(outMesh);
+    if (fromAero && LIVERY.test(leaf)) livery.add(outMesh);
     const tg = (/^Mirror/.test(leaf.split("/").pop())
       ? twinGeo.get(twinKey(leaf) + ((lo[0] + hi[0]) / 2 > -0.75 ? "f" : "r")) : null)
       ?? (!fromAero && finishes && (lo[1] + hi[1]) / 2 < -0.02 ? leftSide : null);
@@ -542,6 +550,103 @@ for (const mesh of out.getRoot().listMeshes()) {
 }
 await out.transform(dedup(), prune());
 const afterSimplify = trisOf();
+
+// ---- the livery UV map --------------------------------------------------------
+// Six orthographic views at one scale, laid out on a square texture:
+//
+//   +------------------+---------+
+//   | LEFT  (nose left) | FRONT   |
+//   | RIGHT (nose right)| REAR    |
+//   | TOP   (nose left) |         |
+//   | BOTTOM            |         |
+//   +------------------+---------+
+//
+// Each triangle goes to the view it faces most. The two side views are
+// picked by which side of the centreline the triangle is on, not by its
+// normal, so a panel's inner skin lands under its outer one rather than on
+// the other side of the car. Every view is drawn as a person standing there
+// would see it, so lettering reads the right way round on both sides.
+// Image v runs down (row 0 is v = 0, as WebGL samples an unflipped image).
+const liveryMeshes = out.getRoot().listMeshes().filter((m) => livery.has(m));
+const LB = { lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] };
+for (const mesh of liveryMeshes) for (const prim of mesh.listPrimitives()) {
+  const a = prim.getAttribute("POSITION"); const mn = a.getMin([]), mx = a.getMax([]);
+  for (let i = 0; i < 3; i++) { LB.lo[i] = Math.min(LB.lo[i], mn[i]); LB.hi[i] = Math.max(LB.hi[i], mx[i]); }
+}
+const LX = LB.hi[0] - LB.lo[0], LY = LB.hi[1] - LB.lo[1], LZ = LB.hi[2] - LB.lo[2];
+const MARGIN = 0.06;
+const colA = MARGIN, colB = MARGIN + LX + MARGIN;
+const rows = [MARGIN, MARGIN + LZ + MARGIN, MARGIN + 2 * (LZ + MARGIN), MARGIN + 2 * (LZ + MARGIN) + LY + MARGIN];
+const TEX_M = Math.max(colB + LY + MARGIN, rows[3] + LY + MARGIN);   // metres across the texture
+const REGIONS = {
+  left:   { x: colA, y: rows[0], w: LX, h: LZ, uv: (p) => [LB.hi[0] - p[0], LB.hi[2] - p[2]] },
+  front:  { x: colB, y: rows[0], w: LY, h: LZ, uv: (p) => [p[1] - LB.lo[1], LB.hi[2] - p[2]] },
+  right:  { x: colA, y: rows[1], w: LX, h: LZ, uv: (p) => [p[0] - LB.lo[0], LB.hi[2] - p[2]] },
+  rear:   { x: colB, y: rows[1], w: LY, h: LZ, uv: (p) => [LB.hi[1] - p[1], LB.hi[2] - p[2]] },
+  top:    { x: colA, y: rows[2], w: LX, h: LY, uv: (p) => [LB.hi[0] - p[0], p[1] - LB.lo[1]] },
+  bottom: { x: colA, y: rows[3], w: LX, h: LY, uv: (p) => [p[0] - LB.lo[0], p[1] - LB.lo[1]] },
+};
+function viewOf(n, c) {
+  const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
+  if (ay >= ax && ay >= az) return c[1] >= 0 ? "left" : "right";   // CAD +y is the car's left
+  if (az >= ax) return n[2] >= 0 ? "top" : "bottom";
+  return n[0] >= 0 ? "front" : "rear";
+}
+let liveryTris = 0;
+const viewCount = {};
+for (const mesh of liveryMeshes) {
+  for (const prim of mesh.listPrimitives()) {
+    const P = prim.getAttribute("POSITION").getArray(), N = prim.getAttribute("NORMAL")?.getArray();
+    const I = prim.getIndices().getArray();
+    const nt = I.length / 3;
+    const pos = new Float32Array(nt * 9), nrm = new Float32Array(nt * 9), uv = new Float32Array(nt * 6);
+    for (let t = 0; t < nt; t++) {
+      const v = [0, 1, 2].map((k) => I[t * 3 + k]);
+      const q = v.map((i) => [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]]);
+      const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
+      const e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+      let fn = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      // Trust the exported normals' side over the winding where they agree
+      // poorly: the mean vertex normal says which way the surface faces.
+      if (N) {
+        const mn = [0, 1, 2].map((a) => (N[v[0] * 3 + a] + N[v[1] * 3 + a] + N[v[2] * 3 + a]) / 3);
+        if (mn[0] * fn[0] + mn[1] * fn[1] + mn[2] * fn[2] < 0) fn = fn.map((x) => -x);
+      }
+      const c = [0, 1, 2].map((a) => (q[0][a] + q[1][a] + q[2][a]) / 3);
+      const view = viewOf(fn, c);
+      viewCount[view] = (viewCount[view] ?? 0) + 1;
+      const R = REGIONS[view];
+      for (let k = 0; k < 3; k++) {
+        pos.set(q[k], (t * 3 + k) * 3);
+        if (N) nrm.set([N[v[k] * 3], N[v[k] * 3 + 1], N[v[k] * 3 + 2]], (t * 3 + k) * 3);
+        const [a, b] = R.uv(q[k]);
+        uv[(t * 3 + k) * 2] = (R.x + a) / TEX_M;
+        uv[(t * 3 + k) * 2 + 1] = (R.y + b) / TEX_M;
+      }
+    }
+    liveryTris += nt;
+    prim.getAttribute("POSITION").setArray(pos);
+    if (N) prim.getAttribute("NORMAL").setArray(nrm);
+    prim.setAttribute("TEXCOORD_0", out.createAccessor().setType("VEC2").setArray(uv).setBuffer(buffer));
+    // Its own copy of the material, so `join` below merges livery panels only
+    // with each other: joined with an untextured part of the same finish,
+    // the UVs are dropped.
+    const mat = prim.getMaterial();
+    if (mat) {
+      const key = "livery:" + mat.getName();
+      if (!matCache.has(key)) matCache.set(key, mat.clone().setName(mat.getName() + "-livery"));
+      prim.setMaterial(matCache.get(key));
+    }
+    prim.setIndices(out.createAccessor().setType("SCALAR").setArray(Uint32Array.from({ length: nt * 3 }, (_, i) => i)).setBuffer(buffer));
+  }
+}
+report.livery = { tris: liveryTris, views: viewCount, textureMetres: +TEX_M.toFixed(3) };
+// The livery map: which part of the texture is which view, in texture
+// fractions (0..1, v down), for the template and for painting.
+outScene.setExtras({ ...outScene.getExtras(), livery: {
+  size: TEX_M,
+  views: Object.fromEntries(Object.entries(REGIONS).map(([k, r]) => [k, [r.x / TEX_M, r.y / TEX_M, r.w / TEX_M, r.h / TEX_M]])),
+} });
 if (process.env.TOP) {
   const rows = out.getRoot().listMeshes().map((m) => [m.listPrimitives().reduce((t, p) => t + p.getIndices().getCount() / 3, 0), m.getName()]);
   rows.sort((a, b) => b[0] - a[0]);
@@ -549,7 +654,9 @@ if (process.env.TOP) {
 }
 // Merge the body into one mesh per material (few draw calls); the wheel nodes
 // keep their shared mesh.
-await out.transform(join({ keepNamed: false, filter: (n) => !/^(wheel_|rig:|ctl:)/.test(n.getName()) }), prune());
+// keepAttributes: prune otherwise drops TEXCOORD_0, which no material
+// texture uses -- the livery is applied by the renderer, not the file.
+await out.transform(join({ keepNamed: false, filter: (n) => !/^(wheel_|rig:|ctl:)/.test(n.getName()) }), prune({ keepAttributes: true }));
 // `join` may leave body nodes nested under one parent; the loader sums
 // translations, which are all zero for baked body nodes, so that is fine.
 // Smaller storage: normals as normalized bytes (the loader scales them back),
@@ -572,7 +679,7 @@ console.log(JSON.stringify({
   err: ERR, minPart: MIN_PART, out: OUT, mb: +(size / 1e6).toFixed(2),
   trisIn: Math.round(before + report.droppedTris), trisKept: Math.round(before), trisOut: Math.round(afterSimplify),
   wheelTris: wheelMesh.listPrimitives().reduce((t, p) => t + p.getIndices().getCount() / 3, 0),
-  splitFinish: report.splitFinish, hardware: report.hardware, parts: report.kept, dropped: report.dropped, dupes: report.dupes, reflected: report.reflected, rig: report.rig, ctl: report.ctl,
+  splitFinish: report.splitFinish, hardware: report.hardware, parts: report.kept, dropped: report.dropped, dupes: report.dupes, reflected: report.reflected, rig: report.rig, ctl: report.ctl, livery: report.livery,
   hubs: Object.fromEntries(Object.entries(hub).map(([k, v]) => [k, v.c.map((x) => +x.toFixed(3)).concat(v.parts.map((p) => p.leaf).join("|"))])),
   materials: out.getRoot().listMaterials().length, meshes: out.getRoot().listMeshes().length,
 }, null, 1));

@@ -38,5 +38,26 @@ Sources live in the team vault (Helios, `SDM27/Helios/Sim`):
    Strada from its STEP (single-part GLB exports from SolidWorks come out
    empty; export parts as STEP or wrap them in an assembly).
 
+6. `node livery_template.mjs out/car.glb out/livery 4096` -- the livery
+   templates from the built car: `livery_template.png` (view frames, labels
+   and the painted panels' wireframe, to paint over), `livery_blank.png`
+   (fully transparent) and `livery_test.png` (a numbered 10 cm grid per view,
+   to check the mapping on the car).
+
+## Livery
+
+`build.mjs` gives the painted bodywork (nose, side panels, cowl, the small
+body wings, both wings and their endplates) a UV map: six orthographic
+views -- left, right, top, bottom, front, rear -- at one scale on a square
+texture, each triangle in the view it faces most (the side views by which
+side of the centreline it is on). Each view is drawn as seen from there, so
+text reads the right way round on both sides. The layout is in the scene
+extras (`livery`).
+
+A livery is `data/livery.png`: a square PNG with alpha, any size, painted
+over the template. It is laid over those panels by its alpha; transparent
+leaves the carbon. No file (or a blank one) and the car is unchanged. Like
+the rest of the team's CAD, it is not in this repo.
+
 `inspect.mjs` / `scan.mjs` dump a GLB's tree, sizes and misplaced parts.
 Paths in the scripts point at the scratch folder they were written in.
