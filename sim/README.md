@@ -1254,9 +1254,15 @@ WebGL 2.0 came up clean rather than just that nothing crashed.
   defect, not a modelling choice, and `validate.js` says so where the check
   lives. It is not engine power: 60% more torque buys 0.28 s. It is not
   driveline inertia, grip, mass, drag or shift time either, each of which was
-  measured on its own and is worth between 0.02 and 0.17 s. What is left is
-  that the slip ratio is floored below 2 m/s, so nothing can manage wheelspin
-  at the moment a launch is decided.
+  measured on its own and is worth between 0.02 and 0.17 s. The 2026-09-22
+  review (sim/docs/HANDOFF-physics-2026-09-22-b.md) found the real causes,
+  none of them the slip floor: the pull-away clutch bogs the engine to ~1100
+  rpm (its capacity follows driveline speed, not engine speed); the clutch
+  never locks under hard acceleration, so the harness holds 1st to 14,300
+  rpm; and the rules time from the line with the car staged 0.3 m behind it,
+  worth 0.36 s on its own. The fixes are in the shared powertrain, so they
+  wait on a decision about the frozen bicycle. A real 5/3 launch log agrees:
+  the real car's power matches the model, and its launch does not.
 - **Single-track at the front, two wheels at the rear.** The front axle is one
   unit: there is nothing between the front wheels but the road, and grip still
   responds to lateral load transfer through the two contact patches. The rear

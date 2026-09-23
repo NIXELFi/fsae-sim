@@ -181,7 +181,14 @@ console.log("\nACCELERATION  (75 m from standstill, Helios reference ~4.2 s)");
   //   shift time        100 -> 50 ms buys 0.03 s
   //   mass, crr, CdA, final drive: 0.02-0.17 s each
   //
-  // What is left, and the most likely cause: the launch is decided almost
+  // UPDATE 2026-09-22: the paragraph below is NOT the cause. The 2026-09-22
+  // review found the launch clutch bogs the engine, the clutch never locks
+  // under hard acceleration (so this harness holds 1st to ~14,300 rpm), and
+  // the rules time from the line with the car staged 0.3 m back (0.36 s). With
+  // those the tyre's mu_x shows up again (1.5 -> 1.8 is worth 0.18 s, not
+  // 0.03). See sim/docs/HANDOFF-physics-2026-09-22-b.md. Kept for the record:
+  //
+  // What was left, and the most likely cause: the launch is decided almost
   // entirely by wheelspin management, and the slip ratio the manager reads is
   // not meaningful below walking pace. `kDen` floors the denominator at 2 m/s
   // (bicycle.js), so a stationary car with barely turning wheels already reads

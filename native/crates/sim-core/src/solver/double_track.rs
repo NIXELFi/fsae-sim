@@ -98,6 +98,13 @@ struct Body {
     ride_rate: [f64; 2],
 }
 
+/// The anti geometry under braking: front anti-dive and rear anti-lift,
+/// each on its axle's share of the brake force.
+fn anti_braking(p: &VehicleParams) -> f64 {
+    let b = p.brakes.bias_front.clamp(0.0, 1.0);
+    b * p.suspension.anti_dive_front + (1.0 - b) * p.suspension.anti_lift_rear
+}
+
 impl DoubleTrackSolver {
     pub fn new(mut c: Chassis) -> Self {
         // This model runs the tyre with its peak slip moving with load (see
@@ -172,7 +179,7 @@ impl DoubleTrackSolver {
         // Stiffness FROM the gradients: roll = ms g arm / K per g, pitch =
         // ms g hs (1 - anti) / K per g of braking. So the car does what the
         // team's validated numbers say it does.
-        let anti_brake = 0.5 * (sp.anti_dive_front + sp.anti_lift_rear);
+        let anti_brake = anti_braking(p);
         let k_roll = ms * G * arm / sp.roll_gradient_deg_g.to_radians().max(1e-6);
         let k_pitch = ms * G * hs * (1.0 - anti_brake) / sp.pitch_gradient_deg_g.to_radians().max(1e-6);
         // About the roll axis and about the ground, not the CG.
@@ -344,11 +351,11 @@ impl DoubleTrackSolver {
         let ms_r = body.ms * (1.0 - p.weight_dist_front);
         let geo_lat_f = (ms_f * p.roll.rc_front_m + mu_f * radius) * ay / tf;
         let geo_lat_r = (ms_r * p.roll.rc_rear_m + mu_r * radius) * ay / tr;
-        let anti = if ax < 0.0 {
-            0.5 * (sp.anti_dive_front + sp.anti_lift_rear)
-        } else {
-            0.5 * sp.anti_squat_rear
-        };
+        // Each axle's anti acts on the share of the longitudinal force that
+        // axle carries. Braking splits by the bias; driving is all at the
+        // rear on this car, so its anti-squat applies in full. (Both used to
+        // be a 50/50 average -- which halved the anti-squat.)
+        let anti = if ax < 0.0 { anti_braking(p) } else { sp.anti_squat_rear };
         // Positive = onto the front axle.
         let geo_long = -((mu_f + mu_r) * radius + anti * body.ms * body.hs) * ax / l;
 

@@ -105,8 +105,6 @@ export const MODEL = {
      "They are applied as validated deg/g gradients for load transfer and camera attitude. No ride model, so kerb strikes and damper behaviour are absent."],
     ["Individual wheel vertical travel",
      "A bicycle model has two contact patches. Per-corner camber, toe and spring rate belong in Helios Setup and Oracle."],
-    ["Differential",
-     "The rear axle is a single lumped wheel; no torque split or locking effect."],
     ["Tyre thermal and wear state", "mu is constant over a run."],
     ["Surface elevation and grip variation", "The venue is a flat lot, so this costs less here than it would elsewhere."],
   ],

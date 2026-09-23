@@ -229,12 +229,12 @@ pub struct TorquePoint {
     pub fmep_bar: f64,
 }
 
-/// SDM26 characteristic RPM sweep from the Helios CFD module's 1-D
-/// finite-volume engine solver, 4000-15000 rpm.
-///
-/// Not a smooth dyno arc: the wave-action features the solver predicts are
-/// preserved -- the hole at 6500, the spike at 8000, the second wind at
-/// 11000-11500 before the restrictor chokes it.
+/// SDM26 torque sweep. Since 2026-09-18 this is the MEASURED chassis-dyno
+/// curve (Downloads/SDM.CSV, 4500-13500 rpm, measured at the wheels) divided
+/// by the drivetrain efficiency to give flywheel torque; below 4500 rpm the
+/// Helios CFD sweep's shape is carried, scaled to meet it, and above 13500
+/// the measurement's own slope is continued. The fmep column is still the
+/// CFD sweep's. Generated together with sim/data/sdm26-torque.json.
 pub const SDM26_SWEEP: [TorquePoint; 23] = [
 TorquePoint { rpm: 4000.0, torque_nm: 35.461, fmep_bar: 1.1630 },
     TorquePoint { rpm: 4500.0, torque_nm: 35.657, fmep_bar: 1.2594 },
