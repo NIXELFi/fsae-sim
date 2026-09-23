@@ -28,6 +28,7 @@
 // rendering at 60 fps logs at 60 Hz. `stats` carries the rate achieved.
 
 import { CONE_PENALTY_S, penalisedSector } from "./timing.js";
+import { SKIDPAD } from "../track/skidpad.js";
 import { SDM26, rimFromRoadDeg } from "../vehicle/params.js";
 
 export const SAMPLE_HZ = 100;
@@ -301,6 +302,9 @@ export const TRACK_DATUMS = {
   autocross: { lat: 42.07152, lon: -84.24089, bearingDeg: 0, name: "FSAE Michigan autocross pad" },
   endurance: { lat: 42.06985, lon: -84.24515, bearingDeg: 0, name: "FSAE Michigan endurance pad" },
   mis: { lat: 42.06556, lon: -84.24139, bearingDeg: 0, name: "Michigan International Speedway" },
+  // The skidpad is built from the rulebook, not traced from a site; it sits
+  // on the same nominal MIS infield fix as a generated course.
+  skidpad: { lat: 42.06700, lon: -84.24300, bearingDeg: 0, name: "Skidpad (rulebook layout, nominal datum, MIS infield)" },
   // A generated course exists nowhere. It is placed on the MIS infield so the
   // GPS channels stay plausible for anything that maps them, and named so
   // nobody mistakes the fix for a survey.
@@ -333,6 +337,9 @@ export class Recorder {
     const { reference = null, ...rest } = meta;
     this.meta = rest;
     this.project = makeGeoProjection(meta.datum ?? datumFor(meta.track));
+    // What a cone costs on this course: the skidpad's 0.125 s (D.10.3.1),
+    // 2 s everywhere else.
+    this.conePenaltyS = meta.track === "skidpad" ? SKIDPAD.conePenaltyS : CONE_PENALTY_S;
     this.columns = COLUMNS.map(() => []);
     this.times = [];
     this.events = [];
@@ -571,7 +578,9 @@ export class Recorder {
       raw: round(entry.raw, 3),
       cones: entry.cones,
       off: entry.off,
-      penaltyS: round(entry.cones * CONE_PENALTY_S, 3),
+      penaltyS: round(entry.cones * this.conePenaltyS, 3),
+      // The skidpad's two timed laps (D.10.4.1), whose average is `raw`.
+      ...(entry.right != null ? { right: round(entry.right, 3), left: round(entry.left, 3) } : {}),
       total: round(entry.total, 3),
       // Left the course, so it is not a time -- see `timing.js`, which is
       // stricter than the rulebook here and says why. The lap is recorded in
@@ -710,7 +719,7 @@ export class Recorder {
         // it -- and Helios folds `bestSectors` into the team records. The
         // two folds are one rule and have to stay one rule.
         if (i > 0 && l.sectors[i - 1] == null) continue;
-        const scored = penalisedSector(v, l.sectorCones?.[i]);
+        const scored = penalisedSector(v, l.sectorCones?.[i], this.conePenaltyS);
         if (best == null || scored < best) best = scored;
       }
       bestSectors.push(best);

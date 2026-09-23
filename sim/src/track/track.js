@@ -9,6 +9,7 @@
 import { SDM26 } from "../vehicle/params.js";
 import { bodyBoxFor } from "../render/carmesh.js";
 import { generateTrack, parseGeneratedId, EVENTS as GEN_EVENTS } from "./generate.js";
+import { skidpadTrack } from "./skidpad.js";
 
 const CELL = 12; // m, spatial hash cell size
 
@@ -75,6 +76,10 @@ export class Track {
     this.source = data.source;
     // What a procedural course was built from, for the menu; null otherwise.
     this.generated = data.generated ?? null;
+    // How a run on this course is SCORED, when it is not start-to-finish:
+    // the skidpad times two of its laps and averages them (D.10.4.1). Null
+    // for every other course.
+    this.scoring = data.scoring ?? null;
     this.center = data.centerline;
     this.heading = data.heading;
     this.curvature = data.curvature;
@@ -376,9 +381,13 @@ export function generatedTrack(id) {
   return new Track(generateTrack(g));
 }
 
+/** The skidpad, built from the rulebook (see skidpad.js). */
+export function skidpad() { return new Track(skidpadTrack()); }
+
 export const TRACKS = [
   { id: "autocross", label: "Autocross 2026", url: "./data/track-autocross.json" },
   { id: "endurance", label: "Endurance 2026", url: "./data/track-endurance.json" },
+  { id: "skidpad", label: "Skidpad (FSAE D.10)", kind: "skidpad" },
   { id: "mis", label: "Michigan International Speedway", url: "./data/venue-mis.json",
     kind: "venue" },
 ];

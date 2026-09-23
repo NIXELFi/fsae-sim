@@ -7,7 +7,7 @@ import { loadCarModel, loadWheelModel, loadBodyModel } from "./render/glbcar.js"
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
-import { loadTrack, TRACKS, trackSpec, isTrackId, generatedTrack } from "./track/track.js";
+import { loadTrack, TRACKS, trackSpec, isTrackId, generatedTrack, skidpad } from "./track/track.js";
 import { generatedTrackId, parseGeneratedId, randomSeed, normaliseSeed, describeGenerated, EVENTS as GEN_EVENTS } from "./track/generate.js";
 import { loadVenue } from "./track/venue.js";
 import { Renderer } from "./render/renderer.js";
@@ -16,7 +16,7 @@ import { PRESET_ORDER,loadGraphicsChoice, saveGraphicsChoice, probeGpuName, reso
 import { Input } from "./game/input.js";
 import { Hud } from "./game/hud.js";
 import { EngineAudio } from "./game/audio.js";
-import { Timing, fmt, sectorVerdict, penalisedSector, CONE_PENALTY_S, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
+import { Timing, fmt, sectorVerdict, penalisedSector, conePenaltyFor, FSAE_OFF_COURSE_PENALTY_S } from "./game/timing.js";
 import { planReplayLaunch, buildSectorSync, ghostClockAt, sectorLaunchOptions } from "./game/sectorSync.js";
 import { keyLabel, buttonLabel, buttonSlot, ACTIONS, ACTION_GROUPS, SETUP_ITEM_ACTIONS } from "./game/controlBindings.js";
 import { loadEtc, saveEtc } from "./vehicle/etcMap.js";
@@ -394,6 +394,7 @@ class Game {
         // no file. It takes tens of milliseconds for an autocross and up to
         // half a second for an endurance lap that was hard to close.
         : spec.kind === "generated" ? Promise.resolve().then(() => generatedTrack(spec.id))
+        : spec.kind === "skidpad" ? Promise.resolve().then(() => skidpad())
         : loadTrack(spec.url),
       // Optional CAD bodywork. Absent is the normal case, not an error, so
       // this resolves to null rather than rejecting and taking the load with
@@ -1491,7 +1492,7 @@ class Game {
     const splits = this._liveSplits ?? (this._liveSplits = []);
     splits.length = 0;
     for (let i = 0; i < t.sectorSplits.length; i++) {
-      splits.push(penalisedSector(t.sectorSplits[i], t.sectorCones[i]));
+      splits.push(penalisedSector(t.sectorSplits[i], t.sectorCones[i], t.conePenaltyS));
     }
     return {
       count: bounds + 1,
@@ -1500,7 +1501,7 @@ class Game {
       index: t.sectorIndex,
       running,
       elapsed: running
-        ? penalisedSector(t.lapTime - t.sectorStart, t.sectorCones[t.sectorIndex])
+        ? penalisedSector(t.lapTime - t.sectorStart, t.sectorCones[t.sectorIndex], t.conePenaltyS)
         : 0,
     };
   }
@@ -1520,7 +1521,7 @@ class Game {
     // has neither, and its raw splits against its raw bests are at least
     // consistent with each other.
     for (let i = 0; i < bounds + 1; i++) {
-      splits.push(i < sectorNow && done[i] != null ? penalisedSector(done[i], cones[i]) : null);
+      splits.push(i < sectorNow && done[i] != null ? penalisedSector(done[i], cones[i], conePenaltyFor(this.track)) : null);
     }
     // Against the run's own best sectors, which is what the driver was seeing.
     const best = r.manifest?.stats?.bestSectors ?? [];
@@ -2109,10 +2110,18 @@ class Game {
       `<span class="k${cls ? " " + cls : ""}">${k}</span><span class="v">${v}</span>`,
     );
     if (entry) {
-      row("Raw time", fmt(entry.raw));
+      const pen = conePenaltyFor(this.track);
+      if (entry.right != null) {
+        // The skidpad: two timed laps, averaged (D.10.4.1).
+        row("Right (timed)", fmt(entry.right));
+        row("Left (timed)", fmt(entry.left));
+        row("Average", fmt(entry.raw));
+      } else {
+        row("Raw time", fmt(entry.raw));
+      }
       if (entry.cones > 0) {
         rows.push('<span class="k">Cones</span>');
-        rows.push(`<span class="v pen">${entry.cones} x 2.000 = +${(entry.cones * CONE_PENALTY_S).toFixed(3)}</span>`);
+        rows.push(`<span class="v pen">${entry.cones} x ${pen.toFixed(3)} = +${(entry.cones * pen).toFixed(3)}</span>`);
       }
       if (entry.off > 0) {
         rows.push('<span class="k">Off course</span>');
@@ -2123,11 +2132,17 @@ class Game {
         // No time, and say why rather than showing a number that does not
         // count. The figure the rulebook would have given is worth knowing.
         rows.push('<span class="k total">Scored</span>');
-        rows.push('<span class="v total pen">NO TIME - OFF COURSE</span>');
-        const fsae = entry.raw + entry.cones * CONE_PENALTY_S
-          + entry.off * FSAE_OFF_COURSE_PENALTY_S;
-        rows.push('<span class="k">Under FSAE +20s</span>');
-        rows.push(`<span class="v">${fmt(fsae)}</span>`);
+        if (this.track?.scoring?.kind === "skidpad") {
+          // No +20 s on the skidpad: an off course, or the wrong laps, is a
+          // DNF under the rulebook too (D.10.3.2, D.10.3.3).
+          rows.push(`<span class="v total pen">DNF - ${entry.off > 0 ? "OFF COURSE" : "TIMED LAPS NOT RUN"}</span>`);
+        } else {
+          rows.push('<span class="v total pen">NO TIME - OFF COURSE</span>');
+          const fsae = entry.raw + entry.cones * pen
+            + entry.off * FSAE_OFF_COURSE_PENALTY_S;
+          rows.push('<span class="k">Under FSAE +20s</span>');
+          rows.push(`<span class="v">${fmt(fsae)}</span>`);
+        }
       } else {
         rows.push('<span class="k total">Scored</span>');
         rows.push(`<span class="v total">${fmt(entry.total)}</span>`);
@@ -2152,7 +2167,7 @@ class Game {
           // Scored, cones included, because the bests are: the time shown is
           // the one the sector competes with, and the cones say why.
           const hit = this.finishSectorCones?.[i] ?? 0;
-          const scored = penalisedSector(v, hit);
+          const scored = penalisedSector(v, hit, pen);
           const verdict = sectorVerdict(scored, this.finishBestBefore[i], entry.valid !== false);
           let tag;
           if (verdict.best) tag = '<span class="v" style="color:var(--gold)">best</span>';

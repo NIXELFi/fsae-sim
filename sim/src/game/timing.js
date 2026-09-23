@@ -51,9 +51,27 @@ export const CONE_PENALTY_S = 2.0;
  * through the slalom could hold the slalom sector's record on raw pace alone
  * -- the one place on the board where knocking cones over was free.
  */
-export function penalisedSector(split, cones) {
+export function penalisedSector(split, cones, penaltyS = CONE_PENALTY_S) {
   if (split == null) return null;
-  return split + (cones ?? 0) * CONE_PENALTY_S;
+  return split + (cones ?? 0) * penaltyS;
+}
+
+/** What one cone costs on this course: 2 s, or the skidpad's 0.125 s
+ *  (D.10.3.1). */
+export function conePenaltyFor(track) {
+  return track?.scoring?.conePenaltyS ?? CONE_PENALTY_S;
+}
+
+/**
+ * The skidpad's score from a run's sector splits (D.10.4.1): the timed
+ * right lap and the timed left lap, averaged. Null if either was not
+ * driven -- a run with the wrong number of laps is a DNF (D.10.3.3).
+ */
+export function skidpadScore(splits, scoring) {
+  const [a, b] = scoring.timedSectors;
+  const right = splits[a], left = splits[b];
+  if (right == null || left == null) return null;
+  return { right, left, raw: (right + left) / 2 };
 }
 
 /**
@@ -103,6 +121,7 @@ export const MOVING_MPS = 0.6;
 export class Timing {
   constructor(track) {
     this.track = track;
+    this.conePenaltyS = conePenaltyFor(track);
     /**
      * Called as each lap closes, with the scored entry and the sector splits
      * it was scored against. The splits are cleared for the next lap
@@ -170,7 +189,7 @@ export class Timing {
 
   get lapTime() { return this.state === "running" ? this.elapsed - this.lapStart : 0; }
 
-  get penaltyS() { return this.cones * CONE_PENALTY_S; }
+  get penaltyS() { return this.cones * this.conePenaltyS; }
 
   /**
    * Has this lap left the course?
@@ -242,7 +261,8 @@ export class Timing {
       // out through the finish gate, charges no sector and no lap.
       const i = this.sectorIndex;
       this.sectorCones[i] = (this.sectorCones[i] ?? 0) + newCones;
-      this.say(`CONE +${(newCones * CONE_PENALTY_S).toFixed(0)}s`, 1.6);
+      const pen = newCones * this.conePenaltyS;
+      this.say(`CONE +${Number.isInteger(pen) ? pen.toFixed(0) : pen.toFixed(3)}s`, 1.6);
     }
 
     // Off course: one excursion is one penalty, not one per frame, and it is
@@ -335,7 +355,7 @@ export class Timing {
       const prevBest = this.bestSectors[this.sectorIndex];
       const n = this.sectorIndex + 1;
       const hit = this.sectorCones[this.sectorIndex] ?? 0;
-      const scored = penalisedSector(split, hit);
+      const scored = penalisedSector(split, hit, this.conePenaltyS);
       const coneNote = hit > 0 ? `  (${hit} cone${hit === 1 ? "" : "s"})` : "";
       if (prevBest == null) {
         this.lastSplitDelta = null;
@@ -363,7 +383,13 @@ export class Timing {
     } else if (loc.s >= L - 3 && this.prevS < loc.s) {
       this.completeLap();
       this.state = "finished";
-      this.say("FINISH", 6);
+      const last = this.laps[this.laps.length - 1];
+      this.say(
+        last?.right != null ? `FINISH  R ${fmt(last.right)}  L ${fmt(last.left)}  = ${fmt(last.total)}`
+          : this.track.scoring?.kind === "skidpad" ? "FINISH - DNF, TIMED LAPS NOT RUN"
+          : "FINISH",
+        6,
+      );
       this.onCue?.("finish");
     }
 
@@ -393,7 +419,7 @@ export class Timing {
    */
   foldSectorBests() {
     for (let i = 0; i < this.sectorSplits.length; i++) {
-      const v = penalisedSector(this.sectorSplits[i], this.sectorCones[i]);
+      const v = penalisedSector(this.sectorSplits[i], this.sectorCones[i], this.conePenaltyS);
       if (v == null) continue;
       if (i > 0 && this.sectorSplits[i - 1] == null) continue;
       const prev = this.bestSectors[i];
@@ -417,7 +443,7 @@ export class Timing {
   }
 
   completeLap() {
-    const raw = this.lapTime;
+    let raw = this.lapTime;
     // The stretch from the last boundary to the line is a sector too, and it
     // was never recorded: `bounds.length` splits were pushed for
     // `bounds.length + 1` sectors, so every lap silently lost its final
@@ -431,19 +457,28 @@ export class Timing {
       while (this.sectorSplits.length < i) this.sectorSplits.push(null);
       this.sectorSplits[i] = raw - this.sectorStart;
     }
+    // The skidpad is not scored start to finish: it is the average of its
+    // two timed laps (D.10.4.1), and a run that did not time both is a DNF.
+    let skid = null, incomplete = false;
+    if (this.track.scoring?.kind === "skidpad") {
+      skid = skidpadScore(this.sectorSplits, this.track.scoring);
+      if (skid) raw = skid.raw;
+      else incomplete = true;
+    }
     const entry = {
       lap: this.lap,
       raw,
+      ...(skid ? { right: skid.right, left: skid.left } : {}),
       cones: this.cones,
       off: this.offCourse,
       total: raw + this.penaltyS,
       // An off course is a DNF. The lap is kept and shown -- a driver wants
       // to know what it was worth -- but it is not a time, so nothing that
       // ranks, references or averages may take it.
-      valid: !this.lapInvalid,
+      valid: !this.lapInvalid && !incomplete,
       // ...and whether the CAR was one this lap could have been driven in.
       // See `countsForRecords`.
-      counted: !this.lapInvalid && this.countsForRecords,
+      counted: !this.lapInvalid && !incomplete && this.countsForRecords,
     };
     this.laps.push(entry);
     if (entry.counted) {
