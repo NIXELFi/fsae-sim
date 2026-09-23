@@ -1352,6 +1352,7 @@ export class Renderer {
       // An imported body is not built from the vehicle parameters either.
       const meshes = buildCarMeshes(params);
       const gl = this.gl;
+      this.rebuildDriver(meshes);   // the figure follows the eye point
       const sw = this.car.steeringWheel;
       if (sw?.vao) gl.deleteVertexArray(sw.vao);
       for (const b of Object.values(sw?.buffers ?? {})) gl.deleteBuffer(b);
@@ -1371,25 +1372,20 @@ export class Renderer {
       // Same for an imported wheel: rebuild the body, keep the wheel.
       const meshes = buildCarMeshes(params);
       const gl = this.gl;
-      for (const key of ["body", "steeringWheel", "driver", "helmet", "upperArm", "forearm"]) {
+      for (const key of ["body", "steeringWheel"]) {
         const mesh = this.car[key];
         if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
         for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
       }
       this.car.body = this.makeMesh(meshes.body);
       this.car.steeringWheel = this.makeMesh(this.steerOverride ?? meshes.steeringWheel);
-      this.car.gloves = meshes.gloves ? this.makeMesh(meshes.gloves) : null;
-      this.car.driver = meshes.driver ? this.makeMesh(meshes.driver) : null;
-      this.car.helmet = meshes.helmet ? this.makeMesh(meshes.helmet) : null;
-      this.car.upperArm = meshes.upperArm ? this.makeMesh(meshes.upperArm) : null;
-      this.car.forearm = meshes.forearm ? this.makeMesh(meshes.forearm) : null;
-      this.arms = meshes.arms ?? null;
+      this.rebuildDriver(meshes);
       return;
     }
     const gl = this.gl;
     const rebuilt = buildCarMeshes(params);
     const body = rebuilt.body;
-    this.arms = rebuilt.arms ?? null;   // the shoulders follow the eye point
+    this.rebuildDriver(rebuilt);        // the figure and shoulders follow the eye point
     gl.bindBuffer(gl.ARRAY_BUFFER, this.car.body.buffers.position);
     gl.bufferData(gl.ARRAY_BUFFER, body.position, gl.STATIC_DRAW);
     this.car.body.count = body.count;
@@ -2602,7 +2598,8 @@ export class Renderer {
     const sc = this.carModel?.steerCentre ?? GEO.steerCentre;
     const dc = GEO.dashCentre;
     // The team's car: the dash where their assembly has it.
-    if (this.carModel?.cockpit) multiply(this.dashModel, this.chassis, this.carModel.cockpit.dash);
+    // (Only for the team's Strada: the matrix is for dash.glb's own frame.)
+    if (this.carModel?.cockpit && this.dashOverride) multiply(this.dashModel, this.chassis, this.carModel.cockpit.dash);
     else this.chain(this.dashModel, [
       this.chassis,
       translation(T[0], sc[0], sc[1], sc[2]),
@@ -2632,7 +2629,8 @@ export class Renderer {
     ]);
     const sc = this.carModel?.steerCentre ?? GEO.steerCentre;
     // The team's car: the wheel where their assembly has it (column at 18 deg).
-    if (this.carModel?.cockpit) {
+    // (Only for the team's wheel: the matrix is for steering-wheel.glb's frame.)
+    if (this.carModel?.cockpit && this.steerOverride) {
       return multiply(out, this.carModel.cockpit.steer, rotZ(T[1], -steerRad * (steerRatio ?? GEO.steeringRatio)));
     }
     return this.chain(out, [

@@ -441,7 +441,7 @@ function controlsFromGlb(doc, ctlAccs, frame) {
   for (const [key, acc] of ctlAccs) {
     const name = key.slice(4);
     const c = spec[name];
-    if (!c?.pivot || !c?.axis || !Array.isArray(c.curve)) continue;
+    if (!c?.pivot || !c?.axis || !Array.isArray(c.curve) || c.curve.length < 2) continue;
     const mesh = finish(acc);
     applyFrame(mesh, frame);
     out.push({ name, mesh, pivot: frame.point(c.pivot), axis: frame.direction(c.axis), curve: c.curve });

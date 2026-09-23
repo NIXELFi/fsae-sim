@@ -91,7 +91,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.7.7";
+export let SIM_VERSION = "0.7.8";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
@@ -806,8 +806,12 @@ class Game {
     if (r) {
       p.throttle = r.value("engine.aps") / 100;
       p.brake = r.value("brake.driver_load") / 100;
-      clutch = clutchLever(r.value("engine.rpm"),
-        (r.value("drivetrain.wheel_speed_rl") + r.value("drivetrain.wheel_speed_rr")) / 2,
+      // Runs before 2026-09-18 have no wheel speeds: take the rear wheels
+      // from the road speed instead (no wheelspin, but no phantom clutch).
+      const wheels = r.tel.byId.has("drivetrain.wheel_speed_rl")
+        ? (r.value("drivetrain.wheel_speed_rl") + r.value("drivetrain.wheel_speed_rr")) / 2
+        : (r.value("gps.speed") / (2 * Math.PI * SDM26.tireRadiusM)) * 60;
+      clutch = clutchLever(r.value("engine.rpm"), wheels,
         r.valueAt("engine.gear"), r.value("gps.speed"), r.valueAt("sim.launch_held") > 0.5);
     } else {
       const pt = this.powertrain, car = this.car;
@@ -817,6 +821,8 @@ class Game {
       clutch = clutchLever(pt.engineRpm, (wR * 60) / (2 * Math.PI), pt.gear + 1, car.speed,
         !!this.input.state?.launch);
     }
+    if (!Number.isFinite(clutch)) clutch = 0;
+    if (!Number.isFinite(p.clutch)) p.clutch = 0;
     // A hand, not a switch: at most full travel in 0.12 s either way.
     const dt = Math.min(this.lastDt ?? 1 / 60, 0.05);
     const step = dt / 0.12;
@@ -3284,7 +3290,10 @@ async function boot() {
     if (except !== dom.setupNow) syncSetupCard(dom.setupNow);
     if (except !== dom.stagingSetupCard) syncSetupCard(dom.stagingSetupCard);
   };
-  const onSheetChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.vehicle); };
+  const onSheetChange = (path) => {
+    if (path === "eyeHeightM") return onEye(dom.vehicle);
+    onParamChange(path); markEdited(); syncAllSetup(dom.vehicle);
+  };
   const onQuickChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.quickSetup); };
   const onCardChange = (path) => {
     if (path === "eyeHeightM") return onEye(dom.setupNow);
