@@ -86,7 +86,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.7.5";
+export let SIM_VERSION = "0.7.6";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
@@ -770,6 +770,24 @@ class Game {
     };
   }
 
+  /**
+   * The time the CAR drove since last frame, for the lap clock: the physics
+   * clock (`simTimeS`, the rig's fixed-step time on the desktop), not the
+   * frame's wall time. The frame dt is capped at 50 ms while the rig keeps
+   * driving through a stall of up to 250 ms, so a hitch used to take up to
+   * ~0.2 s off a lap. A clock that went backwards (a respawn resets it to
+   * 0) or jumped implausibly is re-based and counts nothing this frame.
+   */
+  timingDt(frameDt) {
+    const t = this.car?.simTimeS;
+    if (typeof t !== "number" || !Number.isFinite(t)) return frameDt;
+    const prev = this._timingSimT;
+    this._timingSimT = t;
+    if (prev == null) return frameDt;
+    const d = t - prev;
+    return d >= 0 && d < 1 ? d : 0;
+  }
+
   /** Put the car back on the centreline where it left the course. */
   recover() {
     const loc = this.track.locate(this.car.X, this.car.Y, this.car.psi);
@@ -1045,7 +1063,7 @@ class Game {
     const missedGates = this.track.checkGates ? this.track.checkGates(this.pose()) : [];
     const wasStaged = this.timing.state === "staged";
     const wasRunning = this.timing.state === "running";
-    this.timing.update(dt, loc, this.car.speed, hits, missedGates);
+    this.timing.update(this.timingDt(dt), loc, this.car.speed, hits, missedGates);
     for (const slalom of missedGates) {
       this.recorder?.event("missed-gate", {
         lap: this.timing.lap, slalom, x: round3(this.car.X), y: round3(this.car.Y), s: round3(loc.s),
