@@ -132,7 +132,13 @@ console.log("\nLOW SPEED  (full lock, creeping off the line)");
   const kinematic = (car.u * Math.tan(car.delta)) / SDM26.wheelbaseM;
   check("yaw rate vs kinematic at 4 s", car.r / kinematic, 0.7, 1.3, "x");
   check("peak slide velocity", peakSlide, 0, 0.6, " m/s");
-  check("still going forward", car.u, 0.8, 4, " m/s");
+  // Floor 0.4, was 0.8. 2026-09-22: the launch clutch now blends in as the
+  // slip closes rather than as the driveline speeds up (the old blend bogged
+  // every full-throttle pull-away to ~1100 rpm). At 15 % pedal the ETC plate
+  // is on its idle floor and the engine makes nothing net at idle, so the car
+  // creeps at ~0.6 m/s instead of ~2 -- on the clutch at idle, as a driver
+  // would. What this check guards is that it moves, turns and does not slide.
+  check("still going forward", car.u, 0.4, 4, " m/s");
 }
 
 // ------------------------------------------------------------------ accel ---
@@ -150,7 +156,11 @@ console.log("\nACCELERATION  (75 m from standstill, Helios reference ~4.2 s)");
     car.respawn(0, 0, 0, 0);
     let t = 0;
     const shiftAt = [];
-    while (t < 12 && car.X < 75) {
+    // D.9.2.3: staged 0.30 m behind the start line, timed from the line to
+    // 75 m past it. `tLine` is when the car crossed it.
+    let tLine = null, tAt75 = null;
+    while (t < 12 && car.X < 75.3) {
+      if (tLine == null && car.X >= 0.3) tLine = t;
       if (pt.canShift() && pt.engineRpm > pt.optimalUpshiftRpm() && pt.gear < 5) {
         if (pt.requestUpshift()) {
           shiftAt.push({ t: +t.toFixed(2), gear: pt.gear + 2, rpm: Math.round(pt.engineRpm) });
@@ -164,8 +174,10 @@ console.log("\nACCELERATION  (75 m from standstill, Helios reference ~4.2 s)");
       }
       car.step(DT, { steer: 0, throttle, brake: 0 });
       t += DT;
+      if (tAt75 == null && car.X >= 75) tAt75 = t;
     }
-    return { t, car, shiftAt };
+    // Standing time to 75 m, and the timed run from the line to 75 m past it.
+    return { t, car, shiftAt, tStand: tAt75 ?? t, tFromLine: tLine == null ? null : t - tLine };
   };
 
   const good = idealLaunch(true);
@@ -198,13 +210,24 @@ console.log("\nACCELERATION  (75 m from standstill, Helios reference ~4.2 s)");
   // inertia makes the 75 m WORSE by 1.1 s, which only makes sense if wheelspin
   // management, not the car, is the binding constraint. A slip definition that
   // stays valid at low speed is the fix.
-  check("75 m time (managed launch)", good.t, 4.90, 5.40, " s");
+  //
+  // 2026-09-22: with the launch clutch and the clutch lock fixed, standing
+  // 75 m went 5.15 -> 4.84 s, and first now shifts at 12,830 rpm rather than
+  // 14,300. Banded around the model again; the rule-true number is the one
+  // from the line, below.
+  check("75 m time (managed launch, from standstill)", good.tStand, 4.60, 5.05, " s");
+  // What the rules time (D.9.2.3), against the real 4.2-4.4 s (the 5/3 log
+  // brackets 4.28-4.63). The rest of the gap is the launch itself: the real
+  // car spins the rears to ~55 km/h and still pulls ~1 g, which this tyre's
+  // longitudinal curve does not give at large slip (see the 2026-09-22
+  // handoff).
+  check("75 m time from the line (D.9.2.3)", good.tFromLine, 4.30, 4.85, " s");
   check("speed at 75 m", good.car.speed * 3.6, 95, 130, " km/h");
   console.log(`  shifts: ${good.shiftAt.map((s) => `${s.gear} @ ${s.t}s/${s.rpm}rpm`).join(", ")}`);
 
   const crude = idealLaunch(false);
-  console.log(`  same run, throttle pinned open: ${crude.t.toFixed(2)} s ` +
-              `(+${(crude.t - good.t).toFixed(2)} s lost to wheelspin)`);
+  console.log(`  same run, throttle pinned open: ${crude.tStand.toFixed(2)} s ` +
+              `(+${(crude.tStand - good.tStand).toFixed(2)} s lost to wheelspin)`);
 }
 
 // --------------------------------------------------------------- braking ---

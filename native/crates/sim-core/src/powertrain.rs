@@ -547,7 +547,9 @@ impl GearedEngine {
 
     /// `_speed` is no longer consulted: the clutch is decided by the two
     /// shaft speeds, which is what actually settles whether it is slipping.
-    fn clutch_capacity(&self, throttle: f64, speed: f64, clutch_side_rpm: f64) -> f64 {
+    /// `te` is the engine's torque this step (idle plate included), which the
+    /// pull-away capacity is sized from.
+    fn clutch_capacity(&self, throttle: f64, speed: f64, clutch_side_rpm: f64, te: f64) -> f64 {
         if self.shift_timer > 0.0 {
             return 0.0;
         }
@@ -582,14 +584,32 @@ impl GearedEngine {
         // Pulling away: a fraction of what the engine is making RIGHT NOW --
         // half of it at rest, all of it at the launch rpm, more above. See
         // powertrain.js for why it must not be anchored to the launch rpm.
-        let avail = self.wot_torque_nm(self.engine_rpm) * (throttle * 1.15).min(1.0);
-        let frac = 0.5 + 0.5 * (self.engine_rpm / target);
+        // Wide-open torque x pedal, or what the engine is actually making if
+        // that is more (at a trickle the idle plate is). See powertrain.js.
+        let avail = (self.wot_torque_nm(self.engine_rpm) * (throttle * 1.15).min(1.0)).max(te);
+        // The rpm the left foot holds the engine at: the launch rpm at full
+        // throttle, near idle at a trickle -- a driver creeping off at 15 %
+        // does not rev it to 7000 first. See powertrain.js.
+        let hold = self.idle_rpm + (target - self.idle_rpm) * (throttle * 1.15).clamp(0.0, 1.0);
+        let frac = 0.5 + 0.5 * (self.engine_rpm / hold.max(1.0));
         let slipping = (avail * frac).clamp(0.0, self.clutch_capacity_nm);
         // Blended into the full capacity as the slip closes, and the blend is
         // CONTINUOUS on purpose; see powertrain.js.
         // Blended into the full capacity as the DRIVELINE spins up toward the
         // launch rpm -- not on the slip; see powertrain.js.
-        let w = (clutch_side_rpm / target).clamp(0.0, 1.0);
+        // 2026-09-22: blended on the SLIP closing, not on the driveline's
+        // speed. Keyed to driveline speed the capacity reached the full
+        // 220 N.m while the crank was still far above the clutch, so a
+        // pull-away dragged the engine to ~1100 rpm and the car crawled out
+        // of the low-rpm hole for a second. The old objection to a slip key --
+        // the clutch giving way in ordinary low-gear driving -- came from the
+        // clutch never re-locking (see `step`), which is fixed; locked, the
+        // two speeds are equal and this is the full capacity. See powertrain.js.
+        let ratio = (clutch_side_rpm / self.engine_rpm.max(1.0)).clamp(0.0, 1.0);
+        // r^8 by squaring, the same three multiplies as the JS, for parity.
+        let r2 = ratio * ratio;
+        let r4 = r2 * r2;
+        let w = r4 * r4;
         slipping + (self.clutch_capacity_nm - slipping) * w
     }
 
@@ -696,15 +716,27 @@ impl PowertrainModel for GearedEngine {
         let mut omega_e = self.engine_rpm * RPM_TO_RADS;
         let clutch_side = wheel_omega * n;
         let slip = omega_e - clutch_side;
-        let cap = self.clutch_capacity(throttle, speed, clutch_side * RADS_TO_RPM);
         let te = self.engine_torque(self.engine_rpm, throttle);
+        let cap = self.clutch_capacity(throttle, speed, clutch_side * RADS_TO_RPM, te);
 
         // A clutch cannot be locked below idle speed. That is not a detail -- it
         // is the reason you slip a clutch pulling away, and without it the
         // model locked at a standstill and pinned the engine to a stall-guard
         // floor instead of letting it idle.
-        let lockable =
-            cap > 0.0 && slip.abs() < 8.0 && clutch_side * RADS_TO_RPM >= self.idle_rpm * 0.95;
+        //
+        // It locks when the torque that closes the slip this step is within
+        // the clutch's capacity -- it is stuck, whatever the slip -- as well
+        // as below 8 rad/s. 2026-09-22: with only the 8 rad/s test, the tyre's
+        // reaction (which `stick` does not see) held ~29 rad/s of permanent
+        // slip under hard acceleration: the clutch never read as locked,
+        // `can_shift` stayed false, auto-shift held first to 14,300 rpm and
+        // rpm read 2-3 % high everywhere.
+        let n_gbox = n / self.primary;
+        let iw_side = self.wheel_side_inertia_kg_m2 + self.gearbox_inertia_kg_m2 * n_gbox * n_gbox;
+        let stick = (slip / dt + te / self.crank_inertia_kg_m2) / (1.0 / self.crank_inertia_kg_m2 + (n * n) / iw_side);
+        let lockable = cap > 0.0
+            && (slip.abs() < 8.0 || stick.abs() <= cap)
+            && clutch_side * RADS_TO_RPM >= self.idle_rpm * 0.95;
         if lockable && te.abs() <= cap {
             self.slipping = false;
             // Floor at idle, not below it: a running engine cannot be dragged
@@ -733,10 +765,8 @@ impl PowertrainModel for GearedEngine {
         // clutch-side speed this step (see powertrain.js). Only a slip that
         // needs more than the clutch has slips at capacity.
         // Both sides move (see powertrain.js): crank at Ie, wheel side at
-        // IwSide, coupled through n. Same expression, same order.
-        let n_gbox = n / self.primary;
-        let iw_side = self.wheel_side_inertia_kg_m2 + self.gearbox_inertia_kg_m2 * n_gbox * n_gbox;
-        let stick = (slip / dt + te / self.crank_inertia_kg_m2) / (1.0 / self.crank_inertia_kg_m2 + (n * n) / iw_side);
+        // IwSide, coupled through n. `stick` is computed above, same
+        // expression, same order.
         let passed = if stick.abs() <= cap {
             stick
         } else if dir == 0.0 {

@@ -298,7 +298,7 @@ export class Powertrain {
    * with throttle at low speed so the driver can slip it off the line; solid
    * once the car is rolling.
    */
-  clutchCapacity(throttle, speed, clutchSideRpm) {
+  clutchCapacity(throttle, speed, clutchSideRpm, te = 0) {
     if (this.shiftTimer > 0) return 0;
     const full = 220; // EST: well above peak torque, so it locks when rolling
     // Off the throttle with the driveline turning slower than the engine can
@@ -350,8 +350,19 @@ export class Powertrain {
     // target, pass all of it, so the engine sits steady and everything it
     // makes goes to the road. Above it, pass more than it makes and the crank
     // is pulled back down. That is what a left foot does.
-    const avail = this.wotTorque(this.engineRpm) * Math.min(1, throttle * 1.15);
-    const frac = 0.5 + 0.5 * (this.engineRpm / target);
+    // ...or what the engine is actually making, if that is more (at a trickle
+    // the idle plate is). At 15 % pedal the ETC plate sits on the idle floor
+    // and the engine makes nothing net at 2000 rpm, so a creep is the clutch
+    // lugging it a few hundred rpm under idle -- which is what a driver
+    // slipping the clutch at idle does.
+    const avail = Math.max(this.wotTorque(this.engineRpm) * Math.min(1, throttle * 1.15), te);
+    // The rpm the left foot holds the engine at: the launch rpm at full
+    // throttle, near idle at a trickle -- a driver creeping off at 15 % does
+    // not rev it to 7000 first. (2026-09-22, with the slip-keyed blend below:
+    // anchored to the launch rpm at every throttle, a creep at 15 % passed
+    // almost nothing and the car barely moved.)
+    const hold = this.v.idleRpm + (target - this.v.idleRpm) * Math.max(0, Math.min(1, throttle * 1.15));
+    const frac = 0.5 + 0.5 * (this.engineRpm / Math.max(1, hold));
     const slipping = Math.max(0, Math.min(full, avail * frac));
     // ...blended into the full capacity as the slip closes, because by then it
     // is not being slipped any more. The blend has to be CONTINUOUS: a plain
@@ -365,7 +376,19 @@ export class Powertrain {
     // blend had the clutch giving way in ordinary driving -- which is also
     // what broke the JS/Rust parity, because the capacity then fed back into
     // the engine speed that computed it.
-    const w = Math.max(0, Math.min(1, clutchSideRpm / target));
+    //
+    // 2026-09-22: blended on the SLIP closing, not on the driveline's speed.
+    // Keyed to driveline speed the capacity reached the full 220 N.m while the
+    // crank was still far above the clutch, so a pull-away dragged the engine
+    // to ~1100 rpm and the car crawled out of the low-rpm hole for a second.
+    // The objection above to a slip key -- the clutch giving way in ordinary
+    // driving -- came from the clutch never re-locking (see `step`), which is
+    // fixed: locked, the two speeds are equal and this is the full capacity.
+    const ratio = Math.max(0, Math.min(1, clutchSideRpm / Math.max(1, this.engineRpm)));
+    // r^8 by squaring, the same three multiplies as the Rust, for parity.
+    const r2 = ratio * ratio;
+    const r4 = r2 * r2;
+    const w = r4 * r4;
     return slipping + (full - slipping) * w;
   }
 
@@ -406,9 +429,8 @@ export class Powertrain {
     let omegaE = this.engineRpm * RPM_TO_RADS;
     const omegaClutchSide = rearWheelOmega * n;
     const slip = omegaE - omegaClutchSide;
-    const cap = this.clutchCapacity(throttle, speed, omegaClutchSide * RADS_TO_RPM);
-
     const Te = this.engineTorque(this.engineRpm, throttle);
+    const cap = this.clutchCapacity(throttle, speed, omegaClutchSide * RADS_TO_RPM, Te);
 
     // Try locked first: does the clutch have enough capacity to hold the
     // engine and driveline together at the acceleration that implies?
@@ -418,8 +440,17 @@ export class Powertrain {
     // rather than letting it idle. The car then sat at 1323 rpm instead of the
     // 2000 it actually idles at.
     const clutchSideRpm = omegaClutchSide * RADS_TO_RPM;
+    // It locks when the torque that closes the slip this step is within the
+    // capacity -- it is stuck, whatever the slip -- as well as below 8 rad/s.
+    // 2026-09-22: with only the 8 rad/s test the tyre's reaction (which
+    // `stick` does not see) held ~29 rad/s of permanent slip under hard
+    // acceleration, so the clutch never read as locked, canShift stayed false,
+    // auto-shift held first to 14,300 rpm and rpm read 2-3 % high.
+    const nGboxS = n / v.primaryReduction;
+    const IwSide = 2 * v.wheelInertiaRearKgM2 + v.gearboxInertiaKgM2 * nGboxS * nGboxS;
+    const stick = (slip / dt + Te / v.engineInertiaKgM2) / (1 / v.engineInertiaKgM2 + (n * n) / IwSide);
     const lockable =
-      cap > 0 && Math.abs(slip) < 8 && n > 0 && clutchSideRpm >= v.idleRpm * 0.95;
+      cap > 0 && (Math.abs(slip) < 8 || Math.abs(stick) <= cap) && n > 0 && clutchSideRpm >= v.idleRpm * 0.95;
     let locked = false;
 
     if (lockable) {
@@ -465,9 +496,7 @@ export class Powertrain {
     // next step corrects it. Treating the wheel side as fixed is not: in
     // first, n^2 Ie is ten times the wheel inertia and the landing torque
     // would stop the wheel dead every step.
-    const nGbox = n / v.primaryReduction;
-    const IwSide = 2 * v.wheelInertiaRearKgM2 + v.gearboxInertiaKgM2 * nGbox * nGbox;
-    const stick = (slip / dt + Te / v.engineInertiaKgM2) / (1 / v.engineInertiaKgM2 + (n * n) / IwSide);
+    // `stick` (with nGbox and IwSide) is computed above, before the lock test.
     const passed = Math.abs(stick) <= cap
       ? stick
       : dir === 0 ? Math.max(-cap, Math.min(cap, Te)) : dir * cap;
