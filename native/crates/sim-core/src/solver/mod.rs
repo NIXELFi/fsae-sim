@@ -52,6 +52,25 @@ pub struct Controls {
     pub brake: f64,
 }
 
+impl Controls {
+    /// The controls as the solver may use them: every non-finite value is
+    /// zero (a NaN pedal is a pedal nobody is pressing), throttle and brake
+    /// are in [0, 1] and steer in [-1, 1]. One NaN reaching the integrator
+    /// poisons the state for good -- every later substep is NaN -- so the
+    /// solvers take their controls through this, whatever the caller sent.
+    pub fn sanitized(self) -> Self {
+        let f = |x: f64, lo: f64, hi: f64| if x.is_finite() { x.clamp(lo, hi) } else { 0.0 };
+        Self { steer: f(self.steer, -1.0, 1.0), throttle: f(self.throttle, 0.0, 1.0), brake: f(self.brake, 0.0, 1.0) }
+    }
+}
+
+/// How much of a requested `step` a solver integrates: non-finite or
+/// negative is nothing (a NaN `dt` would otherwise pass `min(0.1)` as
+/// 100 ms), and never more than 100 ms of catch-up.
+pub(crate) fn step_span(dt: f64) -> f64 {
+    if dt.is_finite() && dt > 0.0 { dt.min(0.1) } else { 0.0 }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChassisState {
     /// Body-frame longitudinal velocity (m/s).
@@ -212,10 +231,14 @@ pub fn build(fidelity: Fidelity, chassis: Chassis) -> Box<dyn Solver> {
 /// torque. A turning wheel sees exactly `sign(w) * tb` as before; a stopped
 /// one is held; nothing overshoots through zero.
 pub(crate) fn brake_torque(w: f64, t_free: f64, inertia: f64, tb: f64, dt: f64) -> f64 {
-    if tb <= 0.0 {
+    // `!(tb > 0)` also catches a NaN pedal torque.
+    if !(tb > 0.0 && tb.is_finite()) {
         return 0.0;
     }
-    (t_free + inertia * w / dt).clamp(-tb, tb)
+    let want = t_free + inertia * w / dt;
+    // A non-finite demand (a NaN tyre force) must not become a NaN brake:
+    // `clamp` passes NaN straight through.
+    if want.is_finite() { want.clamp(-tb, tb) } else { 0.0 }
 }
 
 /// Steering actuator shared by every solver: a rate- and acceleration-limited

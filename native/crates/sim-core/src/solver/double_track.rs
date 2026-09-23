@@ -283,7 +283,8 @@ impl Solver for DoubleTrackSolver {
     }
 
     fn step(&mut self, dt: f64, controls: Controls) {
-        let mut remaining = dt.min(0.1);
+        let mut remaining = super::step_span(dt); // never more than 100 ms of catch-up
+        let controls = controls.sanitized();
         while remaining > 1e-9 {
             let h = SUBSTEP.min(remaining);
             self.substep(h, controls);
