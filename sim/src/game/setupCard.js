@@ -67,8 +67,11 @@ const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
  * @param onSlot    (action, id) => void, for "load", "save" and "baseline"
  * @param model     show the vehicle-model switch (desktop rig only: the
  *                  browser build has just the bicycle)
+ * @param onLook    (look) => void: show the car-appearance switch ("cad" /
+ *                  "classic"). Appearance only -- it writes no parameter, so
+ *                  it never touches whether a time counts.
  */
-export function renderSetupCard(root, { onChange, onSlot, model = false } = {}) {
+export function renderSetupCard(root, { onChange, onSlot, model = false, onLook = null } = {}) {
   if (!root) return;
   const items = cardItems();
   root.innerHTML = `
@@ -81,6 +84,12 @@ export function renderSetupCard(root, { onChange, onSlot, model = false } = {}) 
       <span class="sn-name">MODEL</span>
       <button class="secondary" data-model-set="2">Bicycle</button>
       <button class="secondary" data-model-set="3">4-wheel &beta;</button>
+    </div>` : ""}
+    ${onLook ? `
+    <div class="sn-model" data-look title="How the car looks, and nothing else: the physics, timing, cones and force feedback are identical either way, and your times count on both.">
+      <span class="sn-name">LOOK</span>
+      <button class="secondary" data-look-set="cad">SDM26</button>
+      <button class="secondary" data-look-set="classic">Classic</button>
     </div>` : ""}
     <div class="setup-now-rows">
       ${items.map((it) => `
@@ -135,6 +144,9 @@ export function renderSetupCard(root, { onChange, onSlot, model = false } = {}) 
     b.addEventListener("click", () => onSlot?.("save", b.dataset.slotSave));
   });
   root.querySelector("[data-baseline]")?.addEventListener("click", () => onSlot?.("baseline"));
+  root.querySelectorAll("[data-look-set]").forEach((b) => {
+    b.addEventListener("click", () => { onLook?.(b.dataset.lookSet); syncSetupCard(root); });
+  });
   root.querySelectorAll("[data-model-set]").forEach((b) => {
     b.addEventListener("click", () => {
       writeParam("vehicleModel", Number(b.dataset.modelSet));
@@ -174,6 +186,11 @@ export function syncSetupCard(root, note = null) {
   const current = readParam("vehicleModel") ?? 2;
   for (const b of root.querySelectorAll("[data-model-set]")) {
     b.classList.toggle("active", Number(b.dataset.modelSet) === current);
+  }
+  let look = "cad";
+  try { if (localStorage.getItem("fsae.visualCar") === "classic") look = "classic"; } catch {}
+  for (const b of root.querySelectorAll("[data-look-set]")) {
+    b.classList.toggle("active", b.dataset.lookSet === look);
   }
 
   const slots = loadSlots();

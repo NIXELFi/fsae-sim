@@ -149,6 +149,8 @@
   }
   .seed-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; margin-top: 10px; }
   .seed-row[hidden] { display: none; }
+  .appearance { margin-bottom: 18px; }
+  .appearance .field { display: flex; gap: 10px; align-items: center; max-width: 320px; }
   #hsetMark { position: absolute; width: 0; height: 0; overflow: hidden; } /* a <symbol> sheet only: `hidden` does not hide an <svg> sized by CSS, and display:none can break <use> */
   .seed-row .field { margin: 0; }
   .seed-row input[type="text"] { font-family: var(--mono); text-transform: uppercase; letter-spacing: .08em; }
@@ -1033,6 +1035,16 @@
 
         <!-- ============ Car ============ -->
         <div class="pane" data-pane="car" role="tabpanel">
+          <div class="appearance">
+            <h3>Car appearance</h3>
+            <p class="lead">Only how the car looks. The physics, timing, cones, force feedback and leaderboard are identical either way.</p>
+            <label class="field"><span>Model</span>
+              <select id="visualCar">
+                <option value="cad">SDM26 (team CAD)</option>
+                <option value="classic">Classic</option>
+              </select>
+            </label>
+          </div>
           <div class="quick-setup">
             <h3>Run-to-run setup</h3>
             <p class="lead">What the team changes between runs. The same values as the Vehicle model sheet and the in-car setup menu; roll stiffness and brake bias also have their own buttons (Controls &rarr; Setup).</p>

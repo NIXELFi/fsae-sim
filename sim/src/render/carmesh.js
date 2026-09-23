@@ -112,7 +112,10 @@ export const GEO = {
   // edge came within 60 mm of the driver's eye line and filled the windscreen.
   // Lower the column, the whole assembly follows, and you look DOWN at the
   // dash the way you do in the car.
-  steerCentre: [0.28, 0.435, 0],
+  // 2026-09-23: back up 30 mm now the dash is where the car has it, up under
+  // the front hoop (below), rather than on the column where it crowded the
+  // eye line.
+  steerCentre: [0.28, 0.465, 0],
   steerTiltRad: (22 * Math.PI) / 180,
   // The team's actual wheel (see packages/widgets/src/steering-wheel/assets):
   // a carbon plate with two kidney cut-outs, grips wrapping their outer edge,
@@ -138,7 +141,13 @@ export const GEO = {
   // up toward a driver whose eye is 100 mm above it and behind it; adding more
   // points the screen past them at the sky, which is what the first attempt
   // did and it looked exactly as wrong as it was.
-  dashCentre: [0, 0.128, 0.018],
+  // 2026-09-23: moved to where the car has it -- up under the front roll
+  // hoop's top tube and the cowl (the team's SolidWorks assembly), not on the
+  // column. The hoop's top tube crosses the centreline 0.648 m ahead of the
+  // origin with its underside 0.605 m up (chassis CAD); in the column frame
+  // (22 deg) this puts the display centre at (0.595, 0.535) in the chassis,
+  // the case's top ~10 mm under the tube and its back clear of it.
+  dashCentre: [0, 0.183, 0.266],
   /** The DISPLAY, 108 x 65 mm. What the screen quad is sized from. */
   dashHalfWidth: 0.054,
   dashHalfHeight: 0.0324,

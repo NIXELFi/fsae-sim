@@ -3,7 +3,7 @@
 import { SDM26 } from "./vehicle/params.js";
 import { TIRE_INFO } from "./vehicle/tire.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
-import { loadCarModel, loadWheelModel, loadBodyModel } from "./render/glbcar.js";
+import { loadCarModel, loadWheelModel, loadBodyModel, loadSteeringWheelModel, loadDashModel } from "./render/glbcar.js";
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
@@ -36,6 +36,10 @@ import { Recorder, datumFor } from "./game/recorder.js";
 /** Below this many samples the driver never really started, so a dropped
  *  run is not worth mentioning -- they pressed restart on the line. */
 const SAMPLE_HZ_FLOOR = 100;
+/** Car appearance, per machine: "cad" (the default) or "classic". */
+function storedVisualCar() {
+  try { return localStorage.getItem("fsae.visualCar") === "classic" ? "classic" : "cad"; } catch { return "cad"; }
+}
 // Rows between mid-lap checkpoints of a run to disk: ~10 s at 100 Hz.
 const CHECKPOINT_ROWS = 1000;
 
@@ -86,7 +90,7 @@ const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRe
  * browser fallback -- checked against package.json and tauri.conf.json by
  * `tools/validate.js`, so it cannot drift again either.
  */
-export let SIM_VERSION = "0.7.6";
+export let SIM_VERSION = "0.7.7";
 
 /** Ask the shell what build this is; browsers keep the fallback. */
 async function resolveSimVersion() {
@@ -124,6 +128,11 @@ const CAMERAS = [
   // than captured here, so the eye-height slider actually moves the camera.
   // A shade of down-pitch: a driver sits low and looks at the road, and the
   // horizon on real onboards sits above centre frame, not on it.
+  // The in-car views never roll with the body and the head never moves side
+  // to side (2026-09-23, from driving it: roll tilting the world and the head
+  // sliding with lateral g read as the camera wobbling, not the car). That is
+  // not an option -- the lean and eye-lead code is gone. Pitch and the
+  // fore-aft head slide under braking stay.
   { name: "Cockpit", live: true, pitch: -0.04, fov: 50, rigid: true },
   { name: "Nose", ahead: 1.35, height: 0.46, pitch: -0.03, fov: 55, rigid: true },
   // Closer, lower and narrower than it was: at 58 deg from 4.6 m the car was
@@ -278,11 +287,9 @@ class Game {
     this.chaseYawRate = 0;
     /** A knock through the camera on a cone strike, decaying. */
     this.hitKick = 0;
-    // The driver's head, relative to the chassis: outboard lean, fore-and-aft
-    // slide, and the eyes leading into the corner. See `headLatMPerG`.
-    this.headLat = 0;
+    // The driver's head, relative to the chassis: the fore-and-aft slide under
+    // braking and acceleration only. Nothing moves it side to side.
     this.headLong = 0;
-    this.headYaw = 0;
     this.bumpPhase = 0;
     this.spinFront = 0;   // integrated wheel angle, for the visible rims
     this.spinRear = 0;
@@ -449,7 +456,6 @@ class Game {
       console.warn(this.cadStatus);
       this.cadCar = null;
     } else if (this.cadCar) {
-      this.renderer.useCarModel(this.cadCar);
       const st = this.cadCar.stats;
       this.cadStatus = st.problems.length
         ? `CAD model loaded with problems: ${st.problems.join("; ")}`
@@ -459,6 +465,29 @@ class Game {
     } else {
       this.cadStatus = "No data/car.glb -- drawing the procedural body.";
     }
+    // The team's own steering wheel, on whatever body is drawn. Fetched once.
+    if (this.cadSteer === undefined) {
+      this.cadSteer = await loadSteeringWheelModel("./data/steering-wheel.glb");
+      if (this.cadSteer?.error) {
+        console.warn(`data/steering-wheel.glb could not be read: ${this.cadSteer.error}`);
+        this.cadSteer = null;
+      } else if (this.cadSteer) {
+        console.info(`CAD steering wheel: ${this.cadSteer.stats.triangles.toLocaleString()} triangles`);
+      }
+    }
+
+    // And the real dash case (the AiM Strada), around the live screen.
+    if (this.cadDash === undefined) {
+      this.cadDash = await loadDashModel("./data/dash.glb");
+      if (this.cadDash?.error) {
+        console.warn(`data/dash.glb could not be read: ${this.cadDash.error}`);
+        this.cadDash = null;
+      } else if (this.cadDash) {
+        console.info(`CAD dash: ${this.cadDash.stats.triangles.toLocaleString()} triangles`);
+      }
+    }
+    // Whichever look the driver picked (Car tab -> Car appearance).
+    this.applyVisualCar();
     this.cadWheel = cadWheel ?? null;
     if (this.cadWheel?.error) {
       this.wheelStatus = `data/wheel.glb could not be read: ${this.cadWheel.error}`;
@@ -746,6 +775,22 @@ class Game {
     // Numpad5), an imported .hset, a launch -- pushes here, so the time-counts
     // latch is checked here and none of them can skip it.
     this.refreshTimeCounts();
+  }
+
+  /**
+   * The car's LOOK: the team's CAD (car, steering wheel, dash, the
+   * suspension rig) or the classic procedural car. Renderer only -- nothing
+   * the physics, timing, cones, force feedback or the run log reads depends
+   * on it (tools/test_visual_car.mjs drives the same inputs under both and
+   * compares). A rig preference, kept per machine; not a setup parameter.
+   */
+  applyVisualCar() {
+    const r = this.renderer;
+    if (!r) return;
+    const cad = (this.visualCar ?? storedVisualCar()) !== "classic";
+    r.steerOverride = cad ? this.cadSteer?.mesh ?? null : null;
+    r.dashOverride = cad ? this.cadDash?.mesh ?? null : null;
+    r.useCarModel(cad && this.cadCar ? this.cadCar : null);
   }
 
   /** The model actually driving: the browser build only has the bicycle. */
@@ -1137,16 +1182,12 @@ class Game {
     const k = Math.min(1, dt * 9);
     this.camRoll += (((tel.ayG * SDM26.rollGradientDegG) * Math.PI) / 180 - this.camRoll) * k;
     this.camPitch += (((tel.axG * SDM26.pitchGradientDegG) * Math.PI) / 180 - this.camPitch) * k;
-    // ---- the driver's head, which is not bolted to the chassis ----
-    // Slower than the chassis attitude above: a body on a six-point belt is
-    // not a spring-mounted mass, it arrives late and settles late. Positive
-    // ay is a LEFT turn and the body is thrown to the driver's RIGHT, which
-    // is +z in the chassis frame; braking is negative ax and throws the body
-    // forward, which is +x.
+    // ---- the driver's head: fore-and-aft only ----
+    // Slower than the chassis attitude above: a body on a six-point belt
+    // arrives late and settles late. Braking is negative ax and throws the
+    // body forward, +x. No sideways lean and no eye-lead into corners.
     const hk = Math.min(1, dt * 6);
-    this.headLat += (tel.ayG * SDM26.headLatMPerG - this.headLat) * hk;
     this.headLong += (-tel.axG * SDM26.headLongMPerG - this.headLong) * hk;
-    this.headYaw += (((tel.ayG * SDM26.headYawDegPerG) * Math.PI) / 180 - this.headYaw) * hk;
     this.bumpPhase += dt * (2 + this.car.speed * 0.55);
 
     // ---- g-g trail ----
@@ -1415,8 +1456,8 @@ class Game {
     sv.ahead = (cam.live ? SDM26.eyeAheadOfCgM : cam.ahead) + (cam.rigid ? this.headLong : 0);
     sv.height = cam.orbit ? (this.orbitHeight ?? cam.height)
       : cam.live ? SDM26.eyeHeightM : cam.height;
-    sv.lateral = cam.rigid ? this.headLat : 0;
-    sv.yawOffset = cam.rigid ? this.headYaw : 0;
+    sv.lateral = 0;
+    sv.yawOffset = 0;
     sv.pitchOffset = cam.pitch;
     sv.rigid = cam.rigid;
     // The cockpit camera sits inside the helmet; the driver is for the
@@ -2069,9 +2110,7 @@ class Game {
     // head moves shows up in old runs too.
     const ay = r.value("imu.lat_g");
     const ax = r.value("imu.long_g");
-    this.headLat = ay * SDM26.headLatMPerG;
     this.headLong = -ax * SDM26.headLongMPerG;
-    this.headYaw = ((ay * SDM26.headYawDegPerG) * Math.PI) / 180;
     this.bumpPhase += (this.lastDt ?? 1 / 60) * (2 + Math.abs(car.u) * 0.55);
     // The car's own dash, from the log rather than from a live session that
     // ended twenty minutes ago.
@@ -3215,6 +3254,21 @@ async function boot() {
   const onQuickChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.quickSetup); };
   const onCardChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.setupNow); };
   const onStagingChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.stagingSetupCard); };
+  // Car appearance (Car tab): the look only, per machine, the CAD by default.
+  // Two switches over one choice: this select, and the LOOK row on the
+  // staging card. Either keeps the other in step.
+  const visualSel = document.getElementById("visualCar");
+  const setVisualCar = (look) => {
+    const v = look === "classic" ? "classic" : "cad";
+    try { localStorage.setItem("fsae.visualCar", v); } catch {}
+    if (visualSel) visualSel.value = v;
+    if (game) { game.visualCar = v; game.applyVisualCar(); }
+    syncSetupCard(dom.stagingSetupCard);
+  };
+  if (visualSel) {
+    visualSel.value = storedVisualCar();
+    visualSel.addEventListener("change", () => setVisualCar(visualSel.value));
+  }
   renderSpecSheet(dom.vehicle, onSheetChange);
   renderQuickSetup(dom.quickSetup, onQuickChange);
   /**
@@ -3261,7 +3315,7 @@ async function boot() {
   // The staging card, and only it, carries the vehicle-model switch: the
   // last look before the green is where a driver picks what they are about
   // to drive. Desktop only -- the browser build has just the bicycle.
-  renderSetupCard(dom.stagingSetupCard, { onChange: onStagingChange, onSlot: onSlot(dom.stagingSetupCard), model: isDesktop });
+  renderSetupCard(dom.stagingSetupCard, { onChange: onStagingChange, onSlot: onSlot(dom.stagingSetupCard), model: isDesktop, onLook: setVisualCar });
   if (restored) dom.paramNote.textContent = `${restored} parameter${restored === 1 ? "" : "s"} restored from your last session.`;
 
   dom.resetParams.addEventListener("click", () => {

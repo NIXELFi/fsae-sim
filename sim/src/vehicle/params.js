@@ -427,16 +427,11 @@ export const SDM26 = {
   // what this number is actually for. The old 0.66 sat a little too deep.
   eyeHeightM: 0.70,
 
-  // EST: the driver's head is not bolted to the chassis. Under lateral g the
-  // body is thrown outboard, so the head leans OUT of the corner relative to
-  // the car; under braking it slides forward; and the eyes lead the car into
-  // a corner rather than staring straight down the bodywork. All three are
-  // small -- centimetres and a couple of degrees -- and together they are a
-  // large part of why a rig reads as a car rather than a screen. Purely
-  // camera: none of this touches the physics.
-  headLatMPerG: 0.011,
+  // EST: the driver's head slides forward under braking and back under
+  // acceleration. Purely camera. There is deliberately NO sideways lean and
+  // no eye-lead into corners (removed 2026-09-23: in the cockpit they read as
+  // the camera wobbling), and the in-car views never roll with the body.
   headLongMPerG: 0.018,
-  headYawDegPerG: 1.1,
 };
 
 // The rack map is a monotone cubic (PCHIP, Fritsch-Carlson) through the

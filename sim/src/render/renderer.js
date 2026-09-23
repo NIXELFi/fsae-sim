@@ -23,9 +23,10 @@
 import {
   mat4, perspective, lookAlong, multiply, normalize, identity, ortho,
   translation, rotX, rotY, rotZ, scale, transformDir, transformPoint,
-  basisFromAxes,
+  basisFromAxes, invertRigid,
 } from "./math.js";
 import { buildCarMeshes, GEO, HUBS } from "./carmesh.js";
+import { SuspensionRig } from "./suspensionRig.js";
 import { buildVenueMesh } from "./venuemesh.js";
 import { buildEnvironmentMesh } from "./envmesh.js";
 import { PRESETS } from "./quality.js";
@@ -1180,6 +1181,18 @@ export class Renderer {
    */
   useCarModel(car) {
     const gl = this.gl;
+    // The moving suspension of the last CAD car, if any.
+    for (const rp of this.rigParts ?? []) {
+      if (rp.mesh?.vao) gl.deleteVertexArray(rp.mesh.vao);
+      for (const b of Object.values(rp.mesh?.buffers ?? {})) gl.deleteBuffer(b);
+    }
+    this.rigParts = null;
+    this.susp = null;
+    if (car?.rig) {
+      this.rigParts = car.rig.parts.map((p) => ({ corner: p.corner, role: p.role, mesh: this.makeMesh(p.mesh), model: mat4() }));
+      this.susp = new SuspensionRig(car.rig.corners);
+      this._rigInv = mat4();
+    }
     for (const mesh of Object.values(this.car)) {
       if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
       for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
@@ -1194,9 +1207,9 @@ export class Renderer {
         body: this.makeMesh(car.body),
         tire: this.makeMesh(car.tire),
         rim: this.makeMesh(car.rim),
-        steeringWheel: this.makeMesh(car.steeringWheel),
+        steeringWheel: this.makeMesh(this.steerOverride ?? car.steeringWheel),
         gloves: meshes.gloves ? this.makeMesh(meshes.gloves) : null,
-        dashCase: this.makeMesh(meshes.dashCase),
+        dashCase: this.makeMesh(this.dashOverride ?? meshes.dashCase),
         driver: meshes.driver ? this.makeMesh(meshes.driver) : null,
         helmet: meshes.helmet ? this.makeMesh(meshes.helmet) : null,
         upperArm: meshes.upperArm ? this.makeMesh(meshes.upperArm) : null,
@@ -1209,9 +1222,9 @@ export class Renderer {
         body: this.makeMesh(meshes.body),
         tire: this.makeMesh(meshes.tire),
         rim: this.makeMesh(meshes.rim),
-        steeringWheel: this.makeMesh(meshes.steeringWheel),
+        steeringWheel: this.makeMesh(this.steerOverride ?? meshes.steeringWheel),
         gloves: meshes.gloves ? this.makeMesh(meshes.gloves) : null,
-        dashCase: this.makeMesh(meshes.dashCase),
+        dashCase: this.makeMesh(this.dashOverride ?? meshes.dashCase),
         driver: meshes.driver ? this.makeMesh(meshes.driver) : null,
         helmet: meshes.helmet ? this.makeMesh(meshes.helmet) : null,
         upperArm: meshes.upperArm ? this.makeMesh(meshes.upperArm) : null,
@@ -1230,6 +1243,33 @@ export class Renderer {
    * corners, and four of the largest objects on screen. Nobody should have to
    * model a complete car to stop looking at a procedural tyre.
    */
+  /**
+   * Draw the team's steering wheel (`loadSteeringWheelModel`) instead of the
+   * procedural one, on every body -- procedural, imported body, or whole CAD
+   * car -- and across rebuilds: each place a steering wheel mesh is made reads
+   * `steerOverride` first.
+   */
+  /** The real dash case (`loadDashModel`), kept across rebuilds like the wheel. */
+  useDashModel(mesh) {
+    this.dashOverride = mesh ?? null;
+    if (!this.car || !mesh) return;
+    const gl = this.gl;
+    const d = this.car.dashCase;
+    if (d?.vao) gl.deleteVertexArray(d.vao);
+    for (const b of Object.values(d?.buffers ?? {})) gl.deleteBuffer(b);
+    this.car.dashCase = this.makeMesh(mesh);
+  }
+
+  useSteeringWheelModel(mesh) {
+    this.steerOverride = mesh ?? null;
+    if (!this.car || !mesh) return;
+    const gl = this.gl;
+    const sw = this.car.steeringWheel;
+    if (sw?.vao) gl.deleteVertexArray(sw.vao);
+    for (const b of Object.values(sw?.buffers ?? {})) gl.deleteBuffer(b);
+    this.car.steeringWheel = this.makeMesh(mesh);
+  }
+
   useWheelModel(wheel) {
     const gl = this.gl;
     for (const key of ["tire", "rim"]) {
@@ -1302,7 +1342,7 @@ export class Renderer {
       const sw = this.car.steeringWheel;
       if (sw?.vao) gl.deleteVertexArray(sw.vao);
       for (const b of Object.values(sw?.buffers ?? {})) gl.deleteBuffer(b);
-      this.car.steeringWheel = this.makeMesh(meshes.steeringWheel);
+      this.car.steeringWheel = this.makeMesh(this.steerOverride ?? meshes.steeringWheel);
       this.arms = meshes.arms ?? null;
       if (!this.wheelModel) {
         for (const key of ["tire", "rim"]) {
@@ -1324,7 +1364,7 @@ export class Renderer {
         for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
       }
       this.car.body = this.makeMesh(meshes.body);
-      this.car.steeringWheel = this.makeMesh(meshes.steeringWheel);
+      this.car.steeringWheel = this.makeMesh(this.steerOverride ?? meshes.steeringWheel);
       this.car.gloves = meshes.gloves ? this.makeMesh(meshes.gloves) : null;
       this.car.driver = meshes.driver ? this.makeMesh(meshes.driver) : null;
       this.car.helmet = meshes.helmet ? this.makeMesh(meshes.helmet) : null;
@@ -1755,7 +1795,15 @@ export class Renderer {
     // Chase damps roll and pitch, because a chase camera that rolls with the
     // car is unwatchable.
     if (s.view.rigid) {
-      this.camFrame.set(this.chassis);
+      // Bolted to the car in every way but roll: the horizon stays level
+      // and the cockpit is what tilts. The in-car views never roll.
+      const h = cam.cgHeight ?? 0;
+      this.chain(this.camFrame, [
+        translation(T[0], cam.x, h, -cam.y),
+        rotY(T[1], cam.psi),
+        rotZ(T[2], cam.pitchRad),
+        translation(T[4], 0, -h, 0),
+      ]);
     } else {
       // A chase camera has its own heading (`view.yaw`, a damped follower
       // in main.js), so the car can yaw inside the frame: that is how slip
@@ -1816,6 +1864,7 @@ export class Renderer {
 
     // ---- wheel and cockpit transforms, used by both passes ----
     this.placeWheels(s);
+    this.placeRig(s);
     this.placeGhost(s);
     this.placeCockpit(s);
     if (s.skid) this.addSkids(s.skid);
@@ -1978,6 +2027,27 @@ export class Renderer {
    */
   placeWheels(s) {
     this._placeWheelSet(this.axleFrame, s.wheels, s.hubs, this._wheelMats, this._wheelMirrored, this._hubXZ);
+  }
+
+  /**
+   * Pose the CAD car's suspension (suspensionRig.js): each wheel's hub, which
+   * rides the level axle frame, is taken into the body's frame; how far it
+   * has moved from where it was modelled is the corner's travel, and the
+   * linkage is solved to meet it.
+   */
+  placeRig(s) {
+    if (!this.susp || !this.rigParts || !this.carModel?.hubs) return;
+    const inv = invertRigid(this._rigInv, this.chassis);
+    for (const hub of this.carModel.hubs) {
+      const name = hub.name.toLowerCase();
+      const local = transformPoint(inv, transformPoint(this.axleFrame, [hub.x, hub.y, hub.z]));
+      this.susp.solve(name, [local[0] - hub.x, local[1] - hub.y, local[2] - hub.z], hub.front ? (s.wheels?.steerRad ?? 0) : 0);
+    }
+    for (const rp of this.rigParts) {
+      const m = this.susp.matrix(rp.corner, rp.role);
+      if (m) multiply(rp.model, this.chassis, m);
+      else rp.model.set(this.chassis);
+    }
   }
 
   makeSkidBuffer() {
@@ -2238,6 +2308,8 @@ export class Renderer {
       this.drawArrays(gl.TRIANGLES, 0, mesh.count);
     };
     part(this.car.body, this._ghostChassis, MAT.paint);
+    // The ghost's suspension is drawn at its modelled (static) pose.
+    for (const rp of this.rigParts ?? []) part(rp.mesh, this._ghostChassis, MAT.paint);
     if (this.car.driver) part(this.car.driver, this._ghostChassis, MAT.suit);
     if (this.car.helmet) part(this.car.helmet, this._ghostChassis, MAT.helmet);
     if (this.car.gloves) part(this.car.gloves, this._ghostGloveModel, MAT.suit);
@@ -2313,6 +2385,11 @@ export class Renderer {
       gl.uniformMatrix4fv(ud.uModel, false, this.chassis);
       gl.bindVertexArray(this.car.body.vao);
       this.drawArrays(gl.TRIANGLES, 0, this.car.body.count);
+      for (const rp of this.rigParts ?? []) {
+        gl.uniformMatrix4fv(ud.uModel, false, rp.model);
+        gl.bindVertexArray(rp.mesh.vao);
+        this.drawArrays(gl.TRIANGLES, 0, rp.mesh.count);
+      }
       for (let k = 0; k < 4; k++) {
         gl.uniformMatrix4fv(ud.uModel, false, this._wheelMats[k]);
         gl.bindVertexArray(this.car.tire.vao);
@@ -2396,6 +2473,7 @@ export class Renderer {
     };
 
     part(this.car.body, this.chassis, null, MAT.paint);
+    for (const rp of this.rigParts ?? []) part(rp.mesh, rp.model, null, MAT.paint);
     // The driver rides on the chassis frame. Not from the cockpit camera:
     // that eye is inside the helmet, and a helmet lining is not a view.
     if (!s.hideDriver) {

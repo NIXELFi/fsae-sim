@@ -12,6 +12,7 @@ use std::{env, fs, path::Path};
 const FRONTEND: [&str; 3] = ["index.html", "src", "data"];
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=FSAE_SIM_BUNDLE_CAD");
     let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let src_tauri = Path::new(&manifest);
     let project = src_tauri.parent().expect("project root above src-tauri");
@@ -49,9 +50,25 @@ fn stage(from: &Path, to: &Path) {
             stage(&entry.path(), &to.join(entry.file_name()));
         }
     } else {
+        if is_team_cad(from) && std::env::var("FSAE_SIM_BUNDLE_CAD").as_deref() != Ok("1") {
+            // The team's own CAD (car, steering wheel, dash) is kept out of
+            // the exe unless asked for: the repo is public and the feed
+            // bucket is public, so a build on a machine that happens to have
+            // them in data/ would publish them. A stale copy from an earlier
+            // bundled build is removed so it cannot ride along either.
+            let _ = fs::remove_file(to);
+            return;
+        }
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent).expect("mkdir parent");
         }
         fs::copy(from, to).unwrap_or_else(|e| panic!("copy {}: {e}", from.display()));
     }
+}
+
+/// data/car.glb, data/steering-wheel.glb, data/dash.glb (see .gitignore).
+fn is_team_cad(p: &Path) -> bool {
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let in_data = p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some("data");
+    in_data && matches!(name, "car.glb" | "steering-wheel.glb" | "dash.glb")
 }

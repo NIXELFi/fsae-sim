@@ -34,6 +34,10 @@ export class Replay {
    */
   constructor(manifest, telemetry) {
     this.manifest = manifest;
+    // 4-wheel runs from before simulator 0.7.7 logged pitch with the solver's
+    // sign (positive nose down) rather than the log's (positive nose up):
+    // flip them, so an old run's car dives under braking like a new one's.
+    this.pitchSign = pitchLoggedBackwards(manifest) ? -1 : 1;
     this.tel = telemetry;
     this.rows = telemetry.rows;
     this.time = telemetry.time;
@@ -171,7 +175,7 @@ export class Replay {
     s.y = v(POSE.y);
     s.yawRad = (this.angleValue(POSE.yawDeg) * Math.PI) / 180;
     s.rollRad = (v(POSE.rollDeg) * Math.PI) / 180;
-    s.pitchRad = (v(POSE.pitchDeg) * Math.PI) / 180;
+    s.pitchRad = (this.pitchSign * v(POSE.pitchDeg) * Math.PI) / 180;
     s.spinFront = this.wrappedValue(POSE.spinFront);
     s.spinRear = this.wrappedValue(POSE.spinRear);
     s.steerRad = (v(POSE.roadWheelDeg) * Math.PI) / 180;
@@ -266,4 +270,15 @@ export class Replay {
     }
     return out.reverse();
   }
+}
+
+/** See `Replay.pitchSign`: a 4-wheel run logged before 0.7.7. */
+export function pitchLoggedBackwards(manifest) {
+  const model = manifest?.vehicleModel ?? manifest?.stats?.vehicleModel;
+  if (model !== 3) return false;
+  const v = String(manifest?.simVersion ?? manifest?.stats?.simVersion ?? "").replace(/^fsae-sim\s+/, "");
+  const m = v.match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return true; // no usable version: every 4-wheel run so far is old
+  const [a, b, c] = m.slice(1).map(Number);
+  return a === 0 && (b < 7 || (b === 7 && c < 7));
 }

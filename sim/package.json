@@ -1,6 +1,6 @@
 {
   "name": "fsae-sim",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "private": true,
   "type": "module",
   "description": "First-person SDM26 driving simulator on the 2026 FSAE Michigan courses",
@@ -13,7 +13,7 @@
     "data": "python tools/prepare_data.py",
     "icons": "python tools/make_icons.py",
     "validate": "node tools/validate.js",
-    "test": "node tools/check_shaders.mjs && node tools/test_bindings.mjs && node tools/test_input_class.mjs && node tools/test_timing.mjs && node tools/test_track.mjs && node tools/test_skidpad.mjs && node tools/test_accel.mjs && node tools/test_generate.mjs &&node tools/test_respawn.mjs && node tools/test_replay.mjs && node tools/test_sector_sync.mjs && node tools/test_recorder.mjs && node tools/test_delta.mjs && node tools/test_setup_file.mjs && node tools/validate.js",
+    "test": "node tools/check_shaders.mjs && node tools/test_bindings.mjs && node tools/test_input_class.mjs && node tools/test_timing.mjs && node tools/test_track.mjs && node tools/test_skidpad.mjs && node tools/test_accel.mjs && node tools/test_generate.mjs &&node tools/test_respawn.mjs && node tools/test_replay.mjs && node tools/test_sector_sync.mjs && node tools/test_recorder.mjs && node tools/test_suspension_rig.mjs && node tools/test_attitude.mjs && node tools/test_delta.mjs && node tools/test_setup_file.mjs && node tools/validate.js",
     "smoke": "node tools/smoke_desktop.mjs"
   }
 }

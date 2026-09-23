@@ -16,6 +16,7 @@
 // the snapshot every frame, so `powertrain.engineRpm` keeps meaning what it
 // always meant.
 
+import { attitudeFromNative } from "./attitude.js";
 import { rigNative } from "../game/desktop.js";
 import { lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad } from "./params.js";
 
@@ -338,6 +339,12 @@ export class NativeCar {
     if (!(t.vehicleModel >= 3)) {
       tel.rollDeg = t.ayG * this.p.rollGradientDegG;
       tel.pitchDeg = t.axG * this.p.pitchGradientDegG;
+    } else {
+      // The double track's own attitude, into this side's sign convention.
+      // See attitude.js: this is the one crossing, and it is tested.
+      const a = attitudeFromNative(t.rollDeg, t.pitchDeg);
+      tel.rollDeg = a.rollDeg;
+      tel.pitchDeg = a.pitchDeg;
     }
     this.applied = s.applied;
     // Into the one ffb record rather than a fresh spread a frame; the

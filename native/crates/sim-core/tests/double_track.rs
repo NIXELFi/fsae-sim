@@ -333,3 +333,31 @@ fn aero_follows_ride_height() {
     assert!((t.aero_front_frac - p.aero.front_frac).abs() < 1e-12);
     assert!((t.downforce_n - down).abs() / down < 2e-3, "{} vs {}", t.downforce_n, down);
 }
+
+/// The attitude sign contract (solver/mod.rs `Telemetry`): pitch positive
+/// NOSE DOWN under braking, roll positive in a LEFT turn. The JS side
+/// converts from exactly this (sim/src/vehicle/attitude.js); if it ever
+/// flips here, every 4-wheel replay dives backwards again, as before 0.7.7.
+#[test]
+fn attitude_signs_are_the_documented_ones() {
+    let mut c = car();
+    c.powertrain_mut().set_gear(3);
+    c.reset(0.0, 0.0, 0.0, 20.0);
+    c.powertrain_mut().sync_to_wheel(100.0);
+    for _ in 0..600 {
+        c.step(0.001, Controls { steer: 0.0, throttle: 0.0, brake: 0.6 });
+    }
+    let t = c.telemetry();
+    assert!(t.ax_g < -0.3 && t.pitch_deg > 0.05, "braking: ax {:.2} g, pitch {:.3} deg -- must be positive (nose down)", t.ax_g, t.pitch_deg);
+
+    let mut c = car();
+    c.powertrain_mut().set_gear(2);
+    c.reset(0.0, 0.0, 0.0, 12.0);
+    c.powertrain_mut().sync_to_wheel(60.0);
+    for _ in 0..1500 {
+        c.step(0.001, Controls { steer: 0.15, throttle: 0.25, brake: 0.0 });
+    }
+    let t = c.telemetry();
+    assert!(t.ay_g > 0.3, "positive steer should turn left (ay {:.2} g)", t.ay_g);
+    assert!(t.roll_deg > 0.05, "left turn: roll {:.3} deg -- must be positive (right side down)", t.roll_deg);
+}

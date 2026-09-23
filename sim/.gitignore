@@ -12,6 +12,8 @@
 # the desktop build pick it up; without it the procedural SDM26 body is drawn.
 # Not committed: it is your model, it is large, and it is not the default.
 /data/car.glb
+/data/steering-wheel.glb
+/data/dash.glb
 /reference-car.glb
 
 # A CAD wheel, same story as car.glb. 23 MB of Hoosier and OZ magnesium.

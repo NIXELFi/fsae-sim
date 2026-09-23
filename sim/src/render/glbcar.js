@@ -402,6 +402,31 @@ function applyFrame(mesh, frame) {
 const WHEEL_NAMES = ["wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"];
 
 /**
+ * The moving suspension parts and the hardpoints they move on, both carried
+ * into the simulator's chassis frame by the same fit as the body. Null when
+ * the file has no rig (any CAD car from before it, or a hand-made one).
+ */
+function rigFromGlb(doc, rigAccs, frame, problems) {
+  const corners = doc.scenes?.[doc.scene ?? 0]?.extras?.suspension?.corners;
+  if (!corners || rigAccs.size === 0) return null;
+  const out = {};
+  for (const [name, hp] of Object.entries(corners)) {
+    const c = {};
+    for (const [k, v] of Object.entries(hp)) c[k] = Array.isArray(v) ? frame.point(v) : v;
+    out[name] = c;
+  }
+  const parts = [];
+  for (const [key, acc] of rigAccs) {
+    const [, corner, role] = key.split(":");
+    if (!out[corner]) { problems.push(`rig part ${key} has no hardpoints`); continue; }
+    const mesh = finish(acc);
+    applyFrame(mesh, frame);
+    parts.push({ corner, role, mesh });
+  }
+  return parts.length ? { parts, corners: out } : null;
+}
+
+/**
  * Turn a .glb into the meshes and hub positions the renderer draws.
  *
  * @returns {{body, tire, rim, steeringWheel, hubs, steerCentre, stats}}
@@ -421,6 +446,9 @@ export function buildCarFromGlb(buffer, geo = null) {
   const hubs = [];
   let steerCentre = null;
   let wheelTaken = false;
+  // Suspension parts that move (`rig:<corner>:<role>`, see suspensionRig.js):
+  // kept out of the body so the renderer can pose them every frame.
+  const rigAccs = new Map();
 
   for (let i = 0; i < (doc.nodes ?? []).length; i++) {
     const node = doc.nodes[i];
@@ -444,6 +472,9 @@ export function buildCarFromGlb(buffer, geo = null) {
         wheelTaken = true;
         wheelHubIndex = hubs.length - 1;
       }
+    } else if (name.startsWith("rig:")) {
+      if (!rigAccs.has(name)) rigAccs.set(name, empty());
+      for (const p of prims) expandPrimitive(doc, bin, p, at, rigAccs.get(name), problems);
     } else if (name === "steering_wheel") {
       steerCentre = at;
       for (const p of prims) expandPrimitive(doc, bin, p, [0, 0, 0], steerAcc, problems);
@@ -496,10 +527,12 @@ export function buildCarFromGlb(buffer, geo = null) {
   const tire = finish(wheelAcc);
   const steeringWheel = finish(steerAcc);
   let frame = null;
+  let rig = null;
   if (hubs.length === 4) {
     frame = solveFrame(hubs, g);
     if (frame) {
       applyFrame(body, frame);
+      rig = rigFromGlb(doc, rigAccs, frame, problems);
       // The wheel and steering wheel are already centred on their own origins,
       // so they need the rotation but NOT the translation -- running them
       // through `point` would push them back out to a world position.
@@ -548,6 +581,7 @@ export function buildCarFromGlb(buffer, geo = null) {
   }
 
   return {
+    rig,
     body,
     tire,
     // The CAD wheel includes its own rim, so the procedural rim is not used.
@@ -560,7 +594,9 @@ export function buildCarFromGlb(buffer, geo = null) {
     stats: {
       fit: frame ? frame.describe() : "not fitted",
       triangles: (bodyAcc.position.length + wheelAcc.position.length +
-                  steerAcc.position.length) / 9,
+                  steerAcc.position.length +
+                  [...rigAccs.values()].reduce((n, a) => n + a.position.length, 0)) / 9,
+      rigParts: rig ? rig.parts.length : 0,
       nodes: (doc.nodes ?? []).length,
       materials: (doc.materials ?? []).length,
       generator: doc.asset?.generator ?? "(unstated)",
@@ -598,6 +634,71 @@ export async function loadCarModel(url) {
 
   try {
     return buildCarFromGlb(buffer);
+  } catch (err) {
+    return { error: String(err?.message ?? err) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Steering wheel
+// ---------------------------------------------------------------------------
+
+/**
+ * The dash case (`data/dash.glb`, the team's AiM Strada from its STEP), in the
+ * dash's own frame -- centred on the display, +y up, +z away from the driver
+ * -- which is the frame `Renderer` mounts the dash in. The live screen is
+ * still drawn by the renderer, into the display rectangle; this is the case.
+ */
+export function loadDashModel(url) {
+  return loadSteeringWheelModel(url);
+}
+
+/**
+ * The team's own steering wheel (`data/steering-wheel.glb`), in place of the
+ * procedural one, whatever body is drawn.
+ *
+ * Exported in the wheel's OWN frame -- metres, centred on the column axis,
+ * +y up, the driver on the -z side -- which is exactly the frame the
+ * renderer mounts a steering wheel in (`Renderer.wheelFrame`: column
+ * position, column tilt, then the spin). So nothing is fitted: the geometry
+ * is read as it is, node translations applied, and handed over. The export
+ * step (`tools/cad/`) bakes rotations and drops the fasteners.
+ *
+ * Never throws; null when there is no file, `{error}` when it is unusable.
+ */
+export async function loadSteeringWheelModel(url) {
+  let buffer;
+  try {
+    const res = await fetch(url, { cache: "no-cache" });
+    if (!res.ok) return null;
+    buffer = await res.arrayBuffer();
+  } catch {
+    return null;
+  }
+  if (buffer.byteLength < 12 || new DataView(buffer).getUint32(0, true) !== MAGIC) return null;
+  try {
+    const { doc, bin } = parseGlb(buffer);
+    const places = nodeTranslations(doc);
+    const acc = empty();
+    const problems = [];
+    (doc.nodes ?? []).forEach((node, i) => {
+      if (node.mesh === undefined) return;
+      for (const p of doc.meshes[node.mesh].primitives ?? []) {
+        expandPrimitive(doc, bin, p, places.get(i) ?? [0, 0, 0], acc, problems);
+      }
+    });
+    if (!acc.position.length) return { error: "no geometry in the steering wheel file" };
+    // A steering wheel is ~0.2-0.35 m across; anything else is the wrong units.
+    let lo = Infinity, hi = -Infinity;
+    for (let k = 0; k < acc.position.length; k += 3) { lo = Math.min(lo, acc.position[k]); hi = Math.max(hi, acc.position[k]); }
+    const width = hi - lo;
+    if (width > 2) {
+      for (let k = 0; k < acc.position.length; k++) acc.position[k] *= 0.001; // millimetres
+    } else if (width < 0.1) {
+      return { error: `the wheel is ${width.toFixed(3)} units across -- not metres or millimetres` };
+    }
+    const mesh = finish(acc);
+    return { mesh, stats: { triangles: mesh.count / 3, problems } };
   } catch (err) {
     return { error: String(err?.message ?? err) };
   }

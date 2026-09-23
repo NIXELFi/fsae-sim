@@ -120,9 +120,11 @@ impl SuspensionModel for ElasticGeometricSuspension {
 
     fn attitude(&self, _v: &VehicleParams, ay_g: f64, ax_g: f64,
                 roll_grad_deg_g: f64, pitch_grad_deg_g: f64) -> Attitude {
+        // Telemetry's convention (solver/mod.rs): roll positive right side
+        // down (a left turn, +ay), pitch positive NOSE DOWN (braking, -ax).
         Attitude {
             roll_deg: ay_g * roll_grad_deg_g,
-            pitch_deg: ax_g * pitch_grad_deg_g,
+            pitch_deg: -ax_g * pitch_grad_deg_g,
         }
     }
 

@@ -644,7 +644,7 @@ export class BicycleModel {
     t.driveForceN = FxRb;
     t.steerDeg = (d * 180) / Math.PI;
     t.rollDeg = t.ayG * p.rollGradientDegG;   // + = leaning right (left turn)
-    t.pitchDeg = t.axG * p.pitchGradientDegG; // + = nose up (braking dives)
+    t.pitchDeg = t.axG * p.pitchGradientDegG; // + = nose up, braking dives negative (attitude.js)
     t.locked = drive.locked;
     // The clutch pack's transfer torque: what the log's diff channel records.
     t.diffNm = this._tLock ?? 0;
