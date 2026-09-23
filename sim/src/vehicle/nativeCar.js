@@ -46,6 +46,17 @@ export class NativeCar {
     this.boundaryHit = false;
     this.moneyShiftBlocked = false;
     /**
+     * The physics clock, seconds: SIMULATED time since the rig started or
+     * the last respawn (the rig's `Snapshot::sim_time_s`). The rig steps the
+     * solver in fixed 2 ms substeps off its own accumulator, so this is the
+     * time the car actually drove -- monotonic between respawns, frozen while
+     * paused or held, and free of both the OS's tick jitter and the page's
+     * frame rate. Time laps on it, not on `performance.now()` or summed frame
+     * dt. It moves in 2 ms steps and arrives a frame late, like the pose.
+     * `BicycleModel.simTimeS` is the same clock in the browser build.
+     */
+    this.simTimeS = 0;
+    /**
      * The respawn token we last sent, against the one coming back.
      *
      * `respawn` sets the pose here immediately so the course sees it this
@@ -312,6 +323,7 @@ export class NativeCar {
       this._respawnSeq = s.respawnSeq;
     }
     const st = s.state, t = s.tel;
+    if (typeof s.simTimeS === "number") this.simTimeS = s.simTimeS;
     this.X = st.x; this.Y = st.y; this.psi = st.psi;
     this.u = st.u; this.v = st.v; this.r = st.r;
     this.appliedAt = performance.now();
@@ -345,6 +357,7 @@ export class NativeCar {
     this.delta = 0;
     this.telemetry = blankTelemetry();
     this.appliedAt = 0;
+    this.simTimeS = 0;
     // Everything the rig sends back until it has applied this is from the
     // drive we just ended. 400 ms is many round trips at any frame rate.
     this._respawnSeq = (this._respawnSeq + 1) >>> 0;

@@ -53,8 +53,9 @@ const SLIP_CAP_FULL_MPS = 8;
  * never more than the pedal's torque.
  */
 function brakeTorque(w, tFree, inertia, tb, dt) {
-  if (tb <= 0) return 0;
-  return Math.min(tb, Math.max(-tb, tFree + inertia * w / dt));
+  if (!(tb > 0 && Number.isFinite(tb))) return 0;
+  const want = tFree + inertia * w / dt;
+  return Number.isFinite(want) ? Math.min(tb, Math.max(-tb, want)) : 0;
 }
 
 export class BicycleModel {
@@ -92,6 +93,12 @@ export class BicycleModel {
   steeringServo = null;
 
   reset(X, Y, psi) {
+    /**
+     * The physics clock, s: simulated time since the last reset/respawn,
+     * the sum of every substep taken. Same meaning as `NativeCar.simTimeS`
+     * (the rig's `sim_time_s`), so lap timing reads one field in both builds.
+     */
+    this.simTimeS = 0;
     this.u = 0; this.v = 0; this.r = 0;
     this.X = X; this.Y = Y; this.psi = psi;
     this.wF = 0;
@@ -157,7 +164,13 @@ export class BicycleModel {
    *        steer -1..1 (left positive), throttle/brake 0..1
    */
   step(dt, input) {
-    let remaining = Math.min(dt, 0.1); // never simulate more than 100 ms of catch-up
+    // Never more than 100 ms of catch-up, and a non-finite or negative dt is
+    // no step at all. Non-finite controls are zero and every control is in
+    // range: one NaN reaching the integrator leaves the car NaN for good.
+    // Same as `Controls::sanitized` / `step_span` in sim-core.
+    let remaining = Number.isFinite(dt) && dt > 0 ? Math.min(dt, 0.1) : 0;
+    const fin = (x, lo, hi) => (Number.isFinite(x) ? clamp(x, lo, hi) : 0);
+    input = { ...input, steer: fin(input.steer, -1, 1), throttle: fin(input.throttle, 0, 1), brake: fin(input.brake, 0, 1) };
     while (remaining > 1e-6) {
       const h = Math.min(SUBSTEP, remaining);
       this.substep(h, input);
@@ -557,6 +570,7 @@ export class BicycleModel {
     this.X += (this.u * Math.cos(this.psi) - this.v * Math.sin(this.psi)) * dt;
     this.Y += (this.u * Math.sin(this.psi) + this.v * Math.cos(this.psi)) * dt;
     this.psi += this.r * dt;
+    this.simTimeS += dt;
 
     // ---- telemetry ----
     const t = this.telemetry;

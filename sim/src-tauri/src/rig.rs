@@ -80,6 +80,17 @@ fn smoothstep(x: f64, a: f64, b: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// A pedal as the model may use it: in [0, 1], and a non-finite reading is a
+/// pedal nobody is pressing. `f64::clamp` passes NaN straight through, and a
+/// NaN pedal from the webview or a device made the car NaN for good.
+fn unit(x: f64) -> f64 {
+    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+fn finite_or_zero(x: f64) -> f64 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
 /// Where the understeer effect starts and finishes, in normalised front slip
 /// (1.0 = the tyre's force peak). The aligning torque itself peaks at about
 /// 0.55 and is only 18 % down by 1.0 -- the 19 mm of mechanical trail holds
@@ -100,10 +111,59 @@ fn trace_on() -> bool {
 }
 
 const RATE_HZ: f64 = 1000.0;
-/// The longest step the vehicle model is ever asked to take. A tick that
-/// arrives later than this (a stall) steps the car by this much and the rest
-/// of the wall-clock time is dropped -- and counted, in `StatsOut::lost_ms`.
+/// The longest tick the force feedback mixer and the rim-rate filter are
+/// ever handed. The CAR does not use it: see `PhysicsClock`.
 const MAX_DT: f64 = 0.01;
+/// The furthest the physics may fall behind the wall clock. A stall longer
+/// than this is caught up to here (at most 125 substeps in one tick) and the
+/// rest of the wall-clock time is dropped -- and counted, in
+/// `StatsOut::lost_ms`.
+const MAX_BEHIND: Duration = Duration::from_millis(250);
+
+/// The vehicle model's clock: real elapsed time in, whole fixed substeps out.
+///
+/// The rig used to step the solver by each tick's measured interval -- about
+/// a millisecond, with the OS's jitter in it -- so the car driven here was
+/// integrated at ~1 kHz with an irregular step while every test, fingerprint
+/// and golden drive runs the solver at exactly `SUBSTEP` (500 Hz). The model
+/// is not step-size independent to the last digit, so the car on the rig was
+/// not quite the car that was tested, and no two sessions stepped it alike.
+///
+/// Now the wall-clock time is accumulated and the solver is stepped only in
+/// whole `SUBSTEP`s: at 1 kHz that is one substep every other tick. Inputs,
+/// the driver aids and the force feedback still run every tick at the loop
+/// rate; only the integration is on the fixed grid. The driven car is then
+/// the tested car, bit for bit (`jittered_ticks_drive_the_offline_car`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PhysicsClock {
+    /// Wall-clock time not yet simulated, always under one substep after
+    /// `advance` unless the physics is behind.
+    owed: Duration,
+    /// Wall-clock time dropped by the catch-up cap, seconds.
+    pub lost_s: f64,
+}
+
+impl PhysicsClock {
+    pub const SUBSTEP: Duration = Duration::from_micros(2000);
+
+    /// Add `elapsed` of wall-clock time and return how many substeps to take
+    /// now. `running` false (paused, held by the watchdog) owes nothing, so
+    /// the car does not lurch forward by the pause when it resumes.
+    pub fn advance(&mut self, elapsed: Duration, running: bool) -> u32 {
+        if !running {
+            self.owed = Duration::ZERO;
+            return 0;
+        }
+        self.owed += elapsed;
+        if self.owed > MAX_BEHIND {
+            self.lost_s += (self.owed - MAX_BEHIND).as_secs_f64();
+            self.owed = MAX_BEHIND;
+        }
+        let n = (self.owed.as_nanos() / Self::SUBSTEP.as_nanos()) as u32;
+        self.owed -= Self::SUBSTEP * n;
+        n
+    }
+}
 /// How long the rig drives on the last inputs before it decides the webview
 /// has gone away (reload, exception, devtools pause) and holds the car with
 /// the pedals up and the motor off.
@@ -607,8 +667,9 @@ pub struct StatsOut {
     /// Late ticks, counted in periods: a tick that arrives 611 ms late is
     /// 611 ticks that did not happen, not one.
     pub overruns: u64,
-    /// Wall-clock time the car did NOT simulate because a tick arrived more
-    /// than `MAX_DT` late and the step was clamped. Zero on a healthy rig.
+    /// Wall-clock time the car did NOT simulate because the physics fell
+    /// more than `MAX_BEHIND` behind (a stall) and the catch-up was capped.
+    /// Zero on a healthy rig.
     pub lost_ms: f64,
     pub rate_hz: f64,
 }
@@ -625,6 +686,15 @@ pub struct Snapshot {
     pub stats: StatsOut,
     pub boundary_hit: bool,
     pub money_shift_blocked: bool,
+    /// The physics clock: seconds of SIMULATED time since the rig started
+    /// or the last respawn, `substeps * SUBSTEP` exactly. Monotonic between
+    /// respawns, never advances while paused or held by the watchdog, and
+    /// independent of the OS's tick jitter and of the webview's frame rate --
+    /// it is the time the car actually experienced, so a lap timed on it is
+    /// the lap the physics drove. Serialised as `simTimeS`; `NativeCar`
+    /// exposes it as `car.simTimeS`. It advances in 2 ms steps (one
+    /// substep), so interpolate between snapshots for sub-step timing.
+    pub sim_time_s: f64,
     /// The respawn token of the last respawn this loop applied.
     ///
     /// The webview sets the car's pose locally the instant it asks for a
@@ -829,51 +899,62 @@ struct Loop {
     win_end: Instant,
     tick_us_max_all: f64,
     overruns: u64,
-    lost_s: f64,
+    /// Wall-clock time in, whole solver substeps out. See `PhysicsClock`.
+    clock: PhysicsClock,
+    /// Substeps simulated since the last reset or respawn. See
+    /// `Snapshot::sim_time_s`.
+    sim_substeps: u64,
     boundary_hit: bool,
     /// The last respawn token the webview sent. See `Snapshot::respawn_seq`.
     respawn_seq: u32,
 }
 
+impl Loop {
+    /// A loop with the car at rest at the origin and no wheel open.
+    fn new(shared: Arc<Shared>, hwnd_raw: isize) -> Self {
+        let mut car = build(
+            Fidelity::Bicycle,
+            Chassis::new(sdm26(), Box::new(MagicFormulaTyre::sdm26()), Box::new(GearedEngine::sdm26())),
+        );
+        car.reset(0.0, 0.0, 0.0, 0.0);
+        Loop {
+            car,
+            assists: Assists::default(),
+            boundary: None,
+            etc: EtcMap::linear(),
+            wheel: None,
+            hwnd_raw,
+            shared,
+            wheel_cfg: WheelConfig::default(),
+            requested_device: String::new(),
+            next_rescan: Instant::now() + RESCAN_EVERY,
+            scan: None,
+            found: Vec::new(),
+            ffb_cfg: FfbConfig::default(),
+            ffb: FfbMixer::default(),
+            device: DeviceState::default(),
+            device_present: false,
+            lost_ticks: 0,
+            held: false,
+            ticks: 0,
+            tick_us_sum: 0.0,
+            tick_us_max: 0.0,
+            win_max: 0.0,
+            win_end: Instant::now() + TICK_MAX_WINDOW,
+            tick_us_max_all: 0.0,
+            overruns: 0,
+            clock: PhysicsClock::default(),
+            sim_substeps: 0,
+            boundary_hit: false,
+            respawn_seq: 0,
+        }
+    }
+}
+
 fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>) {
     wheel::realtime_thread();
 
-    let mut car = build(
-        Fidelity::Bicycle,
-        Chassis::new(sdm26(), Box::new(MagicFormulaTyre::sdm26()), Box::new(GearedEngine::sdm26())),
-    );
-    car.reset(0.0, 0.0, 0.0, 0.0);
-
-    let mut lp = Loop {
-        car,
-        assists: Assists::default(),
-        boundary: None,
-        etc: EtcMap::linear(),
-        wheel: None,
-        hwnd_raw,
-        shared: shared.clone(),
-        wheel_cfg: WheelConfig::default(),
-        requested_device: String::new(),
-        next_rescan: Instant::now() + RESCAN_EVERY,
-        scan: None,
-        found: Vec::new(),
-        ffb_cfg: FfbConfig::default(),
-        ffb: FfbMixer::default(),
-        device: DeviceState::default(),
-        device_present: false,
-        lost_ticks: 0,
-        held: false,
-        ticks: 0,
-        tick_us_sum: 0.0,
-        tick_us_max: 0.0,
-        win_max: 0.0,
-        win_end: Instant::now() + TICK_MAX_WINDOW,
-        tick_us_max_all: 0.0,
-        overruns: 0,
-        lost_s: 0.0,
-        boundary_hit: false,
-        respawn_seq: 0,
-    };
+    let mut lp = Loop::new(shared.clone(), hwnd_raw);
 
     // The wheel is optional: no wheel means the webview steers. The first
     // scan is synchronous -- nothing is ticking yet and `rig_start` is
@@ -892,13 +973,10 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
 
     while shared.running.load(Ordering::Relaxed) {
         let t0 = Instant::now();
-        // The step is clamped so a stall cannot become one giant integration
-        // step; what the clamp throws away is counted rather than vanishing.
-        let elapsed = (t0 - last).as_secs_f64();
-        let dt = elapsed.clamp(1e-4, MAX_DT);
-        if elapsed > MAX_DT {
-            lp.lost_s += elapsed - MAX_DT;
-        }
+        // The loop-rate interval, for the force feedback and the rim rate.
+        // The car is stepped on its own fixed grid (`PhysicsClock`) below.
+        let elapsed = t0 - last;
+        let dt = elapsed.as_secs_f64().clamp(1e-4, MAX_DT);
         last = t0;
 
         // Rare commands, drained without holding the lock across the tick.
@@ -931,7 +1009,8 @@ fn run(shared: Arc<Shared>, hwnd_raw: isize, ready: std::sync::mpsc::Sender<()>)
 
         lp.poll_scan();
         lp.maybe_rescan();
-        let snap = lp.tick(dt, &input, shift_up, shift_down, cone_hits);
+        let substeps = lp.clock.advance(elapsed, !input.paused);
+        let snap = lp.tick(dt, substeps, &input, shift_up, shift_down, cone_hits);
         *shared.snapshot.lock().unwrap() = snap;
 
         // Pace. Sleep to just short of the deadline, spin the rest: Windows
@@ -1081,6 +1160,8 @@ impl Loop {
         match c {
             RigCommand::Respawn { x, y, psi, speed, seq } => {
                 self.car.reset(x, y, psi, speed);
+                // The physics clock starts again with the run.
+                self.sim_substeps = 0;
                 // Stored, not counted: see `RigCommand::Respawn`.
                 self.respawn_seq = seq;
                 // Keep the rim angle and rate: zeroing them makes the next
@@ -1166,12 +1247,18 @@ impl Loop {
         {
             let v = self.car.params_mut();
             macro_rules! set {
-                ($($src:ident => $dst:expr),* $(,)?) => { $( if let Some(x) = p.$src { $dst = x; } )* };
+                // Only finite numbers reach the car: a NaN in the parameter
+                // set would otherwise poison every later substep.
+                ($($src:ident => $dst:expr),* $(,)?) => { $( if let Some(x) = p.$src.filter(|x| x.is_finite()) { $dst = x; } )* };
             }
+            // Mass and yaw inertia divide the equations of motion: zero or
+            // negative is refused and the car keeps what it had.
+            if let Some(x) = p.mass_kg.filter(|x| x.is_finite() && *x > 1.0) { v.mass_kg = x; }
+            if let Some(x) = p.izz_kg_m2.filter(|x| x.is_finite() && *x > 1e-3) { v.izz_kg_m2 = x; }
             set! {
-                mass_kg => v.mass_kg, weight_dist_front => v.weight_dist_front, cg_height_m => v.cg_height_m,
+                weight_dist_front => v.weight_dist_front, cg_height_m => v.cg_height_m,
                 wheelbase_m => v.wheelbase_m, track_front_m => v.track_front_m, track_rear_m => v.track_rear_m,
-                tire_radius_m => v.tyre_radius_m, izz_kg_m2 => v.izz_kg_m2,
+                tire_radius_m => v.tyre_radius_m,
                 unsprung_front_kg => v.unsprung_front_kg, unsprung_rear_kg => v.unsprung_rear_kg,
                 wheel_inertia_front_kg_m2 => v.wheel_inertia_front_kg_m2, wheel_inertia_rear_kg_m2 => v.wheel_inertia_rear_kg_m2,
                 crr => v.crr, cda_m2 => v.aero.cda_m2, cla_m2 => v.aero.cla_m2, aero_front_frac => v.aero.front_frac,
@@ -1240,7 +1327,10 @@ impl Loop {
     }
 
     /// One millisecond of the world.
-    fn tick(&mut self, dt: f64, input: &RigInput, shift_up: u32, shift_down: u32, cone_hits: u32) -> Snapshot {
+    /// One tick of the loop: `dt` is the wall-clock interval (inputs, aids
+    /// and force feedback run on it), `substeps` how many fixed `SUBSTEP`s
+    /// the car is advanced by (`PhysicsClock::advance`).
+    fn tick(&mut self, dt: f64, substeps: u32, input: &RigInput, shift_up: u32, shift_down: u32, cone_hits: u32) -> Snapshot {
         // ---- the wheel, if there is one ----
         if let Some(w) = self.wheel.as_mut() {
             match w.read() {
@@ -1292,7 +1382,7 @@ impl Loop {
             // Device is right-positive; the model is left-positive.
             (-norm.clamp(-1.0, 1.0), rim, half)
         } else {
-            (input.steer, input.rim_deg, input.half_lock_deg.max(1e-6))
+            (finite_or_zero(input.steer), finite_or_zero(input.rim_deg), finite_or_zero(input.half_lock_deg).max(1e-6))
         };
 
         // ---- pedals ----
@@ -1318,7 +1408,7 @@ impl Loop {
         // on which way the car is turning.
         let throttle = self
             .assists
-            .throttle(throttle_demand.clamp(0.0, 1.0), prev.kappa[RL].max(prev.kappa[RR]));
+            .throttle(unit(throttle_demand), prev.kappa[RL].max(prev.kappa[RR]));
         // ABS watches every wheel. Both rears, because each has its own load
         // and its own half of the rear brake torque, so a lightly loaded inner
         // rear can lock while the other is fine. And both FRONTS: with one
@@ -1326,7 +1416,7 @@ impl Loop {
         // only FL left ABS blind to the inside front locking in every
         // right-hand corner.
         let brake = self.assists.brake(
-            brake_demand.clamp(0.0, 1.0),
+            unit(brake_demand),
             prev.kappa[FL].min(prev.kappa[FR]),
             prev.kappa[RL].min(prev.kappa[RR]),
         );
@@ -1367,11 +1457,20 @@ impl Loop {
             self.car.params_mut().split_front_wheels = split;
         }
         if !input.paused {
-            self.car.step(dt, Controls { steer, throttle, brake });
-            self.boundary_hit = match self.boundary.as_mut() {
-                Some(b) => b.constrain(self.car.state_mut()),
-                None => false,
-            };
+            // Exactly the step every test takes: `car.step(SUBSTEP)` is one
+            // substep of SUBSTEP. The barrier after each one, so a catch-up
+            // burst cannot carry the car through it.
+            let mut hit = false;
+            for _ in 0..substeps {
+                self.car.step(sim_core::solver::SUBSTEP, Controls { steer, throttle, brake });
+                self.sim_substeps += 1;
+                if let Some(b) = self.boundary.as_mut() {
+                    hit |= b.constrain(self.car.state_mut());
+                }
+            }
+            if substeps > 0 {
+                self.boundary_hit = hit;
+            }
         }
         let s = self.car.state();
         let mut tel = self.car.telemetry();
@@ -1545,10 +1644,11 @@ impl Loop {
                 tick_us_max: self.tick_us_max.max(self.win_max),
                 tick_us_max_all: self.tick_us_max_all,
                 overruns: self.overruns,
-                lost_ms: self.lost_s * 1e3,
+                lost_ms: self.clock.lost_s * 1e3,
                 rate_hz: RATE_HZ,
             },
             boundary_hit: self.boundary_hit,
+            sim_time_s: self.sim_substeps as f64 * sim_core::solver::SUBSTEP,
             respawn_seq: self.respawn_seq,
             money_shift_blocked,
         }
@@ -2087,6 +2187,141 @@ mod tests {
         let feel = Feel { spin: 0.0, lock: 0.0, off_track: false, cone_hits: 0, jacking_nm: 0.0 };
         let o = m.mix(0.001, &cfg, true, &tel_with_rim(-3.0), 0.0, 56.0, true, &feel);
         assert_eq!(o.command, 0.0, "{o:?}");
+    }
+
+    /// A tiny deterministic generator, so the jitter is the same every run.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn test_loop() -> Loop {
+        Loop::new(Rig::new().shared.clone(), 0)
+    }
+
+    #[test]
+    fn physics_clock_is_the_solvers_substep() {
+        assert_eq!(PhysicsClock::SUBSTEP.as_secs_f64(), sim_core::solver::SUBSTEP);
+    }
+
+    /// Real time in, whole substeps out: nothing is lost or invented however
+    /// the ticks arrive, a pause owes nothing, and a stall is caught up to
+    /// `MAX_BEHIND` with only the excess dropped.
+    #[test]
+    fn physics_clock_steps_whole_substeps() {
+        let mut c = PhysicsClock::default();
+        let mut rng = Lcg(7);
+        let (mut wall, mut n) = (Duration::ZERO, 0u64);
+        for _ in 0..20_000 {
+            let e = Duration::from_micros(200 + (rng.next() * 2600.0) as u64);
+            wall += e;
+            n += c.advance(e, true) as u64;
+        }
+        let owed = wall - PhysicsClock::SUBSTEP * n as u32;
+        assert!(owed < PhysicsClock::SUBSTEP, "{owed:?} left over");
+        assert_eq!(c.lost_s, 0.0);
+        // Paused: nothing accumulates, so resuming does not lurch.
+        assert_eq!(c.advance(Duration::from_secs(3), false), 0);
+        assert_eq!(c.advance(Duration::from_micros(1500), true), 0);
+        // A 1 s stall: 250 ms caught up (125 substeps), 750 ms dropped.
+        let mut c = PhysicsClock::default();
+        assert_eq!(c.advance(Duration::from_secs(1), true), 125);
+        assert!((c.lost_s - 0.75).abs() < 1e-9, "{}", c.lost_s);
+    }
+
+    /// The car the rig drives is the car the tests drive. Ticks arrive with
+    /// the OS's jitter (0.3-2.7 ms, and a 40 ms stall now and then); the
+    /// trajectory must be bit-identical to an offline run that calls
+    /// `step(SUBSTEP)` with the same controls, the way every test,
+    /// fingerprint and golden drive does. Before the fixed clock the rig
+    /// stepped by each tick's measured interval, and it was not.
+    #[test]
+    fn jittered_ticks_drive_the_offline_car() {
+        let mut lp = test_loop();
+        let mut rng = Lcg(42);
+        let mut applied: Vec<(u32, Controls)> = Vec::new();
+        let mut wall = 0.0;
+        let mut total = 0u64;
+        for tick in 0..6000u32 {
+            let e = if tick % 997 == 500 { 40_000 } else { 300 + (rng.next() * 2400.0) as u64 };
+            let elapsed = Duration::from_micros(e);
+            wall += elapsed.as_secs_f64();
+            // A launch, a corner, a brake -- changing on TICK boundaries,
+            // wherever those happen to fall on the physics grid.
+            let input = RigInput {
+                throttle: if wall < 3.0 { 0.7 } else if wall < 5.0 { 0.35 } else { 0.0 },
+                brake: if wall >= 5.0 { 0.6 } else { 0.0 },
+                steer: if (2.0..4.5).contains(&wall) { 0.15 + 0.05 * (wall * 3.0).sin() } else { 0.0 },
+                ..Default::default()
+            };
+            let n = lp.clock.advance(elapsed, true);
+            let snap = lp.tick(elapsed.as_secs_f64().clamp(1e-4, MAX_DT), n, &input, 0, 0, 0);
+            total += n as u64;
+            let a = snap.applied;
+            applied.push((n, Controls { steer: a.steer, throttle: a.throttle, brake: a.brake }));
+            assert_eq!(snap.sim_time_s, total as f64 * sim_core::solver::SUBSTEP);
+        }
+        let rig = lp.car.state();
+        assert!(rig.x.hypot(rig.y) > 20.0, "the drive went nowhere: {rig:?}");
+
+        let mut off = Loop::new(Rig::new().shared.clone(), 0).car;
+        for (n, c) in &applied {
+            for _ in 0..*n {
+                off.step(sim_core::solver::SUBSTEP, *c);
+            }
+        }
+        let o = off.state();
+        assert_eq!(
+            (rig.x, rig.y, rig.psi, rig.u, rig.v, rig.r),
+            (o.x, o.y, o.psi, o.u, o.v, o.r),
+            "the rig's car is not the offline car"
+        );
+        assert_eq!(lp.car.telemetry().engine_rpm, off.telemetry().engine_rpm);
+    }
+
+    /// The physics clock restarts with a respawn and stands still while paused.
+    #[test]
+    fn sim_time_restarts_on_respawn_and_holds_when_paused() {
+        let mut lp = test_loop();
+        let e = Duration::from_millis(1);
+        let run = RigInput { throttle: 0.3, ..Default::default() };
+        let mut last = Snapshot::default();
+        for _ in 0..100 {
+            let n = lp.clock.advance(e, true);
+            last = lp.tick(0.001, n, &run, 0, 0, 0);
+        }
+        assert!((last.sim_time_s - 0.1).abs() < 1e-12, "{}", last.sim_time_s);
+        let paused = RigInput { paused: true, ..run };
+        for _ in 0..50 {
+            let n = lp.clock.advance(e, false);
+            last = lp.tick(0.001, n, &paused, 0, 0, 0);
+        }
+        assert!((last.sim_time_s - 0.1).abs() < 1e-12, "paused clock moved: {}", last.sim_time_s);
+        lp.apply_command(RigCommand::Respawn { x: 0.0, y: 0.0, psi: 0.0, speed: 0.0, seq: 1 });
+        let n = lp.clock.advance(Duration::from_millis(4), true);
+        let s = lp.tick(0.004, n, &run, 0, 0, 0);
+        assert!((s.sim_time_s - 0.004).abs() < 1e-12, "{}", s.sim_time_s);
+    }
+
+    /// NaN from the webview (pedals, steer, rim angle) must not reach the car
+    /// or the motor.
+    #[test]
+    fn non_finite_inputs_do_not_poison_the_rig() {
+        let mut lp = test_loop();
+        for i in 0..400 {
+            let x = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY][i % 3];
+            let input = RigInput { steer: x, throttle: x, brake: x, rim_deg: x, half_lock_deg: x, ffb_enabled: true, ..Default::default() };
+            let n = lp.clock.advance(Duration::from_millis(1), true);
+            let s = lp.tick(0.001, n, &input, 0, 0, 0);
+            let st = s.state;
+            assert!([st.x, st.y, st.u, st.v, st.r, st.delta, s.ffb.command, s.pt.engine_rpm].iter().all(|v| v.is_finite()), "{s:?}");
+        }
+        // A NaN or non-positive mass in a parameter push is refused.
+        lp.apply_params(&ParamSet { mass_kg: Some(f64::NAN), izz_kg_m2: Some(0.0), crr: Some(f64::NAN), ..Default::default() });
+        assert!(lp.car.params().mass_kg > 100.0 && lp.car.params().izz_kg_m2 > 1.0 && lp.car.params().crr.is_finite());
     }
 
     #[test]
