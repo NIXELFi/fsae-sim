@@ -39,6 +39,7 @@ pub mod assists;
 pub mod boundary;
 pub mod etc_map;
 pub mod modular;
+pub mod physics_rev;
 pub mod powertrain;
 pub mod solver;
 pub mod tyre;

@@ -238,6 +238,7 @@ section("model class, counted and setup ride with each lap and in the stats (0.7
   ok("a lap records whether it counted", rec.laps[1].counted === true);
   ok("the run is on the model its laps were", st.vehicleModel === 3, String(st.vehicleModel));
   ok("the run counts", st.counted === true);
+  ok("the run carries its model's physics revision (its era)", st.physicsRev === 2, String(st.physicsRev));
   ok("the stats carry the BEST lap's setup", st.setup?.["roll.rsdFront"] === 0.46, JSON.stringify(st.setup));
 
   const tainted = openRecorder({ counted: true });

@@ -29,6 +29,7 @@
 
 import { CONE_PENALTY_S, penalisedSector } from "./timing.js";
 import { SKIDPAD } from "../track/skidpad.js";
+import { physicsRevFor } from "../vehicle/physicsRev.js";
 import { SDM26, rimFromRoadDeg } from "../vehicle/params.js";
 
 export const SAMPLE_HZ = 100;
@@ -595,6 +596,8 @@ export class Recorder {
       // defaults, which is only honest for test fixtures.
       counted: entry.counted !== false,
       vehicleModel: entry.vehicleModel ?? 2,
+      // The physics revision of that model: the leaderboard era (physicsRev.js).
+      physicsRev: entry.physicsRev ?? physicsRevFor(entry.vehicleModel ?? 2),
       ...(entry.setup ? { setup: entry.setup } : {}),
       // `null` for a sector that was never timed -- the car's course distance
       // jumped over the boundary. `round` turns a null into 0, and a 0.000 s
@@ -787,7 +790,11 @@ export class Recorder {
     const counted = this.meta.counted !== false
       && this.laps.every((l) => l.counted !== false)
       && models.size <= 1;
-    return { vehicleModel, counted, setup: bestLap?.setup ?? null };
+    // One era per run: a run whose laps span two revisions (a build swapped
+    // mid-session cannot happen, but a fixture can say so) counts nowhere.
+    const revs = new Set(this.laps.map((l) => l.physicsRev ?? physicsRevFor(l.vehicleModel ?? 2)));
+    const physicsRev = revs.size === 1 ? [...revs][0] : physicsRevFor(vehicleModel);
+    return { vehicleModel, physicsRev, counted: counted && revs.size <= 1, setup: bestLap?.setup ?? null };
   }
 
   toManifest() {
