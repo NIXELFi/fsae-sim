@@ -28,12 +28,15 @@
 //!                   inertia, step-independent diff; standing 75 m 4.86 ->
 //!                   4.75 s) -- kept in era 1 by owner decision
 //!   double track 1  0.6.13 .. 0.7.2 (beta; ~8 % grippier than the bicycle)
-//!                2  0.7.3 (grip pinned to the bicycle's steady limit)
+//!                2  0.7.3 .. 0.7.8 (grip pinned to the bicycle's steady limit;
+//!                   still +2.8 % peak at skidpad speed, ~0.1 s round it)
+//!                3  front grip 1.08 -> 1.06: the bicycle's steer-ramp peak
+//!                   at skidpad speed
 
 /// Revision of the bicycle's physics.
 pub const PHYSICS_REV_BICYCLE: u32 = 1;
 /// Revision of the double track's physics.
-pub const PHYSICS_REV_DOUBLE_TRACK: u32 = 2;
+pub const PHYSICS_REV_DOUBLE_TRACK: u32 = 3;
 
 /// The revision for a `vehicleModel` number (2 bicycle, 3 double track).
 pub fn physics_rev(vehicle_model: u8) -> u32 {

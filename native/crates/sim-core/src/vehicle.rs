@@ -242,7 +242,7 @@ impl SuspensionParams {
             // Adjustable on the setup card; 0 turns it off.
             steer_compliance_deg_per_100nm: 0.5,
             // Calibrated, see double_track.rs.
-            front_grip_scale: 1.08,
+            front_grip_scale: 1.06,
             rear_grip_scale: 1.00,
             aero_map: AeroRideMap::sdm26(),
         }

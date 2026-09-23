@@ -42,6 +42,17 @@ const KAPPA_H: f64 = 1e-4;
 
 // Grip calibration (`SuspensionParams::front_grip_scale` / `rear_grip_scale`).
 //
+// 2026-09-23 (fourth pass): pinned to the bicycle's PEAK on the steer ramp at
+// skidpad speed (11 m/s, examples/dt_ramp_fit.rs), front 1.06 / rear 1.00.
+// The steady circle below was the wrong yardstick: its robot settles past
+// the tyre peak (9-12 deg front slip, where a driver runs 3.5-7) and reads
+// both models ~10 % under what a person drives, so matching it left this
+// model +2.8 % at 11 m/s -- Nick's 4.867 vs 4.972 s skidpad on 0.7.8, the
+// 4-wheel laps pulling ~4 % more g. Taken off the front alone: the peak is
+// front-limited, and the car already felt oversteery, so this also moves the
+// balance toward push (+0.34 -> +0.37 at 11 m/s). Left over: +3.5 % at
+// 20 m/s (was +6.1), the ride-height aero, not a grip scale's job.
+//
 // 2026-09-23 (third pass): pinned to the STEADY-STATE LIMIT on the skidpad
 // circle (examples/peak_compare.rs), front 1.08 / rear 1.00. Pinning to the
 // robot's timed skidpad (below) left this model ~8 % grippier than the

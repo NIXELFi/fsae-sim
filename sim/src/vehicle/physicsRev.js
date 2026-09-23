@@ -8,7 +8,7 @@
 
 export const PHYSICS_REV = {
   2: 1, // bicycle
-  3: 2, // 4-wheel beta
+  3: 3, // 4-wheel beta (3: front grip 1.06, see physics_rev.rs)
 };
 
 /** The revision for a vehicleModel number (2 bicycle, 3 double track). */
