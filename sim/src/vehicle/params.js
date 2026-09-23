@@ -343,6 +343,31 @@ export const SDM26 = {
   // configurations the hardware allows: 30/45 -> 0.88/0.51, 45/60 -> 0.51/0.29,
   // and any of them reversed (50/40 -> 0.42/0.60 is the mild-power, strong-
   // coast setup the team's own tuning notes suggest for a rear-heavy car).
+  // The double track's own setup and model (sim-core SuspensionParams; the
+  // defaults are SuspensionParams::sdm26(), mirrored here for the setup
+  // card). The JS bicycle does not read any of it; the rig applies it when
+  // `vehicleModel` is 3.
+  dt: {
+    /** Static toe per wheel, deg, + = toe-in (spec sheet "- out, + in"). */
+    toeInFrontDeg: 1.1,
+    toeInRearDeg: 0.5,
+    /** Static camber, deg, SAE (negative = top inboard). OptimumK actual. */
+    staticCamberFrontDeg: -0.8,
+    staticCamberRearDeg: -0.7,
+    /** Fraction of true Ackermann, measured 18.5 %. */
+    ackermann: 0.185,
+    /** Bump steer, deg of toe-in per inch of bump, from the hardpoints. */
+    bumpSteerFrontDegPerIn: 0.2139,
+    bumpSteerRearDegPerIn: 0.0402,
+    /** EST: road-wheel deg per 100 N.m about each kingpin. 0 = rigid. */
+    steerComplianceDegPer100Nm: 0.5,
+    /** Grip calibration against the timed skidpad (see double_track.rs). */
+    frontGripScale: 1.13,
+    rearGripScale: 1.09,
+    /** 1 = aero follows ride height (2026 CFD map), 0 = fixed split. */
+    aeroRideMap: 1,
+  },
+
   diff: {
     /** Lock fraction on the drive ramp. */
     powerLock: 0.60,

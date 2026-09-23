@@ -388,6 +388,19 @@ pub struct ParamSet {
     pub diff_power_lock: Option<f64>,
     pub diff_coast_lock: Option<f64>,
     pub diff_preload_nm: Option<f64>,
+    // The double track's setup and model (SuspensionParams); inert on the
+    // bicycle.
+    pub dt_toe_in_front_deg: Option<f64>,
+    pub dt_toe_in_rear_deg: Option<f64>,
+    pub dt_static_camber_front_deg: Option<f64>,
+    pub dt_static_camber_rear_deg: Option<f64>,
+    pub dt_ackermann: Option<f64>,
+    pub dt_bump_steer_front_deg_per_in: Option<f64>,
+    pub dt_bump_steer_rear_deg_per_in: Option<f64>,
+    pub dt_steer_compliance_deg_per100_nm: Option<f64>,
+    pub dt_front_grip_scale: Option<f64>,
+    pub dt_rear_grip_scale: Option<f64>,
+    pub dt_aero_ride_map: Option<f64>,
     pub rack_efficiency: Option<f64>,
     pub torque_ratio: Option<f64>,
     pub mu_lat: Option<f64>,
@@ -1175,6 +1188,20 @@ impl Loop {
             if let Some(x) = p.steer_rate_speed_ref_mps { v.steering.rate_speed_ref_mps = x; }
             if let Some(x) = p.steer_rate_speed_exp { v.steering.rate_speed_exp = x; }
             if let Some(x) = p.caster_deg { v.steering.caster_rad = x.to_radians(); }
+            {
+                let s = &mut v.suspension;
+                if let Some(x) = p.dt_toe_in_front_deg { s.toe_in_front_deg = x; }
+                if let Some(x) = p.dt_toe_in_rear_deg { s.toe_in_rear_deg = x; }
+                if let Some(x) = p.dt_static_camber_front_deg { s.static_camber_front_deg = x; }
+                if let Some(x) = p.dt_static_camber_rear_deg { s.static_camber_rear_deg = x; }
+                if let Some(x) = p.dt_ackermann { s.ackermann = x; }
+                if let Some(x) = p.dt_bump_steer_front_deg_per_in { s.bump_steer_front_deg_m = x / 0.0254; }
+                if let Some(x) = p.dt_bump_steer_rear_deg_per_in { s.bump_steer_rear_deg_m = x / 0.0254; }
+                if let Some(x) = p.dt_steer_compliance_deg_per100_nm { s.steer_compliance_deg_per_100nm = x; }
+                if let Some(x) = p.dt_front_grip_scale { s.front_grip_scale = x; }
+                if let Some(x) = p.dt_rear_grip_scale { s.rear_grip_scale = x; }
+                if let Some(x) = p.dt_aero_ride_map { s.aero_map.enabled = x >= 0.5; }
+            }
             if p.torque_ratio.is_some() { v.steering.torque_ratio = p.torque_ratio; }
         }
         // The tyre's reference load (`nominal_load`) is deliberately NOT reset
@@ -1940,6 +1967,15 @@ mod tests {
         let b = drive(400);
         assert_eq!(b.tel.vehicle_model, 3, "did not swap to the double track");
         assert!(b.state.x > a.state.x, "the car stopped at the swap");
+        // The double track's own parameters reach it: with the ride-height
+        // aero map on the front share moves off nominal as the car squats;
+        // switched off, it is the nominal split exactly.
+        let nominal = sim_core::prelude::sdm26().aero.front_frac;
+        assert!((b.tel.aero_front_frac - nominal).abs() > 1e-6, "aero map not live: {}", b.tel.aero_front_frac);
+        let p = ParamSet { dt_aero_ride_map: Some(0.0), ..Default::default() };
+        shared.commands.lock().unwrap().push(RigCommand::Params(Box::new(p)));
+        let b2 = drive(200);
+        assert!((b2.tel.aero_front_frac - nominal).abs() < 1e-9, "dtAeroRideMap 0 not applied: {}", b2.tel.aero_front_frac);
         set(2.0);
         let c = drive(300);
         assert_eq!(c.tel.vehicle_model, 2, "did not swap back");

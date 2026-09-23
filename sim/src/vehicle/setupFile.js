@@ -252,6 +252,8 @@ export const SETUP_LEGAL_PATHS = [
   "roll.rsdFront", "brakeBiasFront",
   "diff.preloadNm", "diff.coastLock", "diff.powerLock",
   "launchRpm", "finalDrive",
+  // The double track's alignment: run-to-run setup, like the bars.
+  "dt.toeInFrontDeg", "dt.toeInRearDeg", "dt.staticCamberFrontDeg", "dt.staticCamberRearDeg", "dt.ackermann",
 ];
 
 /**

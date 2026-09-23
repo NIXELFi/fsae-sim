@@ -40,6 +40,21 @@ use crate::vehicle::{VehicleParams, G};
 /// Finite-difference step in slip ratio for the wheel update's implicit term.
 const KAPPA_H: f64 = 1e-4;
 
+// Grip calibration (`SuspensionParams::front_grip_scale` / `rear_grip_scale`).
+//
+// 2026-09-22 (second pass): pinned to the TIMED skidpad (tests/common/
+// skidpad.rs) at the bicycle's own number on the same harness -- both models
+// then answer to the same real run through the same driver. The tyre's mu_y
+// 1.89 and the 0.80 front factor were pinned THROUGH THE BICYCLE, which has
+// no camber, no toe and one peak slip per axle, so they already carry what
+// those cost; this model adds them back as physics and came out 4 % slower
+// round the figure of eight (5.35 vs 5.14 s) and ~2 s a lap on autocross. It
+// was also REAR-limited: lifting the front alone spun it at 15-20 m/s. So both
+// axles are scaled: rear 1.09, front 1.13 (front 0.80 -> 0.904) gives 5.16 s
+// (bicycle 5.14) and pushes at 10 / 15 / 20 m/s by +0.28 / +0.39 / +0.29,
+// about the bicycle's margins; front 1.16 or rear 1.03 spins at 20 m/s.
+// Sweep: examples/dt_calibrate2.rs. Earlier note, for the record:
+//
 /// How much of `front_grip_factor`'s deficit this model resolves physically.
 ///
 /// The 0.80 was pinned to the skidpad through the BICYCLE, which puts both
@@ -52,7 +67,7 @@ const KAPPA_H: f64 = 1e-4;
 /// 20 m/s on a steer ramp. A scale rather than a second number so an edit to
 /// the factor still moves both models. The deficit it leaves (~14 %) is what
 /// nothing here explains yet: system compliance, the tyre fit, 9 vs 10 psi.
-const DT_FRONT_GRIP_SCALE: f64 = 1.07;
+// Now `SuspensionParams::front_grip_scale`, so the setup card can move it.
 
 pub struct DoubleTrackSolver {
     c: Chassis,
@@ -75,6 +90,9 @@ pub struct DoubleTrackSolver {
     /// (see `stat_f`), so this only moves the ride height and the camber.
     aero_z: [f64; 2],
     aero_z_rate: [f64; 2],
+    /// Each front tyre's moment about its kingpin last substep (N.m, left-
+    /// positive), which the steering compliance gives way to.
+    kingpin_prev: [f64; 2],
     t_lock_last: f64,
     tel: Telemetry,
 }
@@ -129,6 +147,7 @@ impl DoubleTrackSolver {
             pitch_rate: 0.0,
             aero_z: [0.0; 2],
             aero_z_rate: [0.0; 2],
+            kingpin_prev: [0.0; 2],
             t_lock_last: 0.0,
             tel: Telemetry::default(),
         }
@@ -264,6 +283,7 @@ impl Solver for DoubleTrackSolver {
         // reset would begin with the car bouncing down onto its aero.
         self.aero_z = [0.0; 2];
         self.aero_z_rate = [0.0; 2];
+        self.kingpin_prev = [0.0; 2];
         let rr = self.body().ride_rate;
         for _ in 0..20 {
             let (ff, fr, _) = self.aero_at(speed);
@@ -312,8 +332,42 @@ impl DoubleTrackSolver {
             self.c.params.suspension.toe_in_front_deg.to_radians(),
             self.c.params.suspension.toe_in_rear_deg.to_radians(),
         );
-        let steer = [dl - toe_f, dr + toe_f, -toe_r, toe_r];
         let body = self.body();
+        // Each wheel's travel into bump through its spring (m): the roll's
+        // spring share (right side down puts the right wheels in bump), the
+        // pitch, and the aero squat's spring share -- the same travel the
+        // bump camber reads below.
+        let sp = &self.c.params.suspension;
+        let (tf_h, tr_h) = (self.c.params.track_front_m * 0.5, self.c.params.track_rear_m * 0.5);
+        let aero_f = self.aero_z[0] * body.ride_rate[0] / sp.wheel_rate_front_n_m.max(1.0);
+        let aero_r = self.aero_z[1] * body.ride_rate[1] / sp.wheel_rate_rear_n_m.max(1.0);
+        let roll_f = tf_h * self.roll * body.susp_share_f;
+        let roll_r = tr_h * self.roll * body.susp_share_r;
+        let travel = [
+            p_a * self.pitch + aero_f - roll_f,
+            p_a * self.pitch + aero_f + roll_f,
+            -p_b * self.pitch + aero_r - roll_r,
+            -p_b * self.pitch + aero_r + roll_r,
+        ];
+        // Bump steer: toe-in with bump. Toe-in turns a left wheel right
+        // (negative) and a right wheel left.
+        let (bs_f, bs_r) = (sp.bump_steer_front_deg_m.to_radians(), sp.bump_steer_rear_deg_m.to_radians());
+        let toe = [
+            toe_f + bs_f * travel[FL],
+            toe_f + bs_f * travel[FR],
+            toe_r + bs_r * travel[RL],
+            toe_r + bs_r * travel[RR],
+        ];
+        // Steering compliance: each front wheel gives way to the moment its
+        // tyre puts about the kingpin (left-positive, i.e. in the direction
+        // it deflects), read from the last substep.
+        let comp = (sp.steer_compliance_deg_per_100nm / 100.0).to_radians();
+        let steer = [
+            dl - toe[FL] + comp * self.kingpin_prev[0],
+            dr + toe[FR] + comp * self.kingpin_prev[1],
+            -toe[RL],
+            toe[RR],
+        ];
 
         let (u, v, r) = (self.s.u, self.s.v, self.s.r);
         let speed = u.hypot(v);
@@ -436,7 +490,7 @@ impl DoubleTrackSolver {
             let f = self.c.tyre.forces_cambered(slip, fz[i], gamma[i]);
             let f2 = self.c.tyre.forces_cambered(Slip { kappa: kappa[i] + KAPPA_H, ..slip }, fz[i], gamma[i]);
             stiff[i] = dt * radius * radius * ((f2.fx - f.fx) / KAPPA_H).max(0.0) / k_den;
-            let grip = if i == FL || i == FR { (p.front_grip_factor * DT_FRONT_GRIP_SCALE).min(1.0) } else { 1.0 };
+            let grip = if i == FL || i == FR { (p.front_grip_factor * sp.front_grip_scale).min(1.0) } else { sp.rear_grip_scale };
             fx[i] = f.fx;
             fy[i] = f.fy * low_speed * grip;
             util[i] = f.utilisation;
@@ -470,7 +524,9 @@ impl DoubleTrackSolver {
         // the mechanical trail, and their longitudinal forces through the
         // scrub radius -- the pair's moment about the kingpins.
         let mech = p.mechanical_trail();
-        let align = -(fy[FL] * (trail[FL] + mech) + fy[FR] * (trail[FR] + mech));
+        let kp = [-(fy[FL] * (trail[FL] + mech)), -(fy[FR] * (trail[FR] + mech))];
+        self.kingpin_prev = kp;
+        let align = kp[0] + kp[1];
         let fz_front = fz[FL] + fz[FR];
         let trail_front = if fz_front > 1.0 { (trail[FL] * fz[FL] + trail[FR] * fz[FR]) / fz_front } else { 0.0 };
         let scrub_nm = p.steering.scrub_m * (fx[FR] - fx[FL]);

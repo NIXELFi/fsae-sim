@@ -89,6 +89,22 @@ pub struct SuspensionParams {
     /// Fraction of true Ackermann (0 parallel, 1 full). Here rather than in
     /// `SteeringParams` so the bicycle's parameters are untouched.
     pub ackermann: f64,
+    /// Bump steer: toe-IN per metre of wheel travel into bump (deg/m), from
+    /// the suspension geometry. Roll steer falls out of it (one wheel in
+    /// bump, the other in droop), and so does toe under pitch and aero squat.
+    pub bump_steer_front_deg_m: f64,
+    pub bump_steer_rear_deg_m: f64,
+    /// Steering compliance: road-wheel degrees each front wheel gives way per
+    /// 100 N.m of moment about its kingpin -- rack, column, tie rods, rod
+    /// ends, upright. 0 is a rigid system.
+    pub steer_compliance_deg_per_100nm: f64,
+    /// How much of `front_grip_factor`'s deficit this model resolves: the
+    /// front runs at front_grip_factor x this (capped at 1). See
+    /// double_track.rs for the calibration.
+    pub front_grip_scale: f64,
+    /// The rear tyres' lateral grip relative to the tyre's mu_y. See
+    /// double_track.rs for the calibration.
+    pub rear_grip_scale: f64,
     /// Aero that follows ride height (the 2026 CFD ride-height map). Off, the
     /// double track carries the fixed nominal ClA / CdA / front share exactly
     /// as the bicycle does.
@@ -195,6 +211,23 @@ impl SuspensionParams {
             // Ackermann to 60 deg of rim, rising to 24 % at full lock. Not
             // the OptimumK 0 % nor the spec sheet's 85 %.
             ackermann: 0.185,
+            // From the OptimumK hardpoints ('SDM26 V1.4.6', transcribed in
+            // sdm26-assetto-corsa/data/sdm26_team_data.json), a small-
+            // displacement solve of the wishbones and tie rod
+            // (sim/docs/analysis-2026-09-22/scripts/bump_steer.py): 0.214 deg
+            // of toe-in per inch of bump at the front, 0.040 at the rear. The
+            // same solve reproduces OptimumK's camber gains to 1-3 %.
+            bump_steer_front_deg_m: 0.2139 / 0.0254,
+            bump_steer_rear_deg_m: 0.0402 / 0.0254,
+            // EST. No SDM26 K&C measurement exists (the 2026 compliance
+            // project published no results; the FEA of the upright alone is
+            // 0.002 deg at 1.6 g). 0.5 deg per 100 N.m per wheel is a tight
+            // FSAE steering system; loose ones measure several times that.
+            // Adjustable on the setup card; 0 turns it off.
+            steer_compliance_deg_per_100nm: 0.5,
+            // Calibrated, see double_track.rs.
+            front_grip_scale: 1.13,
+            rear_grip_scale: 1.09,
             aero_map: AeroRideMap::sdm26(),
         }
     }

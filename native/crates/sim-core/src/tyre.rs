@@ -168,8 +168,12 @@ pub struct MagicFormulaTyre {
     /// how the Magic Formula itself carries it -- so thrust builds and
     /// saturates with the tyre rather than being added on top of it.
     pub camber_ratio_at: [(f64, f64); 3],
-    /// Peak grip loss with camber: mu x (1 - k gamma^2), gamma in rad.
+    /// Peak grip loss with camber, gamma in rad:
+    /// mu x (1 - k ((gamma - s g0)^2 - g0^2)), s the sign of the lateral force.
+    /// Camber leaning the way the tyre is pushing ("favourable") costs less
+    /// than the same camber the other way; `camber_mu_offset_rad` is g0.
     pub camber_mu_quad: f64,
+    pub camber_mu_offset_rad: f64,
     /// Peak slip angle against load, as (Fz N, multiple of `peak_alpha`)
     /// points, linear between and flat past the ends. `None` holds the peak
     /// at `peak_alpha` at every load -- the validated bicycle's tyre, bit for
@@ -267,7 +271,16 @@ impl MagicFormulaTyre {
             // PDY3 13.0). Camber is a small effect on this tyre: a degree of
             // it is worth about a tenth of a degree of slip.
             camber_ratio_at: [(300.0, 0.089), (655.0, 0.107), (1000.0, 0.159)],
-            camber_mu_quad: 18.66,
+            // 2026-09-22: from the full MF6.1 evaluation of the same .tir
+            // (sdm26-assetto-corsa/tools/mf_eval.py, peak Fy at 655 N and
+            // 10 psi against camber, -3..+3 deg), fitted to the asymmetric
+            // form above: k 19.63 /rad^2, g0 0.394 deg, residual < 5e-4.
+            // PDY3 alone (18.66, symmetric) missed that the file's camber
+            // force (PVY3/PVY4) makes favourable camber nearly free up to a
+            // degree (0.999 at +1 vs 0.989 at -1). Only the double track uses
+            // camber; the bicycle never calls `forces_cambered`.
+            camber_mu_quad: 19.63,
+            camber_mu_offset_rad: 0.394_f64.to_radians(),
             peak_alpha_scale_at: None,
             by,
             ky: 1.0 / peak_value(by, cy, ey, peak_alpha),
@@ -290,7 +303,15 @@ impl MagicFormulaTyre {
 
     /// The load-dependent table the double track runs (see
     /// `peak_alpha_scale_at`).
-    pub const PEAK_ALPHA_SCALE_SDM26: [(f64, f64); 4] = [(200.0, 0.82), (655.0, 1.0), (800.0, 1.12), (1200.0, 1.30)];
+    ///
+    /// 2026-09-22: held FLAT past 800 N (was 1.30 at 1200 N). The top point
+    /// was an extrapolation of a fit that is not believable above ~800 N, and
+    /// with it the light inside rear peaked at 6 deg while the loaded outside
+    /// one was still building to 9.5: the rear axle saturated unevenly, and
+    /// with the LSD driving the outside wheel the car spun under power past
+    /// the limit at 20 m/s -- which neither constant peak slip nor an open
+    /// diff does. No data says the peak keeps moving past 800 N, so it doesn't.
+    pub const PEAK_ALPHA_SCALE_SDM26: [(f64, f64); 4] = [(200.0, 0.82), (655.0, 1.0), (800.0, 1.12), (1200.0, 1.12)];
 
     /// Peak slip angle and the matching stiffness factor at a load. The MF
     /// core depends only on B.x, so moving the peak to alpha_p is B scaled by
@@ -386,7 +407,10 @@ impl TyreModel for MagicFormulaTyre {
         }
         let shifted = Slip { alpha: slip.alpha + self.camber_ratio(fz) * gamma, kappa: slip.kappa };
         let mut f = self.forces(shifted, fz);
-        let k = (1.0 - self.camber_mu_quad * gamma * gamma).max(0.5);
+        let s = if f.fy >= 0.0 { 1.0 } else { -1.0 };
+        let g0 = self.camber_mu_offset_rad;
+        let d = gamma - s * g0;
+        let k = (1.0 - self.camber_mu_quad * (d * d - g0 * g0)).clamp(0.5, 1.01);
         f.fx *= k;
         f.fy *= k;
         f
@@ -508,7 +532,8 @@ mod tests {
         assert!(f.fy > 0.0, "camber thrust {} N should follow the lean", f.fy);
         // A degree of camber is worth about 0.107 deg of slip at this load.
         let eq = t.forces(Slip { alpha: 0.107 * lean, kappa: 0.0 }, fz);
-        let k = 1.0 - 18.66 * lean * lean;
+        let g0 = t.camber_mu_offset_rad;
+        let k = 1.0 - t.camber_mu_quad * ((lean - g0).powi(2) - g0 * g0);
         assert!((f.fy - eq.fy * k).abs() < 1e-9);
         // And costs peak grip, a little.
         let peak0 = t.forces(Slip { alpha: t.peak_alpha, kappa: 0.0 }, fz).fy;
@@ -517,8 +542,17 @@ mod tests {
             let a = i as f64 * 0.0005;
             peak3 = peak3.max(t.forces_cambered(Slip { alpha: a, kappa: 0.0 }, fz, 3.0_f64.to_radians()).fy);
         }
+        // The MF6.1 file: 3 deg leaning WITH the force costs 4.0 %, against
+        // it 6.8 %.
         let loss = 1.0 - peak3 / peak0;
-        assert!((0.04..0.06).contains(&loss), "3 deg of camber cost {:.1} % of peak", loss * 100.0);
+        assert!((0.035..0.045).contains(&loss), "3 deg favourable camber cost {:.1} % of peak", loss * 100.0);
+        let mut peak_m3: f64 = 0.0;
+        for i in 0..400 {
+            let a = i as f64 * 0.0005;
+            peak_m3 = peak_m3.max(t.forces_cambered(Slip { alpha: a, kappa: 0.0 }, fz, -3.0_f64.to_radians()).fy);
+        }
+        let loss_m = 1.0 - peak_m3 / peak0;
+        assert!((0.06..0.075).contains(&loss_m), "3 deg unfavourable camber cost {:.1} %", loss_m * 100.0);
     }
 
     #[test]
