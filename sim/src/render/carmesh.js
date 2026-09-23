@@ -970,16 +970,24 @@ function buildGloves() {
  * elbow pulled toward `elbowHint`. `buildCarMeshes` hands those numbers to
  * the renderer as `arms` so nothing about the pose is typed twice.
  */
+/** The eye point the driver figure (torso, neck, straps) is authored around. */
+const FIGURE_EYE = [-0.15, 0.70];
+
 function driverPose(params) {
   const eyeX = params?.eyeAheadOfCgM ?? SDM26.eyeAheadOfCgM;
   const eyeY = params?.eyeHeightM ?? SDM26.eyeHeightM;
+  // The figure was authored around an eye at (-0.15, 0.70). Wherever the eye
+  // is now -- the eye-height slider, the CAD car's seat -- the torso, neck
+  // and shoulders go with it, so the helmet never floats off the body.
+  const off = [eyeX - FIGURE_EYE[0], eyeY - FIGURE_EYE[1]];
   return {
+    figureOffset: off,
     helmetCentre: [eyeX - 0.04, eyeY + 0.03, 0],
     /** Shell half-sizes: a road helmet is longer than it is wide. */
     helmetRadii: [0.135, 0.13, 0.12],
     /** Shoulder joint, driver's right; mirror z for the left. Inside the
      *  torso, so the upper arm's root is buried and only the sleeve shows. */
-    shoulder: [-0.115, 0.485, 0.19],
+    shoulder: [-0.115 + off[0], 0.485 + off[1], 0.19],
     /** Bone lengths: shoulder to elbow, and elbow to the centre of the fist
      *  (the last 60 mm of the forearm is inside the glove). Together they
      *  are 40 mm longer than the farthest the wheel can carry a hand, so
@@ -1256,7 +1264,11 @@ function buildDriver(params) {
     strap(b, path, z, 0.075, 0.004, STRAP);
   }
 
-  return b.mesh();
+  // Move the whole figure with the eye (see driverPose).
+  const m = b.mesh();
+  const [dx, dy] = pose.figureOffset;
+  if (dx || dy) for (let i = 0; i < m.position.length; i += 3) { m.position[i] += dx; m.position[i + 1] += dy; }
+  return m;
 }
 
 /**

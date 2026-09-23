@@ -170,7 +170,7 @@ section("a run's times only count on the car the team actually has");
 {
   const { SDM26 } = await import("../src/vehicle/params.js");
   const { flattenParams, AS_SHIPPED, writeParam } = await import("../src/vehicle/paramMeta.js");
-  const { modelChanges, timeCounts, carSnapshot, SETUP_LEGAL_PATHS } = await import("../src/vehicle/setupFile.js");
+  const { modelChanges, timeCounts, carSnapshot, SETUP_LEGAL_PATHS, CAMERA_PATHS } = await import("../src/vehicle/setupFile.js");
 
   ok("the car snapshot carries EVERY number in the model, not just the sliders",
     Object.keys(carSnapshot()).length === Object.keys(flattenParams()).length
@@ -191,6 +191,14 @@ section("a run's times only count on the car the team actually has");
   ok("the whole run-to-run setup list can move and the time still counts",
     timeCounts(), modelChanges().map((c) => c.path).join(", "));
   for (const path of SETUP_LEGAL_PATHS) writeParam(path, AS_SHIPPED[path]);
+
+  // Where the driver sits (the eye-height slider) is the driver, not the car.
+  for (const path of CAMERA_PATHS) writeParam(path, AS_SHIPPED[path] * 1.1 + 0.01);
+  ok("moving the eye, the head slide and the camera shake still counts",
+    timeCounts(), modelChanges().map((c) => c.path).join(", "));
+  for (const path of CAMERA_PATHS) writeParam(path, AS_SHIPPED[path]);
+  ok("and none of them is written into a lap's setup record",
+    CAMERA_PATHS.every((p) => !SETUP_LEGAL_PATHS.includes(p)));
 
   // ...and anything else does not -- including aero balance, which reads like
   // a setup knob but is not a change SDM26 can be given between two runs.

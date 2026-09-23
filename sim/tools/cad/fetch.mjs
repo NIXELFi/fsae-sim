@@ -9,6 +9,8 @@ const files = {
   "SDM26_Chassis_FINAL.glb": "6a859ed1bd766032d44db001253c369695cd706d7b9251ffa78e11ec1c8863e4",
   "chassis_and_suspension.glb": "691f571f0ea126405e756f02f26eabd70e3b57854302d1ffa9d6b15f6f79001e",
   "aero_and_chassis.glb": "6091f976a66d39aa0dc87d780314f56f030d3f6f14949709519d416e54eb8b2c",
+  "chassis_and_engine.glb": "c6246c5f3bb2b1c4f062476acf6e51a48bf6377a0aa6713974af576a6bea1178",
+  "chassis_and_driver_interface.glb": "68bec114aba276f4ac34b5840537231260a5fd1994717e3bf0426e1721a6b127",
 };
 for (const [name, sha] of Object.entries(files)) {
   const url = `${process.env.SUPABASE_URL}/storage/v1/object/vault-objects/${sha.slice(0, 2)}/${sha}`;

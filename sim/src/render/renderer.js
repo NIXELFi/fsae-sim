@@ -21,11 +21,12 @@
 // y-up, so world (x, y) maps to GL (x, height, -y) throughout.
 
 import {
-  mat4, perspective, lookAlong, multiply, normalize, identity, ortho,
+  mat4, perspective, lookAlong, multiply, normalize, identity, ortho, axisAngle,
   translation, rotX, rotY, rotZ, scale, transformDir, transformPoint,
   basisFromAxes, invertRigid,
 } from "./math.js";
 import { buildCarMeshes, GEO, HUBS } from "./carmesh.js";
+import { SDM26, CAD_EYE_AHEAD_OF_CG_M } from "../vehicle/params.js";
 import { SuspensionRig } from "./suspensionRig.js";
 import { buildVenueMesh } from "./venuemesh.js";
 import { buildEnvironmentMesh } from "./envmesh.js";
@@ -1193,6 +1194,14 @@ export class Renderer {
       this.susp = new SuspensionRig(car.rig.corners);
       this._rigInv = mat4();
     }
+    // The pedals and the hand clutch ride in the same list, so every pass
+    // that draws the suspension (main, shadows, ghost) draws them too.
+    if (car?.controls) {
+      this.rigParts = (this.rigParts ?? []).concat(car.controls.map((c) => ({
+        control: c.name, pivot: c.pivot, axis: normalize([...c.axis]), curve: c.curve,
+        mesh: this.makeMesh(c.mesh), model: mat4(),
+      })));
+    }
     for (const mesh of Object.values(this.car)) {
       if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
       for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
@@ -1201,7 +1210,7 @@ export class Renderer {
     // every car, so it always comes from the procedural builder. Dropping it
     // here left `drawCar` binding an undefined mesh the first time a CAD
     // model was loaded.
-    const meshes = buildCarMeshes(this.carParams ?? null);
+    const meshes = buildCarMeshes(car?.cockpit ? this.cadDriverParams() : this.carParams ?? null);
     if (car) {
       this.car = {
         body: this.makeMesh(car.body),
@@ -1216,7 +1225,7 @@ export class Renderer {
         forearm: meshes.forearm ? this.makeMesh(meshes.forearm) : null,
       };
       this.arms = meshes.arms ?? null;
-      this.carModel = { hubs: car.hubs, steerCentre: car.steerCentre };
+      this.carModel = { hubs: car.hubs, steerCentre: car.steerCentre, cockpit: car.cockpit ?? null };
     } else {
       this.car = {
         body: this.makeMesh(meshes.body),
@@ -1333,8 +1342,12 @@ export class Renderer {
   rebuildCar(params) {
     this.carParams = params;
     // A CAD model is not built from the vehicle parameters, so stretching the
-    // wheelbase must not quietly replace it with procedural geometry.
-    if (this.carModel) return;
+    // wheelbase must not quietly replace it with procedural geometry. Its
+    // driver is, though: the eye height moves the helmet and the shoulders.
+    if (this.carModel) {
+      if (this.carModel.cockpit) this.rebuildDriver(buildCarMeshes(this.cadDriverParams()));
+      return;
+    }
     if (this.bodyModel) {
       // An imported body is not built from the vehicle parameters either.
       const meshes = buildCarMeshes(params);
@@ -1381,6 +1394,24 @@ export class Renderer {
     gl.bufferData(gl.ARRAY_BUFFER, body.position, gl.STATIC_DRAW);
     this.car.body.count = body.count;
     this.carParams = params;
+  }
+
+  /** The vehicle parameters with the driver seated where the CAD car's
+   *  head restraint puts them (CAD_EYE_AHEAD_OF_CG_M). */
+  cadDriverParams() {
+    return { ...(this.carParams ?? SDM26), eyeAheadOfCgM: CAD_EYE_AHEAD_OF_CG_M };
+  }
+
+  /** Replace the driver, helmet, gloves and arms, keeping everything else. */
+  rebuildDriver(meshes) {
+    const gl = this.gl;
+    for (const key of ["driver", "helmet", "gloves", "upperArm", "forearm"]) {
+      const mesh = this.car[key];
+      if (mesh?.vao) gl.deleteVertexArray(mesh.vao);
+      for (const b of Object.values(mesh?.buffers ?? {})) gl.deleteBuffer(b);
+      this.car[key] = meshes[key] ? this.makeMesh(meshes[key]) : null;
+    }
+    this.arms = meshes.arms ?? null;
   }
 
   /** Static mesh drawn with its own model matrix (the car parts, scenery). */
@@ -2036,6 +2067,9 @@ export class Renderer {
    * linkage is solved to meet it.
    */
   placeRig(s) {
+    for (const rp of this.rigParts ?? []) {
+      if (rp.control) this.placeControl(rp, s.pedals?.[rp.control] ?? 0);
+    }
     if (!this.susp || !this.rigParts || !this.carModel?.hubs) return;
     const inv = invertRigid(this._rigInv, this.chassis);
     for (const hub of this.carModel.hubs) {
@@ -2044,10 +2078,36 @@ export class Renderer {
       this.susp.solve(name, [local[0] - hub.x, local[1] - hub.y, local[2] - hub.z], hub.front ? (s.wheels?.steerRad ?? 0) : 0);
     }
     for (const rp of this.rigParts) {
+      if (rp.control) continue;
       const m = this.susp.matrix(rp.corner, rp.role);
       if (m) multiply(rp.model, this.chassis, m);
       else rp.model.set(this.chassis);
     }
+  }
+
+  /**
+   * A pedal or the hand clutch, turned about its pivot by the driver's input
+   * through the part's own travel curve (input 0..1 -> degrees, piecewise
+   * linear). Positive pushes the top forward, as a foot or a hand does.
+   */
+  placeControl(rp, input) {
+    const x = Math.max(0, Math.min(1, input || 0));
+    const c = rp.curve;
+    let deg = c[c.length - 1][1];
+    for (let i = 1; i < c.length; i++) {
+      if (x <= c[i][0]) {
+        const [x0, d0] = c[i - 1], [x1, d1] = c[i];
+        deg = d0 + (d1 - d0) * (x1 > x0 ? (x - x0) / (x1 - x0) : 0);
+        break;
+      }
+    }
+    const T = this._t, p = rp.pivot;
+    this.chain(rp.model, [
+      this.chassis,
+      translation(T[0], p[0], p[1], p[2]),
+      axisAngle(T[1], rp.axis, (deg * Math.PI) / 180),
+      translation(T[2], -p[0], -p[1], -p[2]),
+    ]);
   }
 
   makeSkidBuffer() {
@@ -2541,7 +2601,9 @@ export class Renderer {
     ]);
     const sc = this.carModel?.steerCentre ?? GEO.steerCentre;
     const dc = GEO.dashCentre;
-    this.chain(this.dashModel, [
+    // The team's car: the dash where their assembly has it.
+    if (this.carModel?.cockpit) multiply(this.dashModel, this.chassis, this.carModel.cockpit.dash);
+    else this.chain(this.dashModel, [
       this.chassis,
       translation(T[0], sc[0], sc[1], sc[2]),
       basis,
@@ -2569,6 +2631,10 @@ export class Renderer {
       0, 0, 0, 1,
     ]);
     const sc = this.carModel?.steerCentre ?? GEO.steerCentre;
+    // The team's car: the wheel where their assembly has it (column at 18 deg).
+    if (this.carModel?.cockpit) {
+      return multiply(out, this.carModel.cockpit.steer, rotZ(T[1], -steerRad * (steerRatio ?? GEO.steeringRatio)));
+    }
     return this.chain(out, [
       translation(T[0], sc[0], sc[1], sc[2]),
       basis,

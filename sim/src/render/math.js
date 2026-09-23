@@ -67,6 +67,19 @@ export function rotZ(out, a) {
 }
 
 /** Transform a direction (w = 0) by a matrix. */
+/** Rotation by `a` radians about the unit axis `k` (right-handed). */
+export function axisAngle(out, k, a) {
+  const c = Math.cos(a), s = Math.sin(a), t = 1 - c;
+  const [x, y, z] = k;
+  out.set([
+    t * x * x + c, t * x * y + s * z, t * x * z - s * y, 0,
+    t * x * y - s * z, t * y * y + c, t * y * z + s * x, 0,
+    t * x * z + s * y, t * y * z - s * x, t * z * z + c, 0,
+    0, 0, 0, 1,
+  ]);
+  return out;
+}
+
 export function transformDir(m, v) {
   return [
     m[0] * v[0] + m[4] * v[1] + m[8] * v[2],

@@ -263,6 +263,16 @@ export const SETUP_LEGAL_PATHS = [
 ];
 
 /**
+ * Parameters that only move the camera: where the driver's eye is, how far
+ * the head slides under braking, how much the view shakes. They describe the
+ * person in the seat, not the car, so they never stop a time counting and
+ * they are not part of a lap's setup record. Each is read by main.js for the
+ * view alone (`scene.view`, `headLong`, the vibration) and by nothing in the
+ * vehicle models.
+ */
+export const CAMERA_PATHS = ["eyeHeightM", "eyeAheadOfCgM", "headLongMPerG", "vibrationScale"];
+
+/**
  * The run-to-run setup a lap was driven on: every legal setup item and the
  * vehicle model, as numbers. Small on purpose -- it rides with each lap and
  * with the run's shared stats, so a leaderboard can show exactly what a time
@@ -303,7 +313,7 @@ export function lapSetup(read) {
  */
 export function modelChanges(values = null) {
   const now = values ?? flattenParams();
-  const legal = new Set(SETUP_LEGAL_PATHS);
+  const legal = new Set([...SETUP_LEGAL_PATHS, ...CAMERA_PATHS]);
   const out = [];
   for (const path of Object.keys(AS_SHIPPED)) {
     if (legal.has(path)) continue;

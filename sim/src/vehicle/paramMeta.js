@@ -11,7 +11,7 @@
 // Values are read live off SDM26 rather than retyped, so this sheet can never
 // disagree with what the physics is actually running.
 
-import { SDM26, lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad, rollArm } from "./params.js";
+import { SDM26, EYE_HEIGHT_RANGE_M, lengthToFrontAxle, lengthToRearAxle, nominalTyreLoad, rollArm } from "./params.js";
 import { TIRE_INFO } from "./tire.js";
 
 export const PROVENANCE = {
@@ -282,7 +282,7 @@ export function parameterGroups() {
         "The COAST ramp: the same, off the throttle and under braking. Same table. Lower than the power ramp on a 1.5-way. This is the number that steadies the rear on a lift.", { path: "diff.coastLock", min: 0, max: 0.95, step: 0.01 }),
       p("Diff preload", v.diff.preloadNm, "N.m", "team",
         "Breakaway torque wheel to wheel, as Drexler specifies it: 25-35 on the fixed unit, 0-75 adjustable. Raising it adds understeer on entry and kills lock-up lag on exit; lowering it lets the rear rotate more freely off throttle.", { path: "diff.preloadNm", min: 0, max: 75, step: 1 }),
-      p("Eye height", v.eyeHeightM, "m", "estimate", "Cockpit camera.", { path: "eyeHeightM", min: 0.4, max: 1.0, step: 0.005 }),
+      p("Eye height", v.eyeHeightM, "m", "estimate", "Cockpit camera.", { path: "eyeHeightM", min: EYE_HEIGHT_RANGE_M[0], max: EYE_HEIGHT_RANGE_M[1], step: 0.005 }),
       p("Eye position vs CG", v.eyeAheadOfCgM, "m", "estimate", "Negative is behind the CG."),
       p("Car vibration", v.vibrationScale * 100, "%", "estimate",
         "How much surface texture comes through the seat. Camera only -- it does not touch the physics. 0% is a perfectly smooth world.",

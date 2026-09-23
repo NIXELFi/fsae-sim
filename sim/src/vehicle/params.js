@@ -11,6 +11,28 @@
 // torque, relaxation length. Those are engineering estimates, each marked EST
 // with its basis. They are the numbers to replace when the team measures them.
 
+/**
+ * How high the driver's eye can sit (m above the ground), from the SDM26
+ * driver-interface CAD: the head restraint pad (275 mm tall, on two mounting
+ * positions, spanning 0.612-0.919 m in the chassis frame) has to meet the
+ * helmet at least 50 mm from any edge (FSAE T.2.8), and the drawn helmet's
+ * centre is 30 mm above the eye. Both positions together: 0.632-0.839,
+ * rounded in. The rollover line (helmet 50 mm under the main-to-front hoop
+ * line) only bites near 0.95, so it is not the limit here.
+ */
+export const EYE_HEIGHT_RANGE_M = [0.635, 0.835];
+
+/**
+ * The driver's eye fore-aft (m ahead of the CG) in the team's CAD car, from
+ * its driver-interface assembly: the head restraint's foam face is 0.204 m
+ * behind the CG and the rules want the helmet on it (no more than 25 mm
+ * off, FSAE T.2.8); the drawn helmet's back is 0.175 m behind the eye
+ * (carmesh driverPose), so 10 mm of gap puts the eye at -0.02. At the
+ * classic car's -0.12 the helmet sat 90 mm into the pad and through the
+ * main hoop. Camera and driver model only.
+ */
+export const CAD_EYE_AHEAD_OF_CG_M = -0.02;
+
 export const SDM26 = {
   name: "SDM26",
 
@@ -417,7 +439,11 @@ export const SDM26 = {
   vibrationScale: 0.2,
 
   // EST: driver eye point, relative to the CG (x forward, z up).
-  eyeAheadOfCgM: -0.15,
+  // For the classic (procedural) car. 2026-09-23: 30 mm closer to the wheel
+  // than it was, from the team driver ("slightly closer"). The team's CAD car
+  // seats the driver against its own head restraint instead:
+  // CAD_EYE_AHEAD_OF_CG_M.
+  eyeAheadOfCgM: -0.12,
   // EST: eye height above the ground, settled by looking at the cockpit view
   // rather than by arithmetic alone. A reclined FSAE driver sits very low and
   // the geometry argues for 0.8 or so, but at that height the eye is over the
@@ -425,7 +451,9 @@ export const SDM26 = {
   // cropped out of its own cockpit. At 0.70 the steering wheel, the roll hoop
   // and both front tyres frame the view the way a real onboard does, which is
   // what this number is actually for. The old 0.66 sat a little too deep.
-  eyeHeightM: 0.70,
+  // 2026-09-23: +25 mm, the team driver's "slightly higher". Adjustable on
+  // the setup card within EYE_HEIGHT_RANGE_M.
+  eyeHeightM: 0.725,
 
   // EST: the driver's head slides forward under braking and back under
   // acceleration. Purely camera. There is deliberately NO sideways lean and

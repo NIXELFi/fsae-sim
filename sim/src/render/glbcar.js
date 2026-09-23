@@ -62,8 +62,8 @@ export function parseGlb(buffer) {
 }
 
 /** Read one accessor into a flat typed array. */
-export function readAccessor(doc, bin, index) {
-  const acc = doc.accessors[index];
+export function readAccessor(doc, bin, index, asStored = false) {
+  const acc = asStored ? { ...doc.accessors[index], normalized: false } : doc.accessors[index];
   const comp = COMPONENT[acc.componentType];
   if (!comp) throw new Error(`unsupported componentType ${acc.componentType}`);
   const per = TYPE_COUNT[acc.type];
@@ -74,6 +74,15 @@ export function readAccessor(doc, bin, index) {
   const stride = view.byteStride ?? packed;
 
   const out = new comp.array(acc.count * per);
+  if (acc.normalized && comp.array !== Float32Array) {
+    // Normalized integers (the CAD pipeline stores normals as bytes): back to
+    // floats in [-1, 1] (glTF 2.0 sec. 3.11: signed n / (2^(bits-1) - 1)).
+    const raw = readAccessor(doc, bin, index, true);
+    const max = { 5120: 127, 5121: 255, 5122: 32767, 5123: 65535 }[acc.componentType];
+    const f = new Float32Array(raw.length);
+    for (let i = 0; i < raw.length; i++) f[i] = Math.max(-1, raw[i] / max);
+    return f;
+  }
   if (stride === packed) {
     // Tightly packed: one copy. `bin.byteOffset` matters because the blob is a
     // view into the file's ArrayBuffer, not a fresh one.
@@ -402,6 +411,45 @@ function applyFrame(mesh, frame) {
 const WHEEL_NAMES = ["wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr"];
 
 /**
+ * Where the team's assembly mounts the steering wheel and the dash (scene
+ * `extras.cockpit`, CAD frame, column-major), as chassis-frame matrices:
+ * `steer` takes steering-wheel.glb's own frame (+y up the wheel, +z away
+ * from the driver, origin on the column axis) to its place before the spin,
+ * `dash` takes dash.glb's. Null for any car without them.
+ */
+function cockpitFromGlb(doc, frame) {
+  const c = doc.scenes?.[doc.scene ?? 0]?.extras?.cockpit;
+  const place = (m) => {
+    if (!Array.isArray(m) || m.length !== 16) return null;
+    const o = frame.point([m[12], m[13], m[14]]);
+    const [x, y, z] = [0, 1, 2].map((k) => frame.direction([m[4 * k], m[4 * k + 1], m[4 * k + 2]]));
+    return Float32Array.of(...x, 0, ...y, 0, ...z, 0, ...o, 1);
+  };
+  const steer = place(c?.steer), dash = place(c?.dash);
+  return steer && dash ? { steer, dash } : null;
+}
+
+/**
+ * The pedals and the hand clutch: each a mesh that turns about one pivot
+ * (scene `extras.controls`, CAD frame), carried into the chassis frame with
+ * the body. `curve` maps the driver's input (0..1) to degrees.
+ */
+function controlsFromGlb(doc, ctlAccs, frame) {
+  const spec = doc.scenes?.[doc.scene ?? 0]?.extras?.controls;
+  if (!spec || ctlAccs.size === 0) return null;
+  const out = [];
+  for (const [key, acc] of ctlAccs) {
+    const name = key.slice(4);
+    const c = spec[name];
+    if (!c?.pivot || !c?.axis || !Array.isArray(c.curve)) continue;
+    const mesh = finish(acc);
+    applyFrame(mesh, frame);
+    out.push({ name, mesh, pivot: frame.point(c.pivot), axis: frame.direction(c.axis), curve: c.curve });
+  }
+  return out.length ? out : null;
+}
+
+/**
  * The moving suspension parts and the hardpoints they move on, both carried
  * into the simulator's chassis frame by the same fit as the body. Null when
  * the file has no rig (any CAD car from before it, or a hand-made one).
@@ -429,7 +477,7 @@ function rigFromGlb(doc, rigAccs, frame, problems) {
 /**
  * Turn a .glb into the meshes and hub positions the renderer draws.
  *
- * @returns {{body, tire, rim, steeringWheel, hubs, steerCentre, stats}}
+ * @returns {{body, tire, rim, steeringWheel, hubs, steerCentre, cockpit, stats}}
  *   in exactly the shape `buildCarMeshes` produces, plus the hub positions
  *   read from the file so the drawn wheels sit where the CAD puts them.
  */
@@ -449,6 +497,8 @@ export function buildCarFromGlb(buffer, geo = null) {
   // Suspension parts that move (`rig:<corner>:<role>`, see suspensionRig.js):
   // kept out of the body so the renderer can pose them every frame.
   const rigAccs = new Map();
+  // Driver controls that move (`ctl:brake`, `ctl:throttle`, `ctl:clutch`).
+  const ctlAccs = new Map();
 
   for (let i = 0; i < (doc.nodes ?? []).length; i++) {
     const node = doc.nodes[i];
@@ -472,6 +522,9 @@ export function buildCarFromGlb(buffer, geo = null) {
         wheelTaken = true;
         wheelHubIndex = hubs.length - 1;
       }
+    } else if (name.startsWith("ctl:")) {
+      if (!ctlAccs.has(name)) ctlAccs.set(name, empty());
+      for (const p of prims) expandPrimitive(doc, bin, p, at, ctlAccs.get(name), problems);
     } else if (name.startsWith("rig:")) {
       if (!rigAccs.has(name)) rigAccs.set(name, empty());
       for (const p of prims) expandPrimitive(doc, bin, p, at, rigAccs.get(name), problems);
@@ -528,11 +581,15 @@ export function buildCarFromGlb(buffer, geo = null) {
   const steeringWheel = finish(steerAcc);
   let frame = null;
   let rig = null;
+  let cockpit = null;
+  let controls = null;
   if (hubs.length === 4) {
     frame = solveFrame(hubs, g);
     if (frame) {
       applyFrame(body, frame);
       rig = rigFromGlb(doc, rigAccs, frame, problems);
+      cockpit = cockpitFromGlb(doc, frame);
+      controls = controlsFromGlb(doc, ctlAccs, frame);
       // The wheel and steering wheel are already centred on their own origins,
       // so they need the rotation but NOT the translation -- running them
       // through `point` would push them back out to a world position.
@@ -589,13 +646,15 @@ export function buildCarFromGlb(buffer, geo = null) {
     steeringWheel,
     hubs: hubs.length === 4 ? hubs : null,
     steerCentre,
+    cockpit,
+    controls,
     wheelOffset,
     frame,
     stats: {
       fit: frame ? frame.describe() : "not fitted",
       triangles: (bodyAcc.position.length + wheelAcc.position.length +
                   steerAcc.position.length +
-                  [...rigAccs.values()].reduce((n, a) => n + a.position.length, 0)) / 9,
+                  [...rigAccs.values(), ...ctlAccs.values()].reduce((n, a) => n + a.position.length, 0)) / 9,
       rigParts: rig ? rig.parts.length : 0,
       nodes: (doc.nodes ?? []).length,
       materials: (doc.materials ?? []).length,

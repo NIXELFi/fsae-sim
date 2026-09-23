@@ -1,6 +1,6 @@
 // Game bootstrap and main loop.
 
-import { SDM26 } from "./vehicle/params.js";
+import { SDM26, CAD_EYE_AHEAD_OF_CG_M } from "./vehicle/params.js";
 import { TIRE_INFO } from "./vehicle/tire.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
 import { loadCarModel, loadWheelModel, loadBodyModel, loadSteeringWheelModel, loadDashModel } from "./render/glbcar.js";
@@ -74,6 +74,7 @@ import { ReplayPanel, ghostGap } from "./game/replayPanel.js";
 // wheelbase moved the physics but not the car you see or the box that knocks
 // cones over.
 import { bodyBoxFor, hubsFor } from "./render/carmesh.js";
+import { clutchLever } from "./vehicle/clutchLever.js";
 
 /** Geometry that changes the drawn car; a change here forces a mesh rebuild. */
 const GEOMETRY_PATHS = ["wheelbaseM", "weightDistFront", "trackFrontM", "trackRearM"];
@@ -793,6 +794,35 @@ class Game {
     r.useCarModel(cad && this.cadCar ? this.cadCar : null);
   }
 
+  /**
+   * The driver's controls as drawn on the CAD car: the two pedals from the
+   * driver's own inputs, the hand clutch from the clutch's slip
+   * (vehicle/clutchLever.js). Live from this frame's input; in a replay from
+   * the log (engine.aps, brake.driver_load, and the speeds). Drawing only.
+   */
+  fillPedals(p) {
+    const r = this.replay;
+    let clutch;
+    if (r) {
+      p.throttle = r.value("engine.aps") / 100;
+      p.brake = r.value("brake.driver_load") / 100;
+      clutch = clutchLever(r.value("engine.rpm"),
+        (r.value("drivetrain.wheel_speed_rl") + r.value("drivetrain.wheel_speed_rr")) / 2,
+        r.valueAt("engine.gear"), r.value("gps.speed"), r.valueAt("sim.launch_held") > 0.5);
+    } else {
+      const pt = this.powertrain, car = this.car;
+      p.throttle = this.driving ? this.pedal ?? 0 : 0;
+      p.brake = this.driving ? this.brakeIn ?? 0 : 0;
+      const wR = ((car.wRL ?? car.wR ?? 0) + (car.wRR ?? car.wR ?? 0)) / 2;
+      clutch = clutchLever(pt.engineRpm, (wR * 60) / (2 * Math.PI), pt.gear + 1, car.speed,
+        !!this.input.state?.launch);
+    }
+    // A hand, not a switch: at most full travel in 0.12 s either way.
+    const dt = Math.min(this.lastDt ?? 1 / 60, 0.05);
+    const step = dt / 0.12;
+    p.clutch += Math.max(-step, Math.min(step, clutch - p.clutch));
+  }
+
   /** The model actually driving: the browser build only has the bicycle. */
   drivenModel() {
     return this.car?.native ? (SDM26.vehicleModel ?? 2) : 2;
@@ -943,6 +973,7 @@ class Game {
     // "throttle": everything downstream -- traction control, the engine, the
     // audio -- is dealing with plate position, not pedal position.
     this.pedal = inp.throttle;
+    this.brakeIn = inp.brake;
     this.plate = this.etc.evaluate(inp.throttle);
 
     // The map editor is modal, and it needs the live pedal above to keep
@@ -1453,7 +1484,9 @@ class Game {
     const sv = scene.view;
     // Head motion rides on the cockpit and nose views, which are bolted to
     // the chassis. The chase and walkaround cameras are not in the car.
-    sv.ahead = (cam.live ? SDM26.eyeAheadOfCgM : cam.ahead) + (cam.rigid ? this.headLong : 0);
+    // The team's CAD car seats the driver against its own head restraint.
+    const eyeX = this.renderer?.carModel?.cockpit ? CAD_EYE_AHEAD_OF_CG_M : SDM26.eyeAheadOfCgM;
+    sv.ahead = (cam.live ? eyeX : cam.ahead) + (cam.rigid ? this.headLong : 0);
     sv.height = cam.orbit ? (this.orbitHeight ?? cam.height)
       : cam.live ? SDM26.eyeHeightM : cam.height;
     sv.lateral = 0;
@@ -1477,6 +1510,7 @@ class Game {
     sw.spinFront = this.spinFront;
     sw.spinRear = this.spinRear;
     sw.rimFade = rimFade;
+    this.fillPedals(scene.pedals ??= { throttle: 0, brake: 0, clutch: 0 });
     scene.ghost = this.ghost ? this.ghostPose() : null;
     scene.skid = this.skidIntensity(tel);
     // A cone through the nose is felt as well as heard: a short drop that
@@ -3252,8 +3286,17 @@ async function boot() {
   };
   const onSheetChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.vehicle); };
   const onQuickChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.quickSetup); };
-  const onCardChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.setupNow); };
-  const onStagingChange = (path) => { onParamChange(path); markEdited(); syncAllSetup(dom.stagingSetupCard); };
+  const onCardChange = (path) => {
+    if (path === "eyeHeightM") return onEye(dom.setupNow);
+    onParamChange(path); markEdited(); syncAllSetup(dom.setupNow);
+  };
+  // The eye is the driver, not the car: saved, and the helmet follows it,
+  // but it is not a setup edit.
+  const onEye = (except) => { saveParams(); game?.renderer.rebuildCar(SDM26); syncAllSetup(except); };
+  const onStagingChange = (path) => {
+    if (path === "eyeHeightM") return onEye(dom.stagingSetupCard);
+    onParamChange(path); markEdited(); syncAllSetup(dom.stagingSetupCard);
+  };
   // Car appearance (Car tab): the look only, per machine, the CAD by default.
   // Two switches over one choice: this select, and the LOOK row on the
   // staging card. Either keeps the other in step.

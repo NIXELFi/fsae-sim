@@ -14,6 +14,7 @@
 // to drag.
 
 import { readParam, writeParam, PARAM_DEFAULTS } from "../vehicle/paramMeta.js";
+import { EYE_HEIGHT_RANGE_M } from "../vehicle/params.js";
 import { SETUP_META, modelChanges } from "../vehicle/setupFile.js";
 import { QUICK_SETUP_PATHS } from "./specSheet.js";
 import { SLOT_IDS, slotSummary, loadSlots } from "./setupSlots.js";
@@ -91,6 +92,11 @@ export function renderSetupCard(root, { onChange, onSlot, model = false, onLook 
       <button class="secondary" data-look-set="cad">SDM26</button>
       <button class="secondary" data-look-set="classic">Classic</button>
     </div>` : ""}
+    <div class="sn-model sn-eye" data-eye title="Eye height in the cockpit view, over the range the head restraint allows (the helmet must meet the pad 50 mm inside its edges). Where the driver sits, not the car: times count at any setting. Double-click to put it back.">
+      <span class="sn-name">EYE</span>
+      <input type="range" min="${EYE_HEIGHT_RANGE_M[0]}" max="${EYE_HEIGHT_RANGE_M[1]}" step="0.005" aria-label="Eye height">
+      <span class="sn-unit" data-eye-val></span>
+    </div>
     <div class="setup-now-rows">
       ${items.map((it) => `
         <div class="sn-row" data-path="${esc(it.path)}" title="${esc(it.label)}">
@@ -144,6 +150,16 @@ export function renderSetupCard(root, { onChange, onSlot, model = false, onLook 
     b.addEventListener("click", () => onSlot?.("save", b.dataset.slotSave));
   });
   root.querySelector("[data-baseline]")?.addEventListener("click", () => onSlot?.("baseline"));
+  const eye = root.querySelector("[data-eye] input");
+  if (eye) {
+    const setEye = (v) => {
+      writeParam("eyeHeightM", Math.min(EYE_HEIGHT_RANGE_M[1], Math.max(EYE_HEIGHT_RANGE_M[0], v)));
+      syncSetupCard(root);
+      onChange?.("eyeHeightM", readParam("eyeHeightM"));
+    };
+    eye.addEventListener("input", () => setEye(Number(eye.value)));
+    root.querySelector("[data-eye]").addEventListener("dblclick", () => setEye(PARAM_DEFAULTS.eyeHeightM ?? 0.725));
+  }
   root.querySelectorAll("[data-look-set]").forEach((b) => {
     b.addEventListener("click", () => { onLook?.(b.dataset.lookSet); syncSetupCard(root); });
   });
@@ -186,6 +202,13 @@ export function syncSetupCard(root, note = null) {
   const current = readParam("vehicleModel") ?? 2;
   for (const b of root.querySelectorAll("[data-model-set]")) {
     b.classList.toggle("active", Number(b.dataset.modelSet) === current);
+  }
+  const eyeIn = root.querySelector("[data-eye] input");
+  if (eyeIn) {
+    const e = readParam("eyeHeightM");
+    if (document.activeElement !== eyeIn) eyeIn.value = String(e);
+    const lab = root.querySelector("[data-eye-val]");
+    if (lab) lab.textContent = `${Math.round(e * 1000)} mm`;
   }
   let look = "cad";
   try { if (localStorage.getItem("fsae.visualCar") === "classic") look = "classic"; } catch {}
