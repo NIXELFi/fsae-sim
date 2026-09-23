@@ -10,7 +10,8 @@
 //   crank angle
 //     -> per-cylinder pressure (single-zone, Wiebe heat release)
 //     -> flow through the exhaust valve
-//     -> exhaust waveguide (primaries -> collector -> tailpipe -> open end)
+//     -> exhaust waveguide (4-2-1: primaries -> secondaries -> final pipe ->
+//        muffler -> open end, with finite-amplitude steepening)
 //     -> synthesiser (jitter, DC removal, derivative, noise, convolution)
 //     -> samples
 //
@@ -244,31 +245,40 @@ export class ConvolutionFilter {
 // Impulse responses
 // ---------------------------------------------------------------------------
 
+// Reflection amplitudes are relative to the direct sound. They used to be
+// three times these (-0.62 off the roll hoop), with a diffuse tail four to
+// eight times stronger, and 256 taps of that is not a diffuse field but a
+// fixed comb: it cut a 15-20 dB notch near 2 kHz, with peaks either side,
+// into every sound the engine made, at every rpm -- a large part of the
+// hollow, "underwater" colour the recording comparison exposed. At these
+// levels the cabin still reads as a space without imposing its own spectrum.
 const CABIN_SHAPES = {
-  // Close and boxy: strong early reflections off the roll hoop, floor and
-  // sidepod, and a short tail. This is what a driver actually hears.
+  // Close and boxy: early reflections off the roll hoop, floor and sidepod,
+  // and a short tail. This is what a driver actually hears.
   cockpit: {
     reflections: [
-      [0.6, -0.62],
-      [1.1, 0.44],
-      [1.9, -0.31],
-      [3.2, 0.22],
-      [4.8, -0.14],
+      [0.6, -0.22],
+      [1.1, 0.15],
+      [1.9, -0.11],
+      [3.2, 0.08],
+      [4.8, -0.05],
     ],
     decayS: 0.02,
     cutoffHz: 5500,
+    tail: 0.08,
   },
   // Further away, more diffuse, with a ground bounce.
   trackside: {
     reflections: [
-      [1.8, 0.52],
-      [4.5, -0.34],
-      [7.9, 0.24],
-      [12.0, -0.16],
-      [17.5, 0.1],
+      [1.8, 0.16],
+      [4.5, -0.1],
+      [7.9, 0.07],
+      [12.0, -0.05],
+      [17.5, 0.03],
     ],
     decayS: 0.055,
     cutoffHz: 7500,
+    tail: 0.08,
   },
   anechoic: null,
 };
@@ -297,7 +307,7 @@ export function buildImpulseResponse(cabin, taps, sampleRate, seed) {
   const start = Math.floor(0.7e-3 * sampleRate);
   const tau = shape.decayS * sampleRate;
   for (let i = start; i < taps; i++) {
-    ir[i] += rng.uniform() * Math.exp(-i / tau) * 0.35;
+    ir[i] += rng.uniform() * Math.exp(-i / tau) * shape.tail;
   }
 
   const lp = new ButterworthLowPass(shape.cutoffHz, sampleRate);
@@ -365,29 +375,98 @@ export function cbr600rrSdm26() {
     strokeM: 0.0425,
     conrodM: 0.0905,
     compressionRatio: 12.2,
-    // 180-degree crank inline four, firing order 1-2-4-3. The even spacing is
-    // what gives it the flat scream instead of a beat.
-    firingAnglesDeg: [0, 180, 540, 360],
+    // 180-degree crank inline four, firing order 1-2-4-3: nominally 0, 180,
+    // 540, 360 for cylinders 1-4. The degree or two off nominal is each
+    // cylinder's EFFECTIVE event phasing, which on a real engine is never
+    // exactly even: exhaust valve lash (0.28 +- 0.03 mm on this engine) and
+    // cam-lobe tolerance move each cylinder's valve opening by a few crank
+    // degrees. Perfectly even events made the note a pure comb at the firing
+    // harmonics; the onboard recording of the car (sim/tools/audio, clip
+    // IMG_5128) shows the half and odd orders an uneven engine has, at -13 to
+    // -16 dB re the firing fundamental.
+    firingAnglesDeg: [0, 182, 538, 361],
+    // Charge per cylinder, relative. A restricted FSAE intake feeds four
+    // runners from one plenum behind a 20 mm restrictor, and the split is not
+    // even; +-5% is ordinary for a plenum of this kind. Together with the
+    // phasing above this is what puts the half orders into the note.
+    cylinderTrim: [1.06, 0.955, 1.015, 0.97],
+    // Cycle-to-cycle combustion variation (coefficient of variation of the
+    // heat release). 2-4% is typical at full load; it is what keeps the note
+    // from sounding like a synthesiser held on one pitch.
+    combustionCov: 0.03,
     timing: {
       evoDeg: 132,
       evcDeg: 372,
       ivoDeg: 348,
       ivcDeg: 576,
-      exhaustValveDiameterM: 0.0235,
+      // Four valves per cylinder: TWO 22.5 mm exhaust valves (Honda stock,
+      // 2007-on). The model had one 23.5 mm valve, half the real flow area,
+      // which stretched the blowdown into a gentle hump and took most of the
+      // harmonics out of the note with it.
+      exhaustValveDiameterM: 0.0225,
+      exhaustValveCount: 2,
       exhaustCd: 0.72,
     },
     combustion: { startDeg: -20, durationDeg: 52, wiebeA: 5, wiebeM: 2 },
-    // 4-2-1 in reality; modelled 4-1, which keeps the primary resonance and
-    // loses the secondary.
-    primaries: [0, 1, 2, 3].map(() => pipeFromDiameter(0.42, 0.032, 0.01, 3200)),
-    primaryToCollector: [0, 0, 0, 0],
-    collectors: [pipeFromDiameter(0.28, 0.048, 0.012, 2400)],
-    // The tailpipe carries the muffler. FSAE caps noise at 110 dBA, so the car
-    // has one, and a muffler is exactly a device that absorbs the mid and high
-    // frequencies while passing the low-frequency pulse. Modelling it as heavy
-    // damping on this pipe is cruder than modelling its chambers, and it is the
-    // difference between a burble and a whine at idle.
-    tailpipes: [pipeFromDiameter(0.55, 0.045, 0.03, 1100)],
+    // The exhaust is the car's real 4-2-1, measured off the CAD
+    // (SDM26Exhaust_Assm in chassis_and_engine.glb). Cylinders 1+4 and 2+3
+    // pair into the two primary collectors, which is the classic pairing: the
+    // two cylinders of a pair fire 360 degrees apart. Each length runs from
+    // the valve (about 50 mm of head port, an estimate) to the middle of the
+    // merge it ends in. Diameters are inside diameters: 1.25" x 1 mm
+    // primaries, 1.5" secondaries, then the 2" final pipe.
+    //
+    // Losses are the pipe's own -- boundary-layer and wall heat transfer,
+    // small at these lengths -- and the muffler is where the absorption is.
+    primaries: [0.4224, 0.4243, 0.4245, 0.4262].map((l) => pipeFromDiameter(l, 0.0297, 0.005, 8000)),
+    primaryToCollector: [0, 1, 1, 0],
+    // Primary collector outlet + secondary + first half of the final merge:
+    // 0.078 + 0.035 + 0.390 (0.3975 for 2+3) + 0.030 + 0.037 m.
+    collectors: [pipeFromDiameter(0.57, 0.0361, 0.005, 8000), pipeFromDiameter(0.5775, 0.0361, 0.005, 8000)],
+    collectorToTailpipe: [0, 0],
+    // Rest of the final collector, the V-band flange and the bend to the
+    // muffler inlet.
+    tailpipes: [pipeFromDiameter(0.343, 0.046, 0.005, 8000)],
+    // The muffler: inlet cone, the 382 mm body, and the outlet tip. The CAD
+    // is an empty shell, so the internals are assumed: a perforated straight-
+    // through core the diameter of its inlet, wrapped in packing, which is
+    // what FSAE cars run. The packing is the loss on the body section -- it
+    // absorbs the mid and high frequencies and passes the low-frequency
+    // pulse, which is what a muffler is for (FSAE caps the car at 110 dBA).
+    mufflers: [[
+      pipeFromDiameter(0.054, 0.0555, 0.005, 8000),
+      pipeFromDiameter(0.382, 0.0614, 0.1, 1500),
+      pipeFromDiameter(0.059, 0.0614, 0.005, 8000),
+    ]],
+    // Finite-amplitude steepening of the pulses in the pipes, as a fraction of
+    // the ideal-gas coefficient (see DelayLine.readNonlinear). The ideal value
+    // is for a lossless pipe; a real header loses pulse amplitude to wall
+    // friction and heat transfer as it goes, which the waveguide lumps into
+    // its end losses rather than spreading along the pipe, so it steepens
+    // less. 0.8, together with dfFMix 0.2, is what matched the recording of the
+    // car (sim/tools/audio, clip IMG_5128): harmonic slope -4.3 dB/oct and a
+    // ~940 Hz spectral centroid against the car's -4.6 and ~940, with the
+    // firing fundamental no longer an octave-up whine. At 0 -- a linear
+    // waveguide -- the note was a near-sinusoid, "like underwater".
+    waveNonlinearity: 0.8,
+    // The intake: 32 mm electronic throttle, the 20 mm FSAE restrictor and its
+    // diffuser (a 235 mm part), the plenum, four runners (CAD:
+    // 26_06_IN_ASSY_ASM_U in chassis_and_engine.glb). Each cylinder draws its
+    // charge from the plenum while its intake valve is open; plenum and
+    // restrictor neck are a Helmholtz resonator, and the intake mouth radiates
+    // the time derivative of the neck flow. The plenum's inside volume is not
+    // in the CAD (its bounding box is 178 x 185 x 175 mm); ~3 L behind the
+    // restrictor puts the resonance near 55 Hz, and the restrictor's losses
+    // damp it hard. Above resonance the plenum low-passes the pulses at
+    // 12 dB/octave, so the intake adds weight at the firing fundamental and
+    // below -- the "throat" -- and almost nothing to the harmonic stack.
+    // `level` is relative to the exhaust and was judged by ear against the
+    // IMG_5128 recording (the v2d A/B): a single microphone cannot separate
+    // intake from exhaust, so it is the one free number here. 0 turns it off.
+    intake: { helmholtzHz: 55, q: 1.8, level: 2 },
+    // How the ignition cut (rev limiter, launch control) sounds: per cylinder
+    // per cycle, as an ECU cuts it. See EngineAudio.render.
+    cutMode: "cylinder",
     idleRpm: 2000,
     redlineRpm: 14500,
     gas: { ...DEFAULT_GAS },
@@ -463,7 +542,11 @@ export function validateSpec(spec) {
       return `primary ${i} points at a collector that does not exist`;
     }
   }
-  if (spec.tailpipes.length !== spec.collectors.length) return "one tailpipe per collector";
+  const c2t = spec.collectorToTailpipe ?? spec.collectors.map((_, i) => i);
+  if (c2t.length !== spec.collectors.length) return "collectorToTailpipe needs one entry per collector";
+  for (const t of c2t) if (t >= spec.tailpipes.length) return "a collector points at a tailpipe that does not exist";
+  if (spec.tailpipes.length === 0) return "no tailpipe";
+  if ((spec.mufflers ?? []).length > spec.tailpipes.length) return "more mufflers than tailpipes";
   if (spec.compressionRatio <= 1) return "compression ratio must exceed 1";
   if (spec.conrodM <= spec.strokeM / 2) return "conrod is shorter than the crank throw";
   return null;
@@ -497,7 +580,8 @@ export function exhaustFlowArea(spec, thetaDeg) {
   const maxLift = t.exhaustValveDiameterM * 0.25;
   const curtain = Math.PI * t.exhaustValveDiameterM * liftFrac * maxLift;
   const port = (Math.PI * t.exhaustValveDiameterM * t.exhaustValveDiameterM) / 4;
-  return t.exhaustCd * Math.min(curtain, port);
+  // Per valve, times the number of exhaust valves: a four-valve head has two.
+  return t.exhaustCd * Math.min(curtain, port) * (t.exhaustValveCount ?? 1);
 }
 
 const TABLE_BINS = 2880; // 0.25 crank degrees
@@ -642,7 +726,9 @@ export function stepCylinder(spec, tables, cyl, crankDeg, dt, cal, op, backPress
   let flowOut = 0;
 
   if (inClosed) {
-    const dq = cal.heatReleaseJ * (tables.burnedAt((theta + dtheta) % 720) - tables.burnedAt(theta));
+    // `cyl.cut`: the ignition is cut for this cycle -- the charge is pumped
+    // through unburned (see the cylinder cut mode in EngineAudio.render).
+    const dq = cal.heatReleaseJ * (cyl.cut ? 0 : cyl.heatScale) * (tables.burnedAt((theta + dtheta) % 720) - tables.burnedAt(theta));
     const dp = ((gas.gamma - 1) / v) * dq - ((gas.gamma * cyl.pressurePa) / v) * dv;
     cyl.pressurePa = Math.max(cyl.pressurePa + dp, 1000);
   } else if (exhaustOpen) {
@@ -701,7 +787,22 @@ export function stepCylinder(spec, tables, cyl, crankDeg, dt, cal, op, backPress
     const u = cyl.portVelocity;
 
     const volumetric = area * u;
-    flowOut = volumetric;
+    // The waveguide wants the volume flow the PIPE sees, and gas leaving a
+    // cylinder at several bar expands as it crosses the valve: at the same
+    // mass flow the volume in the runner is larger by (p_cyl / p_amb)^(1/gamma)
+    // (isentropic). Passing the cylinder-side volume flow, as this did, made
+    // the blowdown -- the sharp, high-pressure start of the exhaust event, and
+    // the source of an exhaust note's harmonics -- no bigger than the gentle
+    // displacement flow that follows it, and four overlapping humps of that
+    // summed to something close to a sine at the firing frequency. Referenced
+    // to ambient rather than to the instantaneous back pressure: the latter
+    // closes a loop through the pipe that went unstable at 9.5-10.5k rpm.
+    // Only the source is scaled; the cylinder still empties by its own volume
+    // flow.
+    const expansion = u > 0
+      ? Math.pow(Math.max(cyl.pressurePa / gas.ambientPa, 1), 1 / gas.gamma)
+      : 1;
+    flowOut = volumetric * expansion;
     const dpFlow = -gas.gamma * cyl.pressurePa * (volumetric / v) * dt;
     const dpVol = ((-gas.gamma * cyl.pressurePa) / v) * dv;
     cyl.pressurePa = Math.max(cyl.pressurePa + dpFlow + dpVol, 1000);
@@ -742,12 +843,37 @@ class DelayLine {
   }
 
   read() {
+    return this.readAt(this.delay);
+  }
+
+  readAt(delay) {
     const n = this.buf.length;
-    const i = Math.floor(this.delay);
-    const frac = this.delay - i;
+    const i = Math.floor(delay);
+    const frac = delay - i;
     const a = (this.cursor + n - i) % n;
     const b = (a + n - 1) % n;
     return this.buf[a] * (1 - frac) + this.buf[b] * frac;
+  }
+
+  /**
+   * Read with amplitude-dependent travel time: finite-amplitude steepening.
+   *
+   * A sound wave's crest travels faster than its trough -- by (gamma+1)/2
+   * times the particle velocity, which in an exhaust primary is not small:
+   * a 50 kPa blowdown pulse moves the gas at a couple of hundred metres a
+   * second. Over half a metre of header the front of the pulse catches up
+   * with itself and steepens toward a shock, and that steep front is the
+   * rasp in a real exhaust note. A linear waveguide cannot do it: the pulse
+   * that arrives at the muffler is the same smooth hump that left the valve.
+   *
+   * Here the delay is shortened in proportion to the wave's own pressure:
+   * c_eff = c (1 + k p), k = (gamma+1) / (2 gamma p_ambient).
+   */
+  readNonlinear(k) {
+    if (k === 0) return this.readAt(this.delay);
+    const w0 = this.readAt(this.delay);
+    const speedup = Math.min(Math.max(1 + k * w0, 0.5), 2);
+    return this.readAt(Math.min(Math.max(this.delay / speedup, 1), this.buf.length - 2));
   }
 
   write(x) {
@@ -775,15 +901,17 @@ class Pipe {
     const hz = spec.dampingHz ?? 3000;
     this.dampFwd = new LowPassFilter(hz, sampleRate);
     this.dampBwd = new LowPassFilter(hz, sampleRate);
+    /** Finite-amplitude coefficient, 1/Pa; see DelayLine.readNonlinear. */
+    this.nonlinearK = 0;
   }
 
   /** Delay output with this traverse's losses applied. */
   readFwd() {
-    return this.dampFwd.f(this.fwd.read()) * this.gain;
+    return this.dampFwd.f(this.fwd.readNonlinear(this.nonlinearK)) * this.gain;
   }
 
   readBwd() {
-    return this.dampBwd.f(this.bwd.read()) * this.gain;
+    return this.dampBwd.f(this.bwd.readNonlinear(this.nonlinearK)) * this.gain;
   }
 
   retune(c, rho, sampleRate) {
@@ -809,37 +937,71 @@ function portReflection(pipeAreaM2, valveAreaM2) {
   return Math.min(Math.max((a - v) / (a + v), -1), 1);
 }
 
+/**
+ * The exhaust as a tree of pipes, each feeding the one downstream of it.
+ *
+ * Built from the spec in stages: one primary per cylinder, merging into
+ * `collectors` (`primaryToCollector`), which merge into `tailpipes`
+ * (`collectorToTailpipe`; one-to-one when absent), each of which may feed a
+ * `mufflers` chain of sections before the open end. A 4-1 is four primaries
+ * into one collector; a 4-2-1 is four primaries into two secondaries into
+ * one final pipe. Every merge, and every change of section, is the same
+ * Kelly-Lochbaum junction, so the topology is data and the physics does not
+ * change with it.
+ */
+export function exhaustTopology(spec) {
+  const np = spec.primaries.length;
+  const nc = spec.collectors.length;
+  const nt = spec.tailpipes.length;
+  const muff = spec.mufflers ?? [];
+  const c2t = spec.collectorToTailpipe ?? spec.collectors.map((_, i) => i);
+  const pipes = [];
+  const down = [];
+  for (let i = 0; i < np; i++) { pipes.push(spec.primaries[i]); down.push(np + spec.primaryToCollector[i]); }
+  for (let c = 0; c < nc; c++) { pipes.push(spec.collectors[c]); down.push(np + nc + c2t[c]); }
+  for (let t = 0; t < nt; t++) { pipes.push(spec.tailpipes[t]); down.push(-1); }
+  // A muffler is a chain of sections after its tailpipe (inlet, body, outlet).
+  for (let t = 0; t < nt; t++) {
+    const chain = muff[t] ?? [];
+    let prev = np + nc + t;
+    for (const sec of chain) {
+      down[prev] = pipes.length;
+      prev = pipes.length;
+      pipes.push(sec);
+      down.push(-1);
+    }
+  }
+  return { pipes, down, primaries: np };
+}
+
 export class ExhaustNetwork {
   constructor(spec, sampleRate) {
     this.sampleRate = sampleRate;
-    this.primaries = spec.primaries.map((p) => new Pipe(p, sampleRate));
-    this.collectors = spec.collectors.map((p) => new Pipe(p, sampleRate));
-    this.tailpipes = spec.tailpipes.map((p) => new Pipe(p, sampleRate));
-    this.primaryToCollector = spec.primaryToCollector.slice();
+    const topo = exhaustTopology(spec);
+    this.pipes = topo.pipes.map((p) => new Pipe(p, sampleRate));
+    this.nPrimaries = topo.primaries;
+    const n = this.pipes.length;
+    // The junction at the inlet of every non-primary pipe, and what feeds it.
+    this.junctions = [];
+    for (let j = this.nPrimaries; j < n; j++) {
+      const up = [];
+      for (let k = 0; k < n; k++) if (topo.down[k] === j) up.push(k);
+      this.junctions.push({ j, up: Int32Array.from(up) });
+    }
+    this.openEnds = Int32Array.from(topo.down.flatMap((d, k) => (d === -1 ? [k] : [])));
     this.rhoC = 1;
     // A real open pipe reflects most of a low-frequency wave back inverted and
     // radiates the rest.
     this.openEndReflection = 0.85;
-    this.outputs = new Float32Array(this.tailpipes.length);
-
-    const np = this.primaries.length;
-    const nc = this.collectors.length;
-    const nt = this.tailpipes.length;
+    this.outputs = new Float32Array(this.openEnds.length);
     // Preallocated: step() runs 48,000 times a second.
-    this.w = {
-      primFwdOut: new Float32Array(np),
-      primBwdOut: new Float32Array(np),
-      collFwdOut: new Float32Array(nc),
-      collBwdOut: new Float32Array(nc),
-      tailFwdOut: new Float32Array(nt),
-      tailBwdOut: new Float32Array(nt),
-      primFwdIn: new Float32Array(np),
-      primBwdIn: new Float32Array(np),
-      collFwdIn: new Float32Array(nc),
-      collBwdIn: new Float32Array(nc),
-      tailFwdIn: new Float32Array(nt),
-      tailBwdIn: new Float32Array(nt),
-    };
+    this.fo = new Float32Array(n);
+    this.bo = new Float32Array(n);
+    this.fi = new Float32Array(n);
+    this.bi = new Float32Array(n);
+    // Scale on the physical finite-amplitude coefficient: 1 is the physics,
+    // 0 a linear waveguide.
+    this.nonlinearity = spec.waveNonlinearity ?? 0;
     this.setGasState(spec.gas, spec.gas.exhaustKMax);
   }
 
@@ -855,13 +1017,15 @@ export class ExhaustNetwork {
     const c = speedOfSound(gas, exhaustK);
     const rho = gasDensity(gas, gas.ambientPa, exhaustK);
     this.rhoC = rho * c;
-    for (const p of [...this.primaries, ...this.collectors, ...this.tailpipes]) {
+    const k = ((this.nonlinearity * (gas.gamma + 1)) / (2 * gas.gamma * gas.ambientPa)) || 0;
+    for (const p of this.pipes) {
       p.retune(c, rho, this.sampleRate);
+      p.nonlinearK = k;
     }
   }
 
   reset() {
-    for (const p of [...this.primaries, ...this.collectors, ...this.tailpipes]) {
+    for (const p of this.pipes) {
       p.fwd.clear();
       p.bwd.clear();
     }
@@ -891,7 +1055,7 @@ export class ExhaustNetwork {
    * lower the pressure it is pulling against.
    */
   portPressure(i, ambientPa, valveAreaM2, portVelocityMs = 0) {
-    const p = this.primaries[i];
+    const p = this.pipes[i];
     const r = portReflection(p.areaM2, valveAreaM2);
     // Deliberately reads the raw delay line rather than `readBwd()`. The
     // damping filters are stateful and are advanced exactly once per sample by
@@ -904,81 +1068,53 @@ export class ExhaustNetwork {
   }
 
   step(sourceFlow, valveArea) {
-    const w = this.w;
+    const { pipes, fo, bo, fi, bi } = this;
+    const n = pipes.length;
 
     // Read every pipe end before writing anything. Doing it in one pass lets a
     // junction see its own output this sample, which is an algebraic loop and
     // turns into a howl.
-    for (let i = 0; i < this.primaries.length; i++) {
-      const p = this.primaries[i];
-      w.primFwdOut[i] = p.readFwd();
-      w.primBwdOut[i] = p.readBwd();
-    }
-    for (let i = 0; i < this.collectors.length; i++) {
-      const p = this.collectors[i];
-      w.collFwdOut[i] = p.readFwd();
-      w.collBwdOut[i] = p.readBwd();
-    }
-    for (let i = 0; i < this.tailpipes.length; i++) {
-      const p = this.tailpipes[i];
-      w.tailFwdOut[i] = p.readFwd();
-      w.tailBwdOut[i] = p.readBwd();
+    for (let k = 0; k < n; k++) {
+      fo[k] = pipes[k].readFwd();
+      bo[k] = pipes[k].readBwd();
     }
 
     // Cylinder end: a velocity source at a partially reflecting junction.
-    for (let i = 0; i < this.primaries.length; i++) {
-      const aPipe = Math.max(this.primaries[i].areaM2, 1e-9);
+    for (let i = 0; i < this.nPrimaries; i++) {
+      const aPipe = Math.max(pipes[i].areaM2, 1e-9);
       const u = (sourceFlow[i] || 0) / aPipe;
       const r = portReflection(aPipe, valveArea[i] || 0);
-      w.primFwdIn[i] = r * w.primBwdOut[i] + this.rhoC * u;
+      fi[i] = r * bo[i] + this.rhoC * u;
     }
 
-    // Primaries into collectors: Kelly-Lochbaum scattering.
-    for (let c = 0; c < this.collectors.length; c++) {
+    // Every merge, and every change of section: Kelly-Lochbaum scattering,
+    // p_j = 2 sum(Y p_in) / sum(Y).
+    for (let q = 0; q < this.junctions.length; q++) {
+      const { j, up } = this.junctions[q];
       let num = 0;
       let den = 0;
-      for (let i = 0; i < this.primaryToCollector.length; i++) {
-        if (this.primaryToCollector[i] === c) {
-          num += this.primaries[i].admittance * w.primFwdOut[i];
-          den += this.primaries[i].admittance;
-        }
+      for (let m = 0; m < up.length; m++) {
+        const k = up[m];
+        num += pipes[k].admittance * fo[k];
+        den += pipes[k].admittance;
       }
-      num += this.collectors[c].admittance * w.collBwdOut[c];
-      den += this.collectors[c].admittance;
+      num += pipes[j].admittance * bo[j];
+      den += pipes[j].admittance;
       const pj = den > 1e-12 ? (2 * num) / den : 0;
-      for (let i = 0; i < this.primaryToCollector.length; i++) {
-        if (this.primaryToCollector[i] === c) w.primBwdIn[i] = pj - w.primFwdOut[i];
-      }
-      w.collFwdIn[c] = pj - w.collBwdOut[c];
-    }
-
-    // Collector into tailpipe: the same scattering across an area step.
-    for (let c = 0; c < this.collectors.length; c++) {
-      const yc = this.collectors[c].admittance;
-      const yt = this.tailpipes[c].admittance;
-      const den = yc + yt;
-      const pj = den > 1e-12 ? (2 * (yc * w.collFwdOut[c] + yt * w.tailBwdOut[c])) / den : 0;
-      w.collBwdIn[c] = pj - w.collFwdOut[c];
-      w.tailFwdIn[c] = pj - w.tailBwdOut[c];
+      for (let m = 0; m < up.length; m++) bi[up[m]] = pj - fo[up[m]];
+      fi[j] = pj - bo[j];
     }
 
     // Open end: reflect inverted, radiate the rest.
-    for (let t = 0; t < this.tailpipes.length; t++) {
-      w.tailBwdIn[t] = -this.openEndReflection * w.tailFwdOut[t];
-      this.outputs[t] = (1 + this.openEndReflection) * w.tailFwdOut[t];
+    for (let o = 0; o < this.openEnds.length; o++) {
+      const k = this.openEnds[o];
+      bi[k] = -this.openEndReflection * fo[k];
+      this.outputs[o] = (1 + this.openEndReflection) * fo[k];
     }
 
-    for (let i = 0; i < this.primaries.length; i++) {
-      this.primaries[i].fwd.write(w.primFwdIn[i]);
-      this.primaries[i].bwd.write(w.primBwdIn[i]);
-    }
-    for (let c = 0; c < this.collectors.length; c++) {
-      this.collectors[c].fwd.write(w.collFwdIn[c]);
-      this.collectors[c].bwd.write(w.collBwdIn[c]);
-    }
-    for (let t = 0; t < this.tailpipes.length; t++) {
-      this.tailpipes[t].fwd.write(w.tailFwdIn[t]);
-      this.tailpipes[t].bwd.write(w.tailBwdIn[t]);
+    for (let k = 0; k < n; k++) {
+      pipes[k].fwd.write(fi[k]);
+      pipes[k].bwd.write(bi[k]);
     }
   }
 }
@@ -990,24 +1126,34 @@ export class ExhaustNetwork {
 export const DEFAULT_AUDIO_PARAMETERS = {
   volume: 1,
   convolution: 1,
-  // How much differentiated signal to blend in. Now that the derivative is
-  // normalised to unity gain at its reference frequency, this behaves like the
-  // mix fraction it is named after: it adds edge and bite without deciding the
-  // whole spectral balance.
-  dfFMix: 0.10,
+  // How much differentiated signal to blend in. The derivative is normalised
+  // to unity gain at its reference frequency, so this is a true mix fraction.
+  // What a microphone hears from an open pipe end is monopole radiation,
+  // whose far-field pressure is the TIME DERIVATIVE of the volume flow
+  // leaving the pipe -- +6 dB/octave on the waveguide output. At 0.10 the
+  // model radiated the flow itself, a spectrum that fell away far faster than
+  // the recorded car's. 0.5, with the wave steepening below, put the
+  // harmonic slope and centroid on the recording's (sim/tools/audio,
+  // IMG_5128); 0.8 overshot it. 0.2 with more wave steepening (0.8, see
+  // `waveNonlinearity`) keeps that brightness but puts the weight back on
+  // the firing fundamental: at 0.5 its first overtone sat 9-12 dB too strong
+  // against the recording, which read as light and whiny.
+  dfFMix: 0.2,
   airNoise: 0.5,
   airNoiseCutoffHz: 2000,
   jitter: 0.06,
 
   /**
-   * Output tone control: a gentle roll-off above this.
+   * Output tone control: a gentle roll-off above this. 4.5 kHz, up from 3.2:
+   * the recorded car carries clear harmonics to 3-4 kHz, and the old corner,
+   * two poles deep, took the top off the note.
    *
    * Physically justified, not a sticking plaster. Radiation from an open pipe
    * falls away at high frequency, bodywork and a helmet absorb it, and air
    * absorption removes more over distance. Without it the sharp edge of each
    * blowdown pulse survives all the way to the speaker with nothing between.
    */
-  toneCutoffHz: 3200,
+  toneCutoffHz: 4500,
 
   /**
    * Pascals that map to full scale.
@@ -1062,12 +1208,14 @@ export const DEFAULT_AUDIO_PARAMETERS = {
    * an exhaust is driven, and it falls to nothing on a closed throttle without
    * any special case. Sound pressure goes roughly as the square root of
    * acoustic power, and only a fraction of combustion power becomes sound, so
-   * the exponent is well below 1. 0.55 measures out at 20 dB from idle to the
-   * limiter and 26 dB from a closed-throttle overrun, which is the right
-   * ballpark for a car you can stand beside at idle and cannot at full
-   * throttle.
+   * the exponent is well below 1. It was 0.55; with the note now radiated as
+   * the derivative of the exhaust flow (see `dfFMix`), which by itself
+   * lowers the low-rpm, low-frequency end, 0.45 keeps the overall dynamic
+   * range where it was: 33 dB A-weighted from idle to the limiter and 14 dB
+   * across full throttle from 4000 to 13000 rpm, against 36 and 14 before
+   * (tools/validate.js, measured over every FFT bin).
    */
-  levelExponent: 0.55,
+  levelExponent: 0.45,
 };
 
 export class Synthesizer {
@@ -1183,6 +1331,17 @@ export const LIMITER_DUTY = 0.5;
 export const CRACKLE_CHANCE = 0.22;
 export const CRACKLE_HEAT = 0.55;
 
+/** Seed of the cycle-to-cycle combustion variation; the Rust crate uses the same. */
+export const CYCLE_SEED = 0xc7c1e5;
+
+/**
+ * Pascals-free scale from the intake mouth's radiated flow derivative (m^3/s^2)
+ * to output full scale at intake level 1. Fixed so the intake follows the
+ * same loudness curve (`level`) as the exhaust; `spec.intake.level` sets the
+ * balance between them.
+ */
+export const INTAKE_RADIATION_SCALE = 0.015;
+
 export const DEFAULT_AUDIO_CONFIG = {
   sampleRate: 48000,
   // 256 taps at 48 kHz covers the whole early-reflection structure the impulse
@@ -1220,7 +1379,14 @@ export class EngineAudio {
       // Gas velocity in the exhaust port. State, because the port has
       // inertance -- see stepCylinder.
       portVelocity: 0,
+      // This cycle's heat release relative to the calibrated one: the
+      // cylinder's own trim times this cycle's variation. See `render`.
+      heatScale: 1,
+      lastTheta: -1,
     }));
+    this.trim = spec.firingAnglesDeg.map((_, i) => (spec.cylinderTrim ? spec.cylinderTrim[i] ?? 1 : 1));
+    for (let i = 0; i < this.cylinders.length; i++) this.cylinders[i].heatScale = this.trim[i];
+    this.cycleRng = new Rng(CYCLE_SEED);
 
     this.crankDeg = 0;
     this.running = true;
@@ -1243,10 +1409,16 @@ export class EngineAudio {
     /** The calibration a popping cylinder burns with, see `render`. */
     this.popCal = null;
     this.popRng = new Rng(0x5eed);
+    this.cutRng = new Rng(0xc07);
 
     this.flow = new Float32Array(this.cylinders.length);
     this.valveArea = new Float32Array(this.cylinders.length);
     this.referencePowerW = this.computeReferencePower();
+    // Intake resonator state: neck flow (m^3/s) and its rate, and last
+    // sample's flow for the radiated derivative.
+    this.intakeX = 0;
+    this.intakeV = 0;
+    this.intakePrev = 0;
   }
 
   setParameters(p) {
@@ -1341,10 +1513,26 @@ export class EngineAudio {
     // ignition cut sounds like through a 4-1 pipe.
     const cutPeriod = Math.max(1, Math.round(this.config.sampleRate / LIMITER_STUTTER_HZ));
     const ivc = this.spec.timing.ivcDeg;
+    const cov = this.spec.combustionCov ?? 0;
+    // How the ignition cut sounds. "stutter": every cylinder gated together at
+    // LIMITER_STUTTER_HZ, with the cylinders frozen while off. "cylinder": what
+    // an ECU's ignition cut actually does -- each cylinder, each cycle, is cut
+    // or not (probability LIMITER_DUTY), and a cut cylinder still pumps its
+    // charge through the exhaust unburned. Uneven cuts put the half and odd
+    // orders into the note: the launch-control "brap".
+    const cylinderCut = this.spec.cutMode === "cylinder";
+    // Intake: see `intake` in cbr600rrSdm26().
+    const intake = this.spec.intake;
+    const intakeOn = !!intake && intake.level > 0;
+    const iw0 = intakeOn ? 2 * Math.PI * intake.helmholtzHz : 0;
+    const iDamp = intakeOn ? iw0 / Math.max(intake.q, 1e-3) : 0;
+    const iGain = intakeOn ? intake.level * INTAKE_RADIATION_SCALE * this.synth.params.volume : 0;
+    const ivo = this.spec.timing.ivoDeg;
+    const mapFrac = 0.14 + 0.72 * this.op.throttle;
 
     for (let s = 0; s < out.length; s++) {
       let firing = this.running;
-      if (this.op.cut) {
+      if (this.op.cut && !cylinderCut) {
         this.cutPhase = (this.cutPhase + 1) % cutPeriod;
         if (this.cutPhase >= cutPeriod * LIMITER_DUTY) firing = false;
       }
@@ -1353,14 +1541,25 @@ export class EngineAudio {
         let theta = this.crankDeg - cyl.phaseDeg;
         while (theta < 0) theta += 720;
         while (theta >= 720) theta -= 720;
+        const trapped = cyl.lastTheta >= 0 && cyl.lastTheta < ivc && theta >= ivc;
+        // Cycle-to-cycle variation: no two combustion events are the same
+        // (turbulence, mixture, spark). Drawn once per cycle per cylinder, at
+        // intake-valve close, as a near-Gaussian spread with the spec's
+        // coefficient of variation around the cylinder's own trim.
+        if (trapped && cov > 0) {
+          const g = this.cycleRng.uniform() + this.cycleRng.uniform() + this.cycleRng.uniform();
+          cyl.heatScale = this.trim[i] * Math.max(1 + cov * g, 0);
+        }
         // The crackle: at each intake-valve close on the overrun, this
         // cylinder decides whether the charge it just trapped will light.
         if (this.op.overrun && this.popCal) {
-          if (cyl.lastTheta != null && cyl.lastTheta < ivc && theta >= ivc) {
-            cyl.pop = this.popRng.uniform() < CRACKLE_CHANCE;
-          }
+          if (trapped) cyl.pop = this.popRng.uniform() < CRACKLE_CHANCE;
         } else {
           cyl.pop = false;
+        }
+        if (cylinderCut) {
+          if (!this.op.cut) cyl.cut = false;
+          else if (trapped) cyl.cut = this.cutRng.uniform() * 0.5 + 0.5 < LIMITER_DUTY;
         }
         cyl.lastTheta = theta;
 
@@ -1380,7 +1579,32 @@ export class EngineAudio {
 
       this.exhaust.step(this.flow, this.valveArea);
       this.level += (this.levelTarget - this.level) * levelK;
-      out[s] = this.synth.render(this.exhaust.outputs, load, this.level);
+      let y = this.synth.render(this.exhaust.outputs, load, this.level);
+
+      if (intakeOn) {
+        // Volume drawn into the cylinders whose intake valves are open, each
+        // scaled by its own charge trim and by manifold pressure.
+        let q = 0;
+        if (this.running) {
+          for (let i = 0; i < this.cylinders.length; i++) {
+            let th = this.crankDeg - this.cylinders[i].phaseDeg;
+            while (th < 0) th += 720;
+            while (th >= 720) th -= 720;
+            if (isBetween(th, ivo, ivc)) {
+              const dvol = this.tables.volumeAt((th + degPerSample) % 720) - this.tables.volumeAt(th);
+              if (dvol > 0) q += this.trim[i] * dvol;
+            }
+          }
+          q = (q / dt) * mapFrac;
+        }
+        const a = iw0 * iw0 * (q - this.intakeX) - iDamp * this.intakeV;
+        this.intakeV += a * dt;
+        this.intakeX += this.intakeV * dt;
+        const rad = (this.intakeX - this.intakePrev) / dt;
+        this.intakePrev = this.intakeX;
+        y = Math.min(Math.max(y + iGain * this.level * rad, -1), 1);
+      }
+      out[s] = y;
 
       this.crankDeg += degPerSample;
       if (this.crankDeg >= 720) this.crankDeg -= 720;
@@ -1390,6 +1614,9 @@ export class EngineAudio {
   reset() {
     this.exhaust.reset();
     this.crankDeg = 0;
+    this.intakeX = 0;
+    this.intakeV = 0;
+    this.intakePrev = 0;
     for (const c of this.cylinders) {
       c.pressurePa = this.spec.gas.ambientPa;
       c.temperatureK = this.spec.gas.ambientK;

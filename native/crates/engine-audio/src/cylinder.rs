@@ -31,6 +31,12 @@ pub struct Cylinder {
     /// Gas velocity in the exhaust port, m/s. State, because the slug of gas in
     /// the port has mass and cannot change velocity instantaneously.
     pub port_velocity: f32,
+    /// This cycle's heat release relative to the calibrated one: the
+    /// cylinder's own trim times this cycle's variation.
+    pub heat_scale: f32,
+    /// Crank angle on the previous sample, for spotting intake-valve close.
+    /// Negative until the first sample.
+    pub last_theta: f32,
 }
 
 impl Cylinder {
@@ -41,6 +47,8 @@ impl Cylinder {
             temperature_k: ambient_k,
             exhaust_flow: 0.0,
             port_velocity: 0.0,
+            heat_scale: 1.0,
+            last_theta: -1.0,
         }
     }
 
@@ -95,7 +103,8 @@ pub fn exhaust_flow_area(engine: &EngineSpec, theta_deg: f32) -> f32 {
     let lift = lift_frac * max_lift;
     let curtain = core::f32::consts::PI * t.exhaust_valve_diameter_m * lift;
     let port = core::f32::consts::PI * t.exhaust_valve_diameter_m * t.exhaust_valve_diameter_m * 0.25;
-    t.exhaust_cd * curtain.min(port)
+    // Per valve, times the number of exhaust valves: a four-valve head has two.
+    t.exhaust_cd * curtain.min(port) * t.exhaust_valve_count
 }
 
 
@@ -318,7 +327,7 @@ pub fn step_cylinder(
         // Compression, combustion, expansion.
         let xb0 = tables.burned_fraction(theta);
         let xb1 = tables.burned_fraction((theta + dtheta) % 720.0);
-        let dq = cal.heat_release_j * (xb1 - xb0);
+        let dq = cal.heat_release_j * cyl.heat_scale * (xb1 - xb0);
         let dp = (gas.gamma - 1.0) / v * dq - gas.gamma * cyl.pressure_pa / v * dv;
         cyl.pressure_pa = (cyl.pressure_pa + dp).max(1_000.0);
     } else if exhaust_open {
@@ -384,7 +393,19 @@ pub fn step_cylinder(
         let u = cyl.port_velocity;
 
         let volumetric = area * u; // m^3/s
-        flow_out = volumetric;
+        // The waveguide wants the volume flow the PIPE sees: gas leaving the
+        // cylinder at several bar expands across the valve, isentropically, by
+        // (p_cyl / p_ambient)^(1/gamma). Without it the blowdown was no bigger
+        // than the displacement flow after it, and the note lost its harmonics.
+        // Referenced to ambient, not to the instantaneous back pressure: the
+        // latter closes a loop through the pipe that went unstable. Only the
+        // source is scaled; the cylinder still empties by its own volume flow.
+        let expansion = if u > 0.0 {
+            (cyl.pressure_pa / gas.ambient_pa).max(1.0).powf(1.0 / gas.gamma)
+        } else {
+            1.0
+        };
+        flow_out = volumetric * expansion;
 
         // Losing gas drops the pressure; the piston moving changes it too.
         let dp_flow = -gas.gamma * cyl.pressure_pa * (volumetric / v) * dt;
@@ -417,7 +438,7 @@ pub fn step_cylinder(
 /// Is `theta` inside the arc from `start` to `end`, going forwards, on a
 /// 720-degree circle?
 #[inline]
-fn is_between(theta: f32, start: f32, end: f32) -> bool {
+pub(crate) fn is_between(theta: f32, start: f32, end: f32) -> bool {
     let span = if end >= start { end - start } else { end + 720.0 - start };
     let mut rel = theta - start;
     while rel < 0.0 {

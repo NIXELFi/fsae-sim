@@ -41,13 +41,37 @@ impl DelayLine {
     /// Read the value written `delay` samples ago, linearly interpolated.
     #[inline]
     fn read(&self) -> f32 {
+        self.read_at(self.delay)
+    }
+
+    #[inline]
+    fn read_at(&self, delay: f32) -> f32 {
         let n = self.buf.len();
-        let d = self.delay;
-        let i = d.floor();
-        let frac = d - i;
+        let i = delay.floor();
+        let frac = delay - i;
         let a = (self.cursor + n - i as usize) % n;
         let b = (a + n - 1) % n;
         self.buf[a] * (1.0 - frac) + self.buf[b] * frac
+    }
+
+    /// Read with amplitude-dependent travel time: finite-amplitude steepening.
+    ///
+    /// A sound wave's crest travels faster than its trough, by (gamma+1)/2
+    /// times the particle velocity -- and in an exhaust primary a 50 kPa
+    /// blowdown pulse moves the gas at a couple of hundred metres a second.
+    /// Over half a metre of header the pulse's front catches up with itself
+    /// and steepens toward a shock; that steep front is the rasp in a real
+    /// exhaust note, and a linear waveguide cannot make it. The delay is
+    /// shortened in proportion to the wave's own pressure:
+    /// `c_eff = c (1 + k p)`, `k = (gamma+1) / (2 gamma p_ambient)`.
+    #[inline]
+    fn read_nonlinear(&self, k: f32) -> f32 {
+        if k == 0.0 {
+            return self.read_at(self.delay);
+        }
+        let w0 = self.read_at(self.delay);
+        let speedup = (1.0 + k * w0).clamp(0.5, 2.0);
+        self.read_at((self.delay / speedup).clamp(1.0, self.buf.len() as f32 - 2.0))
     }
 
     #[inline]
@@ -77,6 +101,8 @@ struct Pipe {
     /// Frequency-dependent loss, one filter per direction of travel.
     damp_fwd: LowPassFilter,
     damp_bwd: LowPassFilter,
+    /// Finite-amplitude coefficient, 1/Pa; see `DelayLine::read_nonlinear`.
+    nonlinear_k: f32,
 }
 
 impl Pipe {
@@ -93,19 +119,20 @@ impl Pipe {
             admittance: 1.0,
             damp_fwd: LowPassFilter::new(spec.damping_hz, sample_rate),
             damp_bwd: LowPassFilter::new(spec.damping_hz, sample_rate),
+            nonlinear_k: 0.0,
         }
     }
 
     /// Delay output with this traverse's losses applied.
     #[inline]
     fn read_fwd(&mut self) -> f32 {
-        let v = self.fwd.read();
+        let v = self.fwd.read_nonlinear(self.nonlinear_k);
         self.damp_fwd.f(v) * self.gain
     }
 
     #[inline]
     fn read_bwd(&mut self) -> f32 {
-        let v = self.bwd.read();
+        let v = self.bwd.read_nonlinear(self.nonlinear_k);
         self.damp_bwd.f(v) * self.gain
     }
 
@@ -122,80 +149,107 @@ impl Pipe {
     }
 }
 
+/// Where each pipe's outlet goes: into the inlet of another pipe, or out of
+/// the open end.
+const OPEN_END: usize = usize::MAX;
+
+/// The exhaust as a tree of pipes, each feeding the one downstream of it.
+///
+/// Built from the spec in stages: one primary per cylinder, merging into
+/// `collectors`, which merge into `tailpipes`, each of which may feed a chain
+/// of `mufflers` sections before the open end. A 4-1 is four primaries into
+/// one collector; a 4-2-1 is four primaries into two secondaries into one
+/// final pipe. Every merge and every change of section is the same
+/// Kelly-Lochbaum junction, so the topology is data. Mirrors
+/// `exhaustTopology` in sim/src/audio/engineAudio.js, pipe for pipe.
+fn topology(engine: &EngineSpec) -> (Vec<PipeSpec>, Vec<usize>) {
+    let np = engine.primaries.len();
+    let nc = engine.collectors.len();
+    let nt = engine.tailpipes.len();
+    let mut pipes = Vec::new();
+    let mut down = Vec::new();
+    for i in 0..np {
+        pipes.push(engine.primaries[i]);
+        down.push(np + engine.primary_to_collector[i]);
+    }
+    for c in 0..nc {
+        pipes.push(engine.collectors[c]);
+        down.push(np + nc + engine.collector_to_tailpipe[c]);
+    }
+    for t in 0..nt {
+        pipes.push(engine.tailpipes[t]);
+        down.push(OPEN_END);
+    }
+    for t in 0..nt {
+        let Some(chain) = engine.mufflers.get(t) else { continue };
+        let mut prev = np + nc + t;
+        for sec in chain {
+            down[prev] = pipes.len();
+            prev = pipes.len();
+            pipes.push(*sec);
+            down.push(OPEN_END);
+        }
+    }
+    (pipes, down)
+}
+
+/// The junction at the inlet of a non-primary pipe, and the pipes feeding it.
+#[derive(Clone, Debug)]
+struct Junction {
+    pipe: usize,
+    upstream: Vec<usize>,
+}
+
 /// The whole exhaust system for one engine.
 pub struct ExhaustNetwork {
-    primaries: Vec<Pipe>,
-    collectors: Vec<Pipe>,
-    tailpipes: Vec<Pipe>,
-    primary_to_collector: Vec<usize>,
+    pipes: Vec<Pipe>,
+    n_primaries: usize,
+    junctions: Vec<Junction>,
+    open_ends: Vec<usize>,
     sample_rate: f32,
     rho_c: f32,
+    /// Scale on the ideal finite-amplitude coefficient; 0 is linear.
+    nonlinearity: f32,
     /// Reflection magnitude at the open end of a tailpipe. A real open pipe
     /// reflects most of a low-frequency wave back inverted and radiates the
     /// rest; 0.85 is a normal value for a pipe of this diameter.
     open_end_reflection: f32,
-    /// Radiated signal, one entry per tailpipe.
+    /// Radiated signal, one entry per open end.
     outputs: Vec<f32>,
-    /// Preallocated working buffers.
-    ///
-    /// `step` runs 48,000 times a second and used to build twelve `Vec`s on
-    /// each call. Half a million heap allocations per second dominated the
-    /// whole synthesiser -- more than the convolution, and far more than the
-    /// transcendental functions in the cylinder model.
-    scratch: Scratch,
-}
-
-#[derive(Default, Clone, Debug)]
-struct Scratch {
-    prim_fwd_out: Vec<f32>,
-    prim_bwd_out: Vec<f32>,
-    coll_fwd_out: Vec<f32>,
-    coll_bwd_out: Vec<f32>,
-    tail_fwd_out: Vec<f32>,
-    tail_bwd_out: Vec<f32>,
-    prim_fwd_in: Vec<f32>,
-    prim_bwd_in: Vec<f32>,
-    coll_fwd_in: Vec<f32>,
-    coll_bwd_in: Vec<f32>,
-    tail_fwd_in: Vec<f32>,
-    tail_bwd_in: Vec<f32>,
-}
-
-impl Scratch {
-    fn sized(n_prim: usize, n_coll: usize, n_tail: usize) -> Self {
-        Self {
-            prim_fwd_out: vec![0.0; n_prim],
-            prim_bwd_out: vec![0.0; n_prim],
-            coll_fwd_out: vec![0.0; n_coll],
-            coll_bwd_out: vec![0.0; n_coll],
-            tail_fwd_out: vec![0.0; n_tail],
-            tail_bwd_out: vec![0.0; n_tail],
-            prim_fwd_in: vec![0.0; n_prim],
-            prim_bwd_in: vec![0.0; n_prim],
-            coll_fwd_in: vec![0.0; n_coll],
-            coll_bwd_in: vec![0.0; n_coll],
-            tail_fwd_in: vec![0.0; n_tail],
-            tail_bwd_in: vec![0.0; n_tail],
-        }
-    }
+    /// Preallocated working buffers: `step` runs 48,000 times a second, and
+    /// allocating in it once dominated the whole synthesiser.
+    fo: Vec<f32>,
+    bo: Vec<f32>,
+    fi: Vec<f32>,
+    bi: Vec<f32>,
 }
 
 impl ExhaustNetwork {
     pub fn new(engine: &EngineSpec, sample_rate: f32) -> Self {
+        let (specs, down) = topology(engine);
+        let n = specs.len();
+        let n_primaries = engine.primaries.len();
+        let junctions = (n_primaries..n)
+            .map(|j| Junction {
+                pipe: j,
+                upstream: (0..n).filter(|&k| down[k] == j).collect(),
+            })
+            .collect();
+        let open_ends: Vec<usize> = (0..n).filter(|&k| down[k] == OPEN_END).collect();
         let mut net = Self {
-            primaries: engine.primaries.iter().map(|p| Pipe::new(p, sample_rate)).collect(),
-            collectors: engine.collectors.iter().map(|p| Pipe::new(p, sample_rate)).collect(),
-            tailpipes: engine.tailpipes.iter().map(|p| Pipe::new(p, sample_rate)).collect(),
-            primary_to_collector: engine.primary_to_collector.clone(),
+            pipes: specs.iter().map(|p| Pipe::new(p, sample_rate)).collect(),
+            n_primaries,
+            junctions,
+            outputs: vec![0.0; open_ends.len()],
+            open_ends,
             sample_rate,
             rho_c: 1.0,
+            nonlinearity: engine.wave_nonlinearity,
             open_end_reflection: 0.85,
-            outputs: vec![0.0; engine.tailpipes.len()],
-            scratch: Scratch::sized(
-                engine.primaries.len(),
-                engine.collectors.len(),
-                engine.tailpipes.len(),
-            ),
+            fo: vec![0.0; n],
+            bo: vec![0.0; n],
+            fi: vec![0.0; n],
+            bi: vec![0.0; n],
         };
         net.set_gas_state(&engine.gas, engine.gas.exhaust_k_max);
         net
@@ -219,23 +273,15 @@ impl ExhaustNetwork {
         let c = gas.speed_of_sound(exhaust_k);
         let rho = gas.density(gas.ambient_pa, exhaust_k);
         self.rho_c = rho * c;
-        for p in self
-            .primaries
-            .iter_mut()
-            .chain(self.collectors.iter_mut())
-            .chain(self.tailpipes.iter_mut())
-        {
+        let k = self.nonlinearity * (gas.gamma + 1.0) / (2.0 * gas.gamma * gas.ambient_pa);
+        for p in self.pipes.iter_mut() {
             p.retune(c, rho, self.sample_rate);
+            p.nonlinear_k = k;
         }
     }
 
     pub fn reset(&mut self) {
-        for p in self
-            .primaries
-            .iter_mut()
-            .chain(self.collectors.iter_mut())
-            .chain(self.tailpipes.iter_mut())
-        {
+        for p in self.pipes.iter_mut() {
             p.clear();
         }
         for o in &mut self.outputs {
@@ -268,7 +314,7 @@ impl ExhaustNetwork {
         valve_area_m2: f32,
         port_velocity_ms: f32,
     ) -> f32 {
-        let p = &self.primaries[i];
+        let p = &self.pipes[i];
         let r = port_reflection(p.area_m2, valve_area_m2);
         // Deliberately reads the raw delay line rather than `read_bwd`. The
         // damping filters are stateful and are advanced exactly once per sample
@@ -286,107 +332,62 @@ impl ExhaustNetwork {
     /// effective flow area, m^2, which sets how much of a returning wave the
     /// port reflects.
     pub fn step(&mut self, source_flow: &[f32], valve_area: &[f32]) {
-        // Move the scratch out so the rest of `self` can be borrowed alongside
-        // it, then put it back. Cheaper than any interior-mutability dance, and
-        // the compiler still proves the access is exclusive.
-        let mut w = core::mem::take(&mut self.scratch);
+        let n = self.pipes.len();
 
         // ---- read every pipe end before writing anything -------------------
         // Doing this in one pass would let a junction see this sample's own
         // output, which is an algebraic loop and turns into a howl.
-        for (i, p) in self.primaries.iter_mut().enumerate() {
-            w.prim_fwd_out[i] = p.read_fwd();
-            w.prim_bwd_out[i] = p.read_bwd();
-        }
-        for (i, p) in self.collectors.iter_mut().enumerate() {
-            w.coll_fwd_out[i] = p.read_fwd();
-            w.coll_bwd_out[i] = p.read_bwd();
-        }
-        for (i, p) in self.tailpipes.iter_mut().enumerate() {
-            w.tail_fwd_out[i] = p.read_fwd();
-            w.tail_bwd_out[i] = p.read_bwd();
+        for k in 0..n {
+            self.fo[k] = self.pipes[k].read_fwd();
+            self.bo[k] = self.pipes[k].read_bwd();
         }
 
         // ---- cylinder end of each primary ----------------------------------
         // The valve is a velocity source -- pressure wave = rho * c * u, with
         // u = Q / A -- sitting at a junction whose reflection depends on how
-        // far the valve is open.
-        //
-        // Treating this end as a rigid wall regardless of valve position is
-        // wrong and audibly so. A wide-open exhaust valve is a hole into a
-        // large volume, not a mirror: it should swallow most of a returning
-        // wave. Reflecting all of it back leaves the primary with a Q high
-        // enough that pulses interfere with their own echoes and the note
-        // stops tracking the firing rate.
-        for i in 0..self.primaries.len() {
+        // far the valve is open. A wide-open valve is a hole into a large
+        // volume, not a mirror: it swallows most of a returning wave.
+        for i in 0..self.n_primaries {
             let q = source_flow.get(i).copied().unwrap_or(0.0);
-            let a_pipe = self.primaries[i].area_m2.max(1e-9);
+            let a_pipe = self.pipes[i].area_m2.max(1e-9);
             let u = q / a_pipe;
             let r = port_reflection(a_pipe, valve_area.get(i).copied().unwrap_or(0.0));
-            w.prim_fwd_in[i] = r * w.prim_bwd_out[i] + self.rho_c * u;
+            self.fi[i] = r * self.bo[i] + self.rho_c * u;
         }
 
-        // ---- primaries into collectors -------------------------------------
-        for c in 0..self.collectors.len() {
-            // Kelly-Lochbaum scattering: p_junction = 2 * sum(Y_i p_i+) / sum(Y_i)
+        // ---- every merge and change of section -----------------------------
+        // Kelly-Lochbaum scattering: p_junction = 2 * sum(Y_i p_i+) / sum(Y_i).
+        for jn in &self.junctions {
+            let j = jn.pipe;
             let mut num = 0.0f32;
             let mut den = 0.0f32;
-            for (i, &target) in self.primary_to_collector.iter().enumerate() {
-                if target == c {
-                    num += self.primaries[i].admittance * w.prim_fwd_out[i];
-                    den += self.primaries[i].admittance;
-                }
+            for &k in &jn.upstream {
+                num += self.pipes[k].admittance * self.fo[k];
+                den += self.pipes[k].admittance;
             }
-            num += self.collectors[c].admittance * w.coll_bwd_out[c];
-            den += self.collectors[c].admittance;
-
+            num += self.pipes[j].admittance * self.bo[j];
+            den += self.pipes[j].admittance;
             let p_j = if den > 1e-12 { 2.0 * num / den } else { 0.0 };
-
-            for (i, &target) in self.primary_to_collector.iter().enumerate() {
-                if target == c {
-                    w.prim_bwd_in[i] = p_j - w.prim_fwd_out[i];
-                }
+            for &k in &jn.upstream {
+                self.bi[k] = p_j - self.fo[k];
             }
-            w.coll_fwd_in[c] = p_j - w.coll_bwd_out[c];
-        }
-
-        // ---- collector into tailpipe ---------------------------------------
-        for c in 0..self.collectors.len() {
-            let yc = self.collectors[c].admittance;
-            let yt = self.tailpipes[c].admittance;
-            let den = yc + yt;
-            let p_j = if den > 1e-12 {
-                2.0 * (yc * w.coll_fwd_out[c] + yt * w.tail_bwd_out[c]) / den
-            } else {
-                0.0
-            };
-            w.coll_bwd_in[c] = p_j - w.coll_fwd_out[c];
-            w.tail_fwd_in[c] = p_j - w.tail_bwd_out[c];
+            self.fi[j] = p_j - self.bo[j];
         }
 
         // ---- open end -------------------------------------------------------
         // An open pipe end reflects the wave back inverted. What escapes is
         // the radiated sound, proportional to (1 + R) times the outgoing wave.
-        for t in 0..self.tailpipes.len() {
-            w.tail_bwd_in[t] = -self.open_end_reflection * w.tail_fwd_out[t];
-            self.outputs[t] = (1.0 + self.open_end_reflection) * w.tail_fwd_out[t];
+        for (o, &k) in self.open_ends.iter().enumerate() {
+            self.bi[k] = -self.open_end_reflection * self.fo[k];
+            self.outputs[o] = (1.0 + self.open_end_reflection) * self.fo[k];
         }
 
         // ---- commit ---------------------------------------------------------
-        for i in 0..self.primaries.len() {
-            self.primaries[i].fwd.write(w.prim_fwd_in[i]);
-            self.primaries[i].bwd.write(w.prim_bwd_in[i]);
+        for k in 0..n {
+            let (f, b) = (self.fi[k], self.bi[k]);
+            self.pipes[k].fwd.write(f);
+            self.pipes[k].bwd.write(b);
         }
-        for c in 0..self.collectors.len() {
-            self.collectors[c].fwd.write(w.coll_fwd_in[c]);
-            self.collectors[c].bwd.write(w.coll_bwd_in[c]);
-        }
-        for t in 0..self.tailpipes.len() {
-            self.tailpipes[t].fwd.write(w.tail_fwd_in[t]);
-            self.tailpipes[t].bwd.write(w.tail_bwd_in[t]);
-        }
-
-        self.scratch = w;
     }
 }
 
@@ -503,6 +504,6 @@ mod tests {
         let mut hot = ExhaustNetwork::new(&e, fs);
         hot.set_gas_state(&e.gas, 1_200.0);
         // Delay is length / c, so hot must have the shorter delay.
-        assert!(hot.primaries[0].fwd.delay < cold.primaries[0].fwd.delay);
+        assert!(hot.pipes[0].fwd.delay < cold.pipes[0].fwd.delay);
     }
 }

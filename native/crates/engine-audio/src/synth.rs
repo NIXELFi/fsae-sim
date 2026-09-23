@@ -91,16 +91,19 @@ impl Default for AudioParameters {
         Self {
             volume: 1.0,
             convolution: 1.0,
-            df_f_mix: 0.10,
+            // Far-field radiation from an open pipe end is the time derivative
+            // of the volume flow; 0.2 with wave steepening 0.8 is what matched
+            // the recorded car (see dfFMix in engineAudio.js).
+            df_f_mix: 0.2,
             air_noise: 0.5,
             air_noise_cutoff_hz: 2_000.0,
             jitter: 0.06,
-            tone_cutoff_hz: 3_200.0,
+            tone_cutoff_hz: 4_500.0,
             pressure_ref_pa: 90_000.0,
             resonance_compress_db: 8.0,
             compressor_target: 0.09,
             level_floor: 0.025,
-            level_exponent: 0.55,
+            level_exponent: 0.45,
         }
     }
 }

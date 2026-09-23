@@ -42,31 +42,40 @@ pub fn build(cabin: Cabin, taps: usize, sample_rate: f32, seed: u64) -> Vec<f32>
     // Direct sound.
     ir[0] = 1.0;
 
-    // Early reflections: delay in milliseconds, and amplitude.
-    let (reflections, decay_s, cutoff_hz): (&[(f32, f32)], f32, f32) = match cabin {
+    // Early reflections: delay in milliseconds, and amplitude; then the
+    // diffuse tail's decay, band limit and amplitude.
+    //
+    // The amplitudes used to be three times these, with a tail four times
+    // stronger, and 256 taps of that is not a diffuse field but a fixed
+    // comb: it cut a 15-20 dB notch near 2 kHz into every sound the engine
+    // made. At these levels the cabin still reads as a space without imposing
+    // its own spectrum. Same numbers as CABIN_SHAPES in engineAudio.js.
+    let (reflections, decay_s, cutoff_hz, tail): (&[(f32, f32)], f32, f32, f32) = match cabin {
         Cabin::Cockpit => (
             &[
-                (0.6, -0.62), // roll hoop, very close and inverted
-                (1.1, 0.44),  // floor
-                (1.9, -0.31), // sidepod
-                (3.2, 0.22),  // firewall
-                (4.8, -0.14),
+                (0.6, -0.22), // roll hoop, very close and inverted
+                (1.1, 0.15),  // floor
+                (1.9, -0.11), // sidepod
+                (3.2, 0.08),  // firewall
+                (4.8, -0.05),
             ],
             0.020,
             5_500.0,
+            0.08,
         ),
         Cabin::Trackside => (
             &[
-                (1.8, 0.52), // ground bounce
-                (4.5, -0.34),
-                (7.9, 0.24),
-                (12.0, -0.16),
-                (17.5, 0.10),
+                (1.8, 0.16), // ground bounce
+                (4.5, -0.10),
+                (7.9, 0.07),
+                (12.0, -0.05),
+                (17.5, 0.03),
             ],
             0.055,
             7_500.0,
+            0.08,
         ),
-        Cabin::Anechoic => (&[], 0.0, 20_000.0),
+        Cabin::Anechoic => (&[], 0.0, 20_000.0, 0.0),
     };
 
     for &(ms, amp) in reflections {
@@ -82,7 +91,7 @@ pub fn build(cabin: Cabin, taps: usize, sample_rate: f32, seed: u64) -> Vec<f32>
     let tau = decay_s * sample_rate;
     for (i, v) in ir.iter_mut().enumerate().skip(start) {
         let env = (-(i as f32) / tau).exp();
-        *v += rng.uniform() * env * 0.35;
+        *v += rng.uniform() * env * tail;
     }
 
     // Band-limit it. An IR with energy up at Nyquist makes the convolution

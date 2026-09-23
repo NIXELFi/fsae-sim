@@ -53,13 +53,21 @@ pub mod ir;
 pub mod synth;
 
 pub use engine::{
-    cbr600rr_sdm26, single_cylinder_450, CombustionSpec, EngineSpec, GasProperties, PipeSpec,
-    ValveTiming,
+    cbr600rr_sdm26, single_cylinder_450, CombustionSpec, EngineSpec, GasProperties, IntakeSpec,
+    PipeSpec, ValveTiming,
 };
 pub use ir::Cabin;
 pub use synth::AudioParameters;
 
 use cylinder::{calibrate, step_cylinder, CycleCalibration, CycleTables, Cylinder, OperatingPoint};
+use filters::Rng;
+
+/// Seed of the cycle-to-cycle combustion variation; `CYCLE_SEED` in the JS port.
+pub const CYCLE_SEED: u64 = 0xC7_C1E5;
+
+/// Scale from the intake mouth's radiated flow derivative to output full scale
+/// at intake level 1; `INTAKE_RADIATION_SCALE` in the JS port.
+pub const INTAKE_RADIATION_SCALE: f32 = 0.015;
 use exhaust::ExhaustNetwork;
 use synth::Synthesizer;
 
@@ -110,6 +118,14 @@ pub struct EngineAudio {
     reference_power_w: f32,
     inputs: Vec<f32>,
     running: bool,
+    /// Each cylinder's own charge trim (`EngineSpec::cylinder_trim`).
+    trim: Vec<f32>,
+    /// Draws the cycle-to-cycle combustion variation.
+    cycle_rng: Rng,
+    /// Intake resonator: neck flow, its rate, and last sample's flow.
+    intake_x: f32,
+    intake_v: f32,
+    intake_prev: f32,
 }
 
 impl EngineAudio {
@@ -124,10 +140,18 @@ impl EngineAudio {
             AudioParameters::default(),
         );
         let exhaust = ExhaustNetwork::new(&spec, config.sample_rate);
+        let trim: Vec<f32> = (0..spec.cylinders())
+            .map(|i| spec.cylinder_trim.get(i).copied().unwrap_or(1.0))
+            .collect();
         let cylinders = spec
             .firing_angles_deg
             .iter()
-            .map(|&phase| Cylinder::new(phase, spec.gas.ambient_pa, spec.gas.ambient_k))
+            .enumerate()
+            .map(|(i, &phase)| {
+                let mut c = Cylinder::new(phase, spec.gas.ambient_pa, spec.gas.ambient_k);
+                c.heat_scale = trim[i];
+                c
+            })
             .collect::<Vec<_>>();
 
         let spec_for_ref = spec.clone();
@@ -161,6 +185,11 @@ impl EngineAudio {
             reference_power_w: Self::reference_power(&spec_for_ref),
             inputs: vec![0.0; n_tail],
             running: true,
+            trim,
+            cycle_rng: Rng::new(CYCLE_SEED),
+            intake_x: 0.0,
+            intake_v: 0.0,
+            intake_prev: 0.0,
         })
     }
 
@@ -270,12 +299,32 @@ impl EngineAudio {
         // 15 ms one-pole on the level: fast enough to follow a blip, slow
         // enough that a cut is a fall, not a click.
         let level_k = 1.0 - (-dt / 0.015_f32).exp();
+        let ivc = self.spec.timing.ivc_deg;
+        let cov = self.spec.combustion_cov;
+        // Intake (see `IntakeSpec`).
+        let intake = self.spec.intake;
+        let intake_on = intake.level > 0.0;
+        let iw0 = 2.0 * core::f32::consts::PI * intake.helmholtz_hz;
+        let i_damp = iw0 / intake.q.max(1e-3);
+        let i_gain = intake.level * INTAKE_RADIATION_SCALE * self.synth.parameters().volume;
+        let ivo = self.spec.timing.ivo_deg;
+        let map_frac = 0.14 + 0.72 * self.op.throttle;
 
         for sample in out.iter_mut() {
             self.level += (self.level_target - self.level) * level_k;
             // Cylinders, each seeing the pressure its own primary presents.
             for (i, cyl) in self.cylinders.iter_mut().enumerate() {
-                let area = self.tables.valve_area(cyl.theta(self.crank_deg));
+                let theta = cyl.theta(self.crank_deg);
+                // Cycle-to-cycle variation, drawn once per cycle per cylinder
+                // at intake-valve close: a near-Gaussian spread (sum of three
+                // uniforms, unit variance) around the cylinder's own trim.
+                let trapped = cyl.last_theta >= 0.0 && cyl.last_theta < ivc && theta >= ivc;
+                if trapped && cov > 0.0 {
+                    let g = self.cycle_rng.uniform() + self.cycle_rng.uniform() + self.cycle_rng.uniform();
+                    cyl.heat_scale = self.trim[i] * (1.0 + cov * g).max(0.0);
+                }
+                cyl.last_theta = theta;
+                let area = self.tables.valve_area(theta);
                 self.valve_area[i] = area;
                 // The port velocity from the previous sample closes the
                 // impedance loop. Strictly implicit -- the pressure depends on
@@ -303,7 +352,32 @@ impl EngineAudio {
 
             self.exhaust.step(&self.flow, &self.valve_area);
             self.inputs.copy_from_slice(self.exhaust.outputs());
-            *sample = self.synth.render(&self.inputs, load, self.level);
+            let mut y = self.synth.render(&self.inputs, load, self.level);
+
+            if intake_on {
+                // Volume drawn by the cylinders whose intake valves are open,
+                // each scaled by its own charge trim and by manifold pressure.
+                let mut q = 0.0f32;
+                if self.running {
+                    for (i, cyl) in self.cylinders.iter().enumerate() {
+                        let th = cyl.theta(self.crank_deg);
+                        if cylinder::is_between(th, ivo, ivc) {
+                            let dvol = self.tables.volume((th + deg_per_sample) % 720.0) - self.tables.volume(th);
+                            if dvol > 0.0 {
+                                q += self.trim[i] * dvol;
+                            }
+                        }
+                    }
+                    q = q / dt * map_frac;
+                }
+                let a = iw0 * iw0 * (q - self.intake_x) - i_damp * self.intake_v;
+                self.intake_v += a * dt;
+                self.intake_x += self.intake_v * dt;
+                let rad = (self.intake_x - self.intake_prev) / dt;
+                self.intake_prev = self.intake_x;
+                y = (y + i_gain * self.level * rad).clamp(-1.0, 1.0);
+            }
+            *sample = y;
 
             self.crank_deg += deg_per_sample;
             if self.crank_deg >= 720.0 {
@@ -322,6 +396,9 @@ impl EngineAudio {
             c.exhaust_flow = 0.0;
             c.port_velocity = 0.0;
         }
+        self.intake_x = 0.0;
+        self.intake_v = 0.0;
+        self.intake_prev = 0.0;
     }
 }
 

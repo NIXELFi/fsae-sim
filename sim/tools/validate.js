@@ -1038,11 +1038,16 @@ console.log("\nENGINE AUDIO  (vs golden vectors from the Rust crate)");
     const fundamental = magAt(buf, golden.sampleRate, c.firingHz);
     check(`${c.rpm} rpm: firing fundamental present`, fundamental > 1e-3 ? 1 : 0, 1, 1, "");
 
-    // Half order must be absent: an even-firing four has no once-per-cycle
-    // component. If this appears, the firing angles or the 720-degree wrap are
-    // wrong.
+    // The half order must stay well below the firing fundamental. A perfectly
+    // even four has none at all, and this used to demand 20x (-26 dB). The
+    // model now carries the real engine's cylinder-to-cylinder differences
+    // (charge trim, event phasing), and the onboard recording of the car
+    // (sim/tools/audio, IMG_5128) puts its half orders at -13 to -16 dB re
+    // the fundamental, i.e. 4.5-6.5x. What this still catches is the mistake
+    // it exists for: wrong firing angles or a broken 720-degree wrap put the
+    // half order level with, or above, the fundamental.
     const half = magAt(buf, golden.sampleRate, c.firingHz * 0.5);
-    check(`${c.rpm} rpm: half-order rejection`, fundamental / Math.max(half, 1e-12), 20, 1e9, "x");
+    check(`${c.rpm} rpm: half-order rejection`, fundamental / Math.max(half, 1e-12), 4, 1e9, "x");
 
     // And the harmonics must be there, or it is a bare tone rather than an
     // engine.
@@ -1097,6 +1102,32 @@ console.log("\nENGINE AUDIO  (tonal balance and loudness)");
 {
   const FS = 48000;
 
+  // In-place radix-2 FFT (the buffer length is a power of two).
+  const fft = (x) => {
+    const n = x.length;
+    const re = Float64Array.from(x);
+    const im = new Float64Array(n);
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { [re[i], re[j]] = [re[j], re[i]]; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = (-2 * Math.PI) / len;
+      for (let i = 0; i < n; i += len) {
+        for (let k = 0; k < len / 2; k++) {
+          const wr = Math.cos(ang * k), wi = Math.sin(ang * k);
+          const ar = re[i + k + len / 2], ai = im[i + k + len / 2];
+          const tr = ar * wr - ai * wi, ti = ar * wi + ai * wr;
+          re[i + k + len / 2] = re[i + k] - tr; im[i + k + len / 2] = im[i + k] - ti;
+          re[i + k] += tr; im[i + k] += ti;
+        }
+      }
+    }
+    return { re, im };
+  };
+
   // Standard A-weighting: about -30 dB at 50 Hz, roughly flat at 2-4 kHz.
   const aWeight = (f) => {
     const f2 = f * f;
@@ -1120,26 +1151,28 @@ console.log("\nENGINE AUDIO  (tonal balance and loudness)");
     let peak = 0;
     for (const v of buf) peak = Math.max(peak, Math.abs(v));
 
+    // Every FFT bin from 40 Hz to 12 kHz. This used to probe 110 log-spaced
+    // frequencies, which is fine for a noisy spectrum but blind to a harmonic
+    // one: the probes sat ~5% apart and a firing harmonic is a few hertz wide,
+    // so most harmonics fell between them and the meter read the noise floor.
+    const { re: fr, im: fi } = fft(Float64Array.from(buf, (v, i) => v * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / buf.length))));
     let aTotal = 0;
     let aHigh = 0;
     let rawTotal = 0;
     let rawLow = 0;
-    const n = 110;
-    for (let k = 0; k < n; k++) {
-      const f = 40 * Math.pow(12000 / 40, k / (n - 1));
-      const w = (2 * Math.PI * f) / FS;
-      let re = 0;
-      let im = 0;
-      for (let i = 0; i < buf.length; i++) {
-        re += buf[i] * Math.cos(w * i);
-        im += buf[i] * Math.sin(w * i);
-      }
-      const p = (re * re + im * im) / (buf.length * buf.length);
+    for (let k = 1; k < buf.length / 2; k++) {
+      const f = (k * FS) / buf.length;
+      if (f < 40 || f > 12000) continue;
+      const p = fr[k] * fr[k] + fi[k] * fi[k];
       aTotal += p * aWeight(f) ** 2;
       rawTotal += p;
       if (f > 1500) aHigh += p * aWeight(f) ** 2;
       else rawLow += p;
     }
+    // Same units as before: power of a unit-window sine.
+    const norm = (buf.length * buf.length) / 4;
+    aTotal /= norm;
+    aHigh /= norm;
     return {
       peak,
       dBA: 10 * Math.log10(aTotal + 1e-30),
@@ -1170,17 +1203,28 @@ console.log("\nENGINE AUDIO  (tonal balance and loudness)");
     // transient once left every pulse on the rail, at RMS 0.99.
     check(`${label}: peak (headroom)`, m.peak, 0, 0.85, "");
     // The perceptually weighted high end. Idle sat at 30% here while looking
-    // fine by raw energy, and that is what "whiny at idle" measures as.
-    check(`${label}: A-weighted energy >1.5 kHz`, m.aHighPct, 0, 25, " %");
+    // fine by raw energy, and that is what "whiny at idle" measures as. The
+    // ceiling was 25%; it is 40% now that there is a measurement of the real
+    // car to set it by: the onboard clip (sim/tools/audio, IMG_5128) reads
+    // 49-58% at 10-12k rpm with the car within ~15 m of the camera, and
+    // 10-26% further away, where distance has taken the top off. A note held
+    // under 25% at full throttle and high rpm is the "underwater" one.
+    check(`${label}: A-weighted energy >1.5 kHz`, m.aHighPct, 0, 40, " %");
   }
 
   // Loudness has to rise with how hard the engine is working. A real car idles
   // 25-35 dB below full throttle; normalising every operating point to one
   // level is what made idle sound louder than the rest of the rev range.
+  //
+  // These windows were set against the old 110-probe meter, which read the
+  // noise floor between harmonics rather than the harmonics; measured
+  // properly, the pre-2026-09-23 model itself sat at 36 dB idle-to-limiter,
+  // 29 dB part throttle, 44 dB overrun and 14 dB across full throttle. The
+  // windows below are the same intent re-based on the corrected meter.
   const limiter = at["13000 WOT"].dBA;
-  check("idle below the limiter", limiter - at["idle 2000"].dBA, 14, 32, " dB");
-  check("part throttle below the limiter", limiter - at["2500 part"].dBA, 6, 24, " dB");
-  check("overrun below the limiter", limiter - at["3000 overrun"].dBA, 14, 40, " dB");
+  check("idle below the limiter", limiter - at["idle 2000"].dBA, 14, 40, " dB");
+  check("part throttle below the limiter", limiter - at["2500 part"].dBA, 6, 32, " dB");
+  check("overrun below the limiter", limiter - at["3000 overrun"].dBA, 14, 48, " dB");
   check(
     "overrun below full throttle at the same rpm",
     at["9000 WOT"] ? at["9000 WOT"].dBA - at["9000 overrun"].dBA : 99,
@@ -1191,8 +1235,11 @@ console.log("\nENGINE AUDIO  (tonal balance and loudness)");
   // is real and worth hearing, but the raw waveguide varies by 12 dB purely on
   // which pipe mode the firing harmonics land on, which had 10000 rpm louder
   // than the limiter. The compressor exists to bound that.
+  // A real engine does get louder up the rev range at full throttle -- the
+  // firing rate and the exhaust's radiation efficiency both rise -- so this
+  // bounds the swing rather than forbidding it: 18 dB from 4000 to 13000.
   const wot = ["4000 WOT", "7000 WOT", "10000 WOT", "13000 WOT"].map((k) => at[k].dBA);
-  check("spread across full throttle", Math.max(...wot) - Math.min(...wot), 0, 8, " dB");
+  check("spread across full throttle", Math.max(...wot) - Math.min(...wot), 0, 18, " dB");
 }
 
 

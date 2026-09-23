@@ -250,9 +250,13 @@ mod spectrum_probe {
                 "{rpm} rpm: no energy at the firing frequency {f_fire:.0} Hz"
             );
 
-            // Nothing at half order. A four with an even 180-degree crank has
-            // no once-per-cycle component; if this fails, the firing angles or
-            // the 720-degree wrap are wrong.
+            // Little at half order. A perfectly even four has no once-per-cycle
+            // component, and this used to demand 20x below the fundamental. The
+            // spec now carries the real engine's cylinder-to-cylinder
+            // differences, and the onboard recording of the car puts its half
+            // and odd orders at -13 to -16 dB (4.5-6.5x). Wrong firing angles
+            // or a broken 720-degree wrap still fail this: they put these
+            // level with the fundamental.
             for (label, f) in [
                 ("half order", f_fire * 0.5),
                 ("0.75x", f_fire * 0.75),
@@ -260,7 +264,7 @@ mod spectrum_probe {
             ] {
                 let m = mag_at(&buf, fs, f);
                 assert!(
-                    m < fundamental / 20.0,
+                    m < fundamental / 4.0,
                     "{rpm} rpm: {label} at {f:.0} Hz is {m:.5}, too close to the                      firing fundamental {fundamental:.5}"
                 );
             }
