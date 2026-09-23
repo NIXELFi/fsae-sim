@@ -422,7 +422,16 @@ export function cbr600rrSdm26() {
     primaryToCollector: [0, 1, 1, 0],
     // Primary collector outlet + secondary + first half of the final merge:
     // 0.078 + 0.035 + 0.390 (0.3975 for 2+3) + 0.030 + 0.037 m.
-    collectors: [pipeFromDiameter(0.57, 0.0361, 0.005, 8000), pipeFromDiameter(0.5775, 0.0361, 0.005, 8000)],
+    //
+    // The 2+3 secondary is given a higher high-frequency loss (2 kHz loss
+    // corner against 8 kHz). HYPOTHESIS, to check on the car: the CAD
+    // branches are symmetric to within a centimetre, but the recording
+    // carries per-revolution orders 3/5/7 at -12 to -19 dB re the firing
+    // fundamental, which only a difference in pulse SHAPE between the two
+    // branches reproduced (a bend, heat wrap or slip joint on one side would
+    // do it); differences in length, area, charge or timing lifted order 1
+    // far more than 3/5/7.
+    collectors: [pipeFromDiameter(0.57, 0.0361, 0.005, 8000), pipeFromDiameter(0.5775, 0.0361, 0.005, 2000)],
     collectorToTailpipe: [0, 0],
     // Rest of the final collector, the V-band flange and the bend to the
     // muffler inlet.
@@ -463,7 +472,15 @@ export function cbr600rrSdm26() {
     // `level` is relative to the exhaust and was judged by ear against the
     // IMG_5128 recording (the v2d A/B): a single microphone cannot separate
     // intake from exhaust, so it is the one free number here. 0 turns it off.
-    intake: { helmholtzHz: 55, q: 1.8, level: 2 },
+    //
+    // `cockpitGain` is where the listener sits. From the CAD the throttle
+    // mouth (x -1.0 m, z 1.1 m) is about 2.7x closer to the driver's head
+    // than the muffler outlet (x -1.66 m, z 0.41 m) -- head position
+    // estimated just ahead of the main hoop -- while a trackside listener
+    // is roughly equidistant from both. So the cockpit hears the intake
+    // 2.7x (8.6 dB) louder relative to the exhaust; the exterior level is
+    // the one judged against the camera recording.
+    intake: { helmholtzHz: 55, q: 1.8, level: 2, cockpitGain: 2.7 },
     // How the ignition cut (rev limiter, launch control) sounds: per cylinder
     // per cycle, as an ECU cuts it. See EngineAudio.render.
     cutMode: "cylinder",
@@ -1139,21 +1156,27 @@ export const DEFAULT_AUDIO_PARAMETERS = {
   // the firing fundamental: at 0.5 its first overtone sat 9-12 dB too strong
   // against the recording, which read as light and whiny.
   dfFMix: 0.2,
-  airNoise: 0.5,
-  airNoiseCutoffHz: 2000,
+  // Turbulent flow noise of the exhaust jet, modulated by the flow. The
+  // recording of the car carries 3-10 dB more between 1.25 and 5 kHz than
+  // the harmonics alone give (even stationary on launch control, so not
+  // wind): the rasp. 1.0 up to 6 kHz closes that; 0.5 to 2 kHz left the note
+  // clean where the car is raw.
+  airNoise: 1.0,
+  airNoiseCutoffHz: 6000,
   jitter: 0.06,
 
   /**
-   * Output tone control: a gentle roll-off above this. 4.5 kHz, up from 3.2:
-   * the recorded car carries clear harmonics to 3-4 kHz, and the old corner,
-   * two poles deep, took the top off the note.
+   * Output tone control: a gentle roll-off above this. 8 kHz, up from 3.2
+   * and then 4.5: the recorded car carries clear harmonics and flow noise to
+   * 5 kHz and beyond, and the old corner, two poles deep, took the top off
+   * the note.
    *
    * Physically justified, not a sticking plaster. Radiation from an open pipe
    * falls away at high frequency, bodywork and a helmet absorb it, and air
    * absorption removes more over distance. Without it the sharp edge of each
    * blowdown pulse survives all the way to the speaker with nothing between.
    */
-  toneCutoffHz: 4500,
+  toneCutoffHz: 8000,
 
   /**
    * Pascals that map to full scale.
@@ -1526,7 +1549,9 @@ export class EngineAudio {
     const intakeOn = !!intake && intake.level > 0;
     const iw0 = intakeOn ? 2 * Math.PI * intake.helmholtzHz : 0;
     const iDamp = intakeOn ? iw0 / Math.max(intake.q, 1e-3) : 0;
-    const iGain = intakeOn ? intake.level * INTAKE_RADIATION_SCALE * this.synth.params.volume : 0;
+    // Listener position: the cockpit sits much closer to the intake.
+    const iListener = this.config.cabin === "cockpit" ? intake?.cockpitGain ?? 1 : 1;
+    const iGain = intakeOn ? intake.level * iListener * INTAKE_RADIATION_SCALE * this.synth.params.volume : 0;
     const ivo = this.spec.timing.ivoDeg;
     const mapFrac = 0.14 + 0.72 * this.op.throttle;
 

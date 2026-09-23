@@ -33,6 +33,21 @@ export const DEFAULT_MIX = {
   cues: 0.8,
 };
 
+/**
+ * Fixed trim on the physical model's output, on top of the Engine slider.
+ * At the default mix the model sat at -22 to -26 dBFS RMS after the master,
+ * quiet against everything else, while the output limiter was doing nothing
+ * to it (0-0.9 dB of gain reduction with the engine alone). +3 dB here, and
+ * the cockpit gains another ~5 dB from the intake now being heard from the
+ * driver's seat (engineAudio.js, intake.cockpitGain): together that is the
+ * ~6 dB asked for in the cockpit, with the limiter still at 0-0.2 dB at
+ * master 0.5 and about 1 dB at master 1.0 (measured, headless browser build).
+ * +6 dB here put the cockpit into 3-7 dB of limiting at master 1.0.
+ * A trim rather than a new default because the slider tops out at 1 and a
+ * saved mix keeps its own slider value -- the trim applies to everyone.
+ */
+export const ENGINE_MODEL_TRIM = 1.4;
+
 export const MIX_LABELS = {
   master: "Master",
   engine: "Engine",
@@ -185,13 +200,25 @@ export class EngineAudio {
         processorOptions: { engine: "cbr600rr-sdm26" },
       });
       this.modelGain = ctx.createGain();
-      this.modelGain.gain.value = this.mix.engine;
+      this.modelGain.gain.value = this.mix.engine * ENGINE_MODEL_TRIM;
       node.connect(this.modelGain);
       this.modelGain.connect(this.master);
       // Width. The model is mono, and a mono engine in headphones sits in
       // the middle of the skull. Two short, unequal delays panned either
-      // way (a Haas pair) spread it without moving its centre or colouring
-      // it much; the direct path stays dominant so nothing smears.
+      // way (a Haas pair) spread it without moving its centre; the direct
+      // path stays dominant so nothing smears.
+      //
+      // The copies are high-passed at 800 Hz first. Full-band, a delayed
+      // copy at 0.32 comb-filters the note by +-7 dB per ear (13 dB summed to
+      // mono on laptop speakers), with notches that sweep through the firing
+      // fundamental as the revs change: at 8000 rpm it was cut 7 dB in one
+      // ear. That is the low end, and it belongs in the middle anyway; the
+      // width only needs the upper harmonics and the rasp.
+      this.widthFilter = ctx.createBiquadFilter();
+      this.widthFilter.type = "highpass";
+      this.widthFilter.frequency.value = 800;
+      this.widthFilter.Q.value = Math.SQRT1_2;
+      this.modelGain.connect(this.widthFilter);
       this.width = [];
       for (const [delayS, pan] of [[0.0058, -0.6], [0.0091, 0.6]]) {
         const d = ctx.createDelay(0.05);
@@ -200,7 +227,7 @@ export class EngineAudio {
         g.gain.value = 0.32;
         const p = ctx.createStereoPanner();
         p.pan.value = pan;
-        this.modelGain.connect(d); d.connect(g); g.connect(p); p.connect(this.master);
+        this.widthFilter.connect(d); d.connect(g); g.connect(p); p.connect(this.master);
         this.width.push({ d, g, p });
       }
       this.modelNode = node;
@@ -267,7 +294,7 @@ export class EngineAudio {
   applyMix() {
     if (!this.ready) return;
     this.master.gain.value = this.enabled ? this.mix.master : 0;
-    if (this.modelGain) this.modelGain.gain.value = this.mix.engine;
+    if (this.modelGain) this.modelGain.gain.value = this.mix.engine * ENGINE_MODEL_TRIM;
   }
 
   saveMix() {
@@ -369,7 +396,12 @@ export class EngineAudio {
         600 + 5200 * load * (0.3 + 0.7 * rev), now, glide);
     }
 
-    this.induction.g.gain.setTargetAtTime(0.05 * s.throttle * rev * this.mix.engine, now, glide);
+    // Induction hiss, for the oscillator fallback only. The physical model
+    // carries the intake itself now -- the plenum and restrictor as a tuned
+    // source, heard louder from the cockpit -- and filtered noise on top of it
+    // was hiss, not intake.
+    const induction = this.usingModel ? 0 : 0.05 * s.throttle * rev * this.mix.engine;
+    this.induction.g.gain.setTargetAtTime(induction, now, glide);
     this.induction.f.frequency.setTargetAtTime(400 + firing * 1.6, now, glide);
 
     // Tyres only talk once they are near the limit; the pitch climbs with

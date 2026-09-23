@@ -306,7 +306,9 @@ impl EngineAudio {
         let intake_on = intake.level > 0.0;
         let iw0 = 2.0 * core::f32::consts::PI * intake.helmholtz_hz;
         let i_damp = iw0 / intake.q.max(1e-3);
-        let i_gain = intake.level * INTAKE_RADIATION_SCALE * self.synth.parameters().volume;
+        // Listener position: the cockpit sits much closer to the intake.
+        let i_listener = if self.config.cabin == Cabin::Cockpit { intake.cockpit_gain } else { 1.0 };
+        let i_gain = intake.level * i_listener * INTAKE_RADIATION_SCALE * self.synth.parameters().volume;
         let ivo = self.spec.timing.ivo_deg;
         let map_frac = 0.14 + 0.72 * self.op.throttle;
 
@@ -460,13 +462,21 @@ mod tests {
     #[test]
     fn doubling_the_rpm_doubles_the_pitch() {
         let fs = AudioConfig::default().sample_rate;
-        let measure = |rpm| {
+        // Searched within half an octave of the firing frequency. The
+        // waveform's true period is no longer one firing interval: the spec
+        // carries the real engine's cylinder-to-cylinder and branch-to-branch
+        // differences, so it repeats once per revolution or per cycle, and an
+        // unrestricted autocorrelation (60-900 Hz) rightly finds that longer
+        // period at 12000 rpm. What this test is for is that the firing
+        // component moves an octave when the rpm doubles.
+        let measure = |rpm: f32| {
             let mut e = running_engine(rpm, 55.0);
             let mut warm = vec![0.0f32; 24_000];
             e.render(&mut warm);
             let mut buf = vec![0.0f32; 48_000];
             e.render(&mut buf);
-            fundamental_hz(&buf, fs, 60.0, 900.0)
+            let f_fire = rpm / 30.0;
+            fundamental_hz(&buf, fs, f_fire * 0.7, f_fire * 1.45)
         };
         let low = measure(6_000.0);
         let high = measure(12_000.0);

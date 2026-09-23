@@ -142,10 +142,13 @@ pub struct IntakeSpec {
     pub q: f32,
     /// Level relative to the exhaust. 0 turns the intake off.
     pub level: f32,
+    /// Extra intake level for the cockpit listener, who sits much closer to
+    /// the intake mouth than to the tailpipe.
+    pub cockpit_gain: f32,
 }
 
 impl IntakeSpec {
-    pub const OFF: IntakeSpec = IntakeSpec { helmholtz_hz: 55.0, q: 1.8, level: 0.0 };
+    pub const OFF: IntakeSpec = IntakeSpec { helmholtz_hz: 55.0, q: 1.8, level: 0.0, cockpit_gain: 1.0 };
 }
 
 /// A complete engine.
@@ -320,7 +323,10 @@ pub fn cbr600rr_sdm26() -> EngineSpec {
             .map(|&l| pipe(l, 0.0297, 0.005, 8000.0))
             .collect(),
         primary_to_collector: vec![0, 1, 1, 0],
-        collectors: vec![pipe(0.57, 0.0361, 0.005, 8000.0), pipe(0.5775, 0.0361, 0.005, 8000.0)],
+        // 2+3 secondary lossier at high frequency: a HYPOTHESIS to check on
+        // the car (CAD branches are symmetric); it is what reproduced the
+        // recorded per-revolution orders 3/5/7. See engineAudio.js.
+        collectors: vec![pipe(0.57, 0.0361, 0.005, 8000.0), pipe(0.5775, 0.0361, 0.005, 2000.0)],
         collector_to_tailpipe: vec![0, 0],
         tailpipes: vec![pipe(0.343, 0.046, 0.005, 8000.0)],
         // Muffler inlet cone, 382 mm packed straight-through body, outlet tip.
@@ -335,7 +341,9 @@ pub fn cbr600rr_sdm26() -> EngineSpec {
         wave_nonlinearity: 0.8,
         // Plenum (~3 L, CAD bounding box 178 x 185 x 175 mm) behind the 20 mm
         // restrictor; level judged by ear against the IMG_5128 recording.
-        intake: IntakeSpec { helmholtz_hz: 55.0, q: 1.8, level: 2.0 },
+        // Cockpit: the throttle mouth is ~2.7x closer to the driver's head
+        // than the muffler outlet (CAD), so the cockpit hears it 2.7x louder.
+        intake: IntakeSpec { helmholtz_hz: 55.0, q: 1.8, level: 2.0, cockpit_gain: 2.7 },
         idle_rpm: 2_000.0,
         redline_rpm: 14_500.0,
         gas: GasProperties::default(),
