@@ -271,3 +271,52 @@ fn steering_torque_centres() {
     println!("kingpin {:.1} N.m, rim {:.2} N.m at {:.2} g", t.kingpin_torque_nm, t.rim_torque_nm, t.ay_g);
     assert!(t.kingpin_torque_nm < -5.0);
 }
+
+/// Aero follows ride height (the 2026 CFD map), and at static ride height
+/// it is the nominal aero exactly.
+#[test]
+fn aero_follows_ride_height() {
+    let p = sdm26();
+    // The map is a multiplier and is exactly 1 at nominal.
+    assert_eq!(p.suspension.aero_map.factors(0.0, 0.0), (1.0, 1.0, 1.0));
+
+    // Settled at 25 m/s on a straight: the car squats a few mm on its ride
+    // rates and the balance stays near the nominal 52.4 %.
+    let mut c = car();
+    c.reset(0.0, 0.0, 0.0, 25.0);
+    c.powertrain_mut().set_gear(4);
+    c.powertrain_mut().sync_to_wheel(25.0 / 0.2);
+    for _ in 0..120 {
+        let th = (0.5 + (25.0 - c.state().speed()) * 0.5).clamp(0.0, 1.0);
+        c.step(DT, Controls { steer: 0.0, throttle: th, brake: 0.0 });
+    }
+    let t = c.telemetry();
+    println!("25 m/s: ride F {:+.1} R {:+.1} mm, front {:.3}, DF {:.0} N", t.ride_height_mm[0], t.ride_height_mm[1], t.aero_front_frac, t.downforce_n);
+    assert!((-15.0..=-2.0).contains(&t.ride_height_mm[0]), "front squat {:.1} mm", t.ride_height_mm[0]);
+    assert!((-15.0..=-2.0).contains(&t.ride_height_mm[1]), "rear squat {:.1} mm", t.ride_height_mm[1]);
+    assert!((0.50..=0.56).contains(&t.aero_front_frac), "front share {:.3}", t.aero_front_frac);
+    let cruise_front = t.aero_front_frac;
+
+    // Hard on the brakes the nose goes down and the front wing gains:
+    // the balance moves forward.
+    let mut peak: f64 = 0.0;
+    for _ in 0..40 {
+        c.step(DT, Controls { steer: 0.0, throttle: 0.0, brake: 1.0 });
+        peak = peak.max(c.telemetry().aero_front_frac);
+    }
+    let t = c.telemetry();
+    println!("braking: ride F {:+.1} R {:+.1} mm, front {:.3} (peak {:.3})", t.ride_height_mm[0], t.ride_height_mm[1], t.aero_front_frac, peak);
+    assert!(t.ride_height_mm[0] < -10.0 && t.ride_height_mm[1] > 0.0, "nose down under braking");
+    assert!(peak > cruise_front + 0.02, "braking front share {peak:.3} vs cruise {cruise_front:.3}");
+
+    // Switched off, the double track carries the nominal aero exactly.
+    let mut p = sdm26();
+    p.suspension.aero_map.enabled = false;
+    let mut c = build(Fidelity::DoubleTrack, Chassis::new(p.clone(), Box::new(MagicFormulaTyre::sdm26()), Box::new(GearedEngine::sdm26())));
+    c.reset(0.0, 0.0, 0.0, 20.0);
+    c.step(DT, Controls { steer: 0.0, throttle: 0.3, brake: 0.0 });
+    let t = c.telemetry();
+    let (down, _) = p.aero_forces(t.speed);
+    assert!((t.aero_front_frac - p.aero.front_frac).abs() < 1e-12);
+    assert!((t.downforce_n - down).abs() / down < 2e-3, "{} vs {}", t.downforce_n, down);
+}

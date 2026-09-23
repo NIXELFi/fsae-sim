@@ -136,6 +136,11 @@ pub struct Telemetry {
     /// Each wheel's inclination to the road (deg), positive with the top
     /// leaning left. Zero from solvers without camber.
     pub camber_deg: [f64; 4],
+    /// Front share of the downforce acting right now, and each axle's ride
+    /// height against static (mm, + = higher). The double track moves them
+    /// with ride height; solvers without a suspension leave both at zero.
+    pub aero_front_frac: f64,
+    pub ride_height_mm: [f64; 2],
 }
 
 /// `Send + Sync` so a solver can live in an ECS resource or be shared across

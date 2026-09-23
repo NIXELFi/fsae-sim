@@ -89,6 +89,66 @@ pub struct SuspensionParams {
     /// Fraction of true Ackermann (0 parallel, 1 full). Here rather than in
     /// `SteeringParams` so the bicycle's parameters are untouched.
     pub ackermann: f64,
+    /// Aero that follows ride height (the 2026 CFD ride-height map). Off, the
+    /// double track carries the fixed nominal ClA / CdA / front share exactly
+    /// as the bicycle does.
+    pub aero_map: AeroRideMap,
+}
+
+/// The 2026 full-car CFD ride-height map ('Ride Height Data (BW)', Drive
+/// Aero/Aero Map/Ride Height, 2026-04; 5 x 5 grid, front and rear ride height
+/// each -1..+1 in from nominal) reduced to how each force moves per inch.
+///
+/// The grid itself is CFD-noisy: adjacent cells differ by 10 % with no
+/// trend, and the (front -1, rear +1) corner has the front wing in the
+/// ground and is flagged bad in the sheet. So it is a least-squares PLANE
+/// through the other 24 cells of front downforce (total x % front), rear
+/// downforce and drag. A quadratic takes the front residual only from 5.0 to
+/// 4.1 lbf, i.e. into the noise. Fit: sim/tools/aero_map_fit.py.
+///
+///   front DF = 52.13 - 9.87 dRH_f + 5.69 dRH_r   (lbf at 15.65 m/s; rms 5.0)
+///   rear  DF = 49.06 + 1.05 dRH_f - 0.10 dRH_r   (rms 2.8)
+///   drag     = 41.86 + 0.30 dRH_f + 0.55 dRH_r   (rms 1.0)
+///
+/// Stored RELATIVE to the plane's own value at nominal, and applied as a
+/// multiplier on the car's nominal ClA / front share / CdA, so at nominal
+/// ride height the double track's aero is exactly `AeroParams`: the map
+/// supplies only how it moves. The front wing is in ground effect (front DF
+/// rises as the nose drops) and rake loads it further; the rear barely moves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AeroRideMap {
+    pub enabled: bool,
+    /// Fractional change per inch of (front, rear) ride height RISE.
+    pub front_df_per_in: [f64; 2],
+    pub rear_df_per_in: [f64; 2],
+    pub drag_per_in: [f64; 2],
+    /// The map's extent; ride heights beyond it are held at its edge.
+    pub limit_in: f64,
+}
+
+impl AeroRideMap {
+    pub fn sdm26() -> Self {
+        Self {
+            enabled: true,
+            front_df_per_in: [-9.870 / 52.127, 5.688 / 52.127],
+            rear_df_per_in: [1.050 / 49.062, -0.103 / 49.062],
+            drag_per_in: [0.298 / 41.862, 0.553 / 41.862],
+            limit_in: 1.0,
+        }
+    }
+
+    /// (front DF, rear DF, drag) multipliers at ride-height deltas (m, +
+    /// = higher than static).
+    pub fn factors(&self, rh_front_m: f64, rh_rear_m: f64) -> (f64, f64, f64) {
+        if !self.enabled {
+            return (1.0, 1.0, 1.0);
+        }
+        let lim = self.limit_in;
+        let f = (rh_front_m / 0.0254).clamp(-lim, lim);
+        let r = (rh_rear_m / 0.0254).clamp(-lim, lim);
+        let lin = |k: [f64; 2]| (1.0 + k[0] * f + k[1] * r).max(0.0);
+        (lin(self.front_df_per_in), lin(self.rear_df_per_in), lin(self.drag_per_in))
+    }
 }
 
 impl SuspensionParams {
@@ -135,6 +195,7 @@ impl SuspensionParams {
             // Ackermann to 60 deg of rim, rising to 24 % at full lock. Not
             // the OptimumK 0 % nor the spec sheet's 85 %.
             ackermann: 0.185,
+            aero_map: AeroRideMap::sdm26(),
         }
     }
 }

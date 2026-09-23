@@ -501,6 +501,11 @@ pub struct TelemetryOut {
     pub roll_deg: f64,
     pub pitch_deg: f64,
     pub camber_deg: [f64; 4],
+    /// Front share of the downforce acting now and each axle's ride height
+    /// against static (mm, + = higher), from the double track's ride-height
+    /// aero map. Zero from the bicycle.
+    pub aero_front_frac: f64,
+    pub ride_height_mm: [f64; 2],
     /// Which model produced this: 2 bicycle, 3 double track.
     pub vehicle_model: u8,
 }
@@ -1482,6 +1487,8 @@ impl Loop {
                 roll_deg: tel.roll_deg,
                 pitch_deg: tel.pitch_deg,
                 camber_deg: tel.camber_deg,
+                aero_front_frac: tel.aero_front_frac,
+                ride_height_mm: tel.ride_height_mm,
                 vehicle_model: self.car.fidelity().level(),
             },
             pt: pt_out,

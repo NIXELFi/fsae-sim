@@ -142,6 +142,12 @@ const COLUMNS = [
   { id: "sim.camber_rl", dp: 3, get: (c) => c.t.camberDeg?.[2] ?? 0 },
   { id: "sim.camber_rr", dp: 3, get: (c) => c.t.camberDeg?.[3] ?? 0 },
   { id: "sim.vehicle_model", dp: 0, get: (c) => c.t.vehicleModel ?? 2 },
+  // Ride height against static (mm, + = higher) and the front share of the
+  // downforce, from the double track's ride-height aero map. Zeros from the
+  // bicycle, whose aero split is fixed.
+  { id: "sim.ride_height_f_mm", dp: 2, get: (c) => c.t.rideHeightMm?.[0] ?? 0 },
+  { id: "sim.ride_height_r_mm", dp: 2, get: (c) => c.t.rideHeightMm?.[1] ?? 0 },
+  { id: "sim.aero_front_frac", dp: 4, get: (c) => c.t.aeroFrontFrac ?? 0 },
   { id: "sim.wheel_angle_f", dp: 3, get: (c) => c.spinFront },
   { id: "sim.wheel_angle_r", dp: 3, get: (c) => c.spinRear },
 

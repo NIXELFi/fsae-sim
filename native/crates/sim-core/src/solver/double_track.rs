@@ -14,6 +14,11 @@
 //!     the body's roll and pitch, so it lags, overshoots or settles as the
 //!     springs and dampers decide. Stiffness comes from the team's validated
 //!     roll and pitch gradients, split by the `rsd_front` setup knob.
+//!   * Aero that follows ride height: each axle settles on its ride rate
+//!     (springs and tyres in series) under its own downforce, the body's
+//!     pitch adds to that, and the 2026 CFD ride-height map moves front
+//!     downforce, rear downforce and drag with the result (see
+//!     `AeroRideMap`). At static ride height it is the nominal aero exactly.
 //!   * Camber at each wheel, to the road: static, plus what body roll does
 //!     through the linkage (and, fully, through the tyres' own deflection),
 //!     plus bump from pitch, plus the steer through caster and KPI. The tyre
@@ -64,6 +69,12 @@ pub struct DoubleTrackSolver {
     roll_rate: f64,
     pitch: f64,
     pitch_rate: f64,
+    /// Each axle's compression under its downforce (m, + = lower), and its
+    /// rate. Separate from `pitch`, which is the elastic share of the
+    /// longitudinal load transfer: the aero's load reaches the tyres directly
+    /// (see `stat_f`), so this only moves the ride height and the camber.
+    aero_z: [f64; 2],
+    aero_z_rate: [f64; 2],
     t_lock_last: f64,
     tel: Telemetry,
 }
@@ -83,6 +94,8 @@ struct Body {
     /// tyres squashing).
     susp_share_f: f64,
     susp_share_r: f64,
+    /// Ride rate per wheel, spring and tyre in series (N/m), front and rear.
+    ride_rate: [f64; 2],
 }
 
 impl DoubleTrackSolver {
@@ -107,9 +120,27 @@ impl DoubleTrackSolver {
             roll_rate: 0.0,
             pitch: 0.0,
             pitch_rate: 0.0,
+            aero_z: [0.0; 2],
+            aero_z_rate: [0.0; 2],
             t_lock_last: 0.0,
             tel: Telemetry::default(),
         }
+    }
+
+    /// Front and rear downforce and the drag at this speed and ride height.
+    fn aero_at(&self, speed: f64) -> (f64, f64, f64) {
+        let p = &self.c.params;
+        let (down, drag) = p.aero_forces(speed);
+        let (rh_f, rh_r) = self.ride_heights();
+        let (kf, kr, kd) = p.suspension.aero_map.factors(rh_f, rh_r);
+        (down * p.aero.front_frac * kf, down * (1.0 - p.aero.front_frac) * kr, drag * kd)
+    }
+
+    /// Front and rear ride height against static (m, + = higher): the aero
+    /// squat plus the body's pitch at each axle.
+    fn ride_heights(&self) -> (f64, f64) {
+        let p = &self.c.params;
+        (-(self.aero_z[0] + p.a() * self.pitch), -(self.aero_z[1] - p.b() * self.pitch))
     }
 
     /// Per-wheel steer angles, blended between parallel and true Ackermann.
@@ -161,6 +192,7 @@ impl DoubleTrackSolver {
             }
         };
         let rsd = p.roll.rsd_front;
+        let series = |k: f64| 1.0 / (1.0 / k.max(1.0) + 1.0 / sp.tyre_rate_n_m.max(1.0));
         Body {
             ms,
             hs,
@@ -173,6 +205,7 @@ impl DoubleTrackSolver {
             i_pitch,
             susp_share_f: share(rsd * k_roll, p.track_front_m),
             susp_share_r: share((1.0 - rsd) * k_roll, p.track_rear_m),
+            ride_rate: [series(sp.wheel_rate_front_n_m), series(sp.wheel_rate_rear_n_m)],
         }
     }
 }
@@ -220,6 +253,15 @@ impl Solver for DoubleTrackSolver {
         self.roll_rate = 0.0;
         self.pitch = 0.0;
         self.pitch_rate = 0.0;
+        // Start already settled on the springs at this speed, or every rolling
+        // reset would begin with the car bouncing down onto its aero.
+        self.aero_z = [0.0; 2];
+        self.aero_z_rate = [0.0; 2];
+        let rr = self.body().ride_rate;
+        for _ in 0..20 {
+            let (ff, fr, _) = self.aero_at(speed);
+            self.aero_z = [ff / (2.0 * rr[0]), fr / (2.0 * rr[1])];
+        }
         self.t_lock_last = 0.0;
         self.tel = Telemetry::default();
         // Keep the caller's gear through a rolling reset (see bicycle.rs).
@@ -269,7 +311,9 @@ impl DoubleTrackSolver {
         let (u, v, r) = (self.s.u, self.s.v, self.s.r);
         let speed = u.hypot(v);
         let low_speed = (speed / 3.0).min(1.0);
-        let (downforce, drag) = self.c.params.aero_forces(speed);
+        let (df_front, df_rear, drag) = self.aero_at(speed);
+        let downforce = df_front + df_rear;
+        let (rh_f, rh_r) = self.ride_heights();
 
         let p = &self.c.params;
         let sp = &p.suspension;
@@ -285,8 +329,8 @@ impl DoubleTrackSolver {
         // ---- vertical loads -------------------------------------------------
         // Static and aero, per corner.
         let w = p.weight();
-        let aero_f = downforce * p.aero.front_frac * 0.5;
-        let aero_r = downforce * (1.0 - p.aero.front_frac) * 0.5;
+        let aero_f = df_front * 0.5;
+        let aero_r = df_rear * 0.5;
         let stat_f = w * p_b / l * 0.5 + aero_f;
         let stat_r = w * p_a / l * 0.5 + aero_r;
 
@@ -339,8 +383,10 @@ impl DoubleTrackSolver {
         let roll_lean_r = self.roll * (sp.camber_gain_roll_rear * body.susp_share_r + (1.0 - body.susp_share_r));
         // Bump from pitch: nose down compresses the front by a.theta and
         // extends the rear by b.theta.
-        let bump_f = p_a * self.pitch;
-        let bump_r = -p_b * self.pitch;
+        // Plus the aero squat, the springs' share of it (the tyres take the
+        // rest and do not move the linkage).
+        let bump_f = p_a * self.pitch + self.aero_z[0] * body.ride_rate[0] / sp.wheel_rate_front_n_m.max(1.0);
+        let bump_r = -p_b * self.pitch + self.aero_z[1] * body.ride_rate[1] / sp.wheel_rate_rear_n_m.max(1.0);
         let cam_bump_f = (sp.camber_gain_bump_front_deg_m * bump_f).to_radians();
         let cam_bump_r = (sp.camber_gain_bump_rear_deg_m * bump_r).to_radians();
         // Steer: caster leans both wheels toward the turn (the outer one
@@ -479,6 +525,16 @@ impl DoubleTrackSolver {
         self.roll += self.roll_rate * dt;
         self.pitch_rate += pitch_acc * dt;
         self.pitch += self.pitch_rate * dt;
+        // Each axle on its ride rate under its own downforce, carrying its
+        // share of the sprung mass, damped like the body.
+        let axle_ms = [body.ms * p.weight_dist_front, body.ms * (1.0 - p.weight_dist_front)];
+        for (k, f) in [(0usize, df_front), (1, df_rear)] {
+            let kk = 2.0 * body.ride_rate[k];
+            let c = 2.0 * sp.pitch_damping_ratio * (kk * axle_ms[k]).sqrt();
+            let acc = (f - kk * self.aero_z[k] - c * self.aero_z_rate[k]) / axle_ms[k].max(1.0);
+            self.aero_z_rate[k] += acc * dt;
+            self.aero_z[k] += self.aero_z_rate[k] * dt;
+        }
 
         // ---- integrate the chassis ------------------------------------------
         self.s.u += du * dt;
@@ -549,6 +605,8 @@ impl DoubleTrackSolver {
             roll_deg: self.roll.to_degrees(),
             pitch_deg: self.pitch.to_degrees(),
             camber_deg: [gamma[0].to_degrees(), gamma[1].to_degrees(), gamma[2].to_degrees(), gamma[3].to_degrees()],
+            aero_front_frac: if downforce > 1e-9 { df_front / downforce } else { p.aero.front_frac },
+            ride_height_mm: [rh_f * 1000.0, rh_r * 1000.0],
         };
     }
 }
