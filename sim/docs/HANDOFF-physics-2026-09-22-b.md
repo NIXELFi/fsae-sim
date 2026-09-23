@@ -141,3 +141,37 @@ The full report is `log-fit-report.md`, with scripts in `scripts/`. Headlines:
 4. **Per-event setup presets** (handoff Next #3): not done, because Nick said the current setup numbers are correct.
 5. **Skidpad in the Helios Launch tab** (§3).
 6. **Pull fresh DAQ logs** of a constant-radius test (handoff Next #5). A real timed skidpad from the DAQ, with the yaw gyro that works, would validate §1 directly.
+
+## 8. Evening pass (Nick: fix the launch clutch, add an accel event, build out the 4-wheel model)
+
+| Commit | What |
+|---|---|
+| e9933c0 | **B1 + B2 fixed** in Rust and JS, parity exact. The bicycle was unfrozen once for this, with approval, and the golden regenerated. |
+| e8dd349 | **Acceleration event**, course `accel` (D.9). |
+| 8297271 | **4-wheel β:** bump/roll steer, steering compliance, measured camber loss, recalibrated grip, and a setup-card group. |
+
+### B1 + B2
+
+- **B1 (pull-away):** the pull-away clutch now blends to full as the slip closes (r^8), instead of as the driveline speeds up. The left foot's hold rpm scales with throttle.
+- **B2 (lock):** the clutch locks when the torque that closes the slip is within its capacity.
+- **Results:**
+  - Standing 75 m: 5.15 → **4.84 s**.
+  - **4.46 s from the line** (staged 0.3 m back, D.9.2.3), inside the real 5/3 bracket of 4.28–4.63.
+  - First shifts at 12,835 rpm instead of 14,300.
+- **Side effect:** a 15 % full-lock creep now moves at 0.6 m/s instead of 2.0. The validate.js floor moved from 0.8 to 0.4, with the reason written beside it.
+
+### The accel event
+
+The car is staged with its nose 0.30 m behind the line. The clock runs from the nose crossing the start line to crossing the finish line (`scoring.startS` / `finishS` in Timing). It is 4.9 m wide, with edge cones about every 6 m and a run-off. 2 s a cone; an off course is a DNF. Tested in `tools/test_accel.mjs`.
+
+### The 4-wheel β changes
+
+- **Bump steer, from the hardpoints:** 0.214 deg of toe-in per inch front, 0.040 rear (`scripts/bump_steer.py`, checked against OptimumK camber gain). It gives roll steer and toe under pitch and aero squat.
+- **Steering compliance:** 0.5 deg per 100 N·m per front wheel. This is an **estimate**: there is no SDM26 K&C data. It is on the card, and 0 turns it off.
+- **Camber:** the peak-grip loss is now asymmetric, fitted to the full MF6.1 evaluation (k 19.63, +0.394 deg favourable).
+- **Peak slip vs load:** held flat past 800 N. The 1.30 at 1200 N was an extrapolation, and it made the car spin under power past the limit at 20 m/s together with the LSD.
+- **Grip recalibration:** grip is now pinned on the **timed skidpad** to the bicycle's own number, which fixes the "2 s slower on AX".
+  - The tyre μ was pinned through the bicycle, so it already absorbs the camber, toe and peak-slip losses this model adds back as physics.
+  - Rear ×1.09, front ×1.13 gives 5.16 s (bicycle 5.14). The car pushes at 10/15/20 m/s and doesn't spin.
+- **Setup card:** a "4-wheel β setup" group. Toe, camber and Ackermann are setup-legal; the rest count as model changes.
+- **Not done: the two-state heave body.** Its axle rates imply a 0.49 deg/g pitch gradient against the team's 0.91. The Ride Roll sheet probably uses one wheel per axle. Changing it would change a setup number, so it waits for a decision. The shock-pot logs could settle pitch the same way they settled roll.

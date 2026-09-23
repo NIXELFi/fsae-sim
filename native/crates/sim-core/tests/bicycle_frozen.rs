@@ -7,6 +7,10 @@
 //! printed digit. `validate.js` checks JS against the same file, so the file
 //! is the bicycle's definition: a change that moves it fails here, and
 //! regenerating the file to make it pass is changing the validated car.
+//!
+//! Regenerated ONCE since the freeze, with Nick's approval (2026-09-22,
+//! commit e9933c0): the launch clutch / clutch-lock fixes in the shared
+//! powertrain. Any other regeneration needs the same explicit sign-off.
 
 use sim_core::prelude::*;
 
