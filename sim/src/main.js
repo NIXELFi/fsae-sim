@@ -226,6 +226,8 @@ class Game {
     this.stagingUp = false;
     /** Does this run's time count? See `refreshTimeCounts`. */
     this.runCounts = timeCounts();
+    /** Was any lap of this run driven on a modified car? See `refreshTimeCounts`. */
+    this.runTainted = false;
     this.clock = 0;
 
     this.paused = false;
@@ -539,6 +541,7 @@ class Game {
     // A fresh run gets a fresh verdict: put the car back to as-shipped and
     // the next run counts again, however many what-ifs came before it.
     this.runCounts = timeCounts();
+    this.runTainted = false;
     this.refreshTimeCounts();
     // A restart is a new lap, not a new session: the reference the driver is
     // chasing survives, exactly as their best time does.
@@ -560,6 +563,11 @@ class Game {
     if (!this.timing) return;
     this.timing.onLap = (entry, sectors, sectorCones) => {
       this.recorder?.recordLap(entry, sectors, sectorCones);
+      // The lap that just closed was scored on the verdict it was driven
+      // under. The NEXT lap starts fresh: a car put back to legal counts from
+      // here on (the latch in `refreshTimeCounts` is per lap).
+      this.runCounts = timeCounts();
+      this.timing.countsForRecords = this.runCounts !== false;
       // Kept for the end-of-run card, and it has to be taken HERE: this hook
       // is the last moment the splits exist. `completeLap` clears them for
       // the next lap before it returns, so reading them back in
@@ -624,7 +632,7 @@ class Game {
       // run-to-run setup list was off as-shipped during it -- mass, power,
       // grip -- with the offending parameters named so a reader does not
       // have to diff two setups to find out why.
-      counted: this.refreshTimeCounts(),
+      counted: this.refreshTimeCounts() && !this.runTainted,
       modelChanges: modelChanges().map((d) => ({
         path: d.path, label: d.label, unit: d.unit, from: d.from, to: d.to,
       })),
@@ -1578,15 +1586,28 @@ class Game {
   }
 
   /**
-   * Whether this run's times mean anything, kept current.
+   * Whether this lap's time means anything, kept current.
    *
-   * Once the car has been off the setup list at any point in a run, that run
-   * is done for: changing mass back mid-lap does not un-drive the part of the
-   * lap that was driven light. So this latches false and only a restart
-   * clears it.
+   * Once the car has been off the setup list at any point while a lap is
+   * being DRIVEN, that lap is done for: changing mass back mid-lap does not
+   * un-drive the part of it that was driven light. So it latches false for
+   * the rest of the lap.
+   *
+   * But only while the clock is running. Before the green (staged, or after a
+   * restart) nothing has been driven yet, so putting the car back to legal
+   * clears it at once -- it used to stay "NOT COUNTED" until the lap was
+   * reset. And each new lap starts on the current verdict (see the lap hook).
+   * `runTainted` remembers, for the run's manifest, that some lap was driven
+   * modified.
    */
   refreshTimeCounts() {
-    if (!timeCounts()) this.runCounts = false;
+    const now = timeCounts();
+    const running = this.timing?.state === "running";
+    if (!running) this.runCounts = now;
+    else if (!now) {
+      this.runCounts = false;
+      this.runTainted = true;
+    }
     if (this.timing) this.timing.countsForRecords = this.runCounts !== false;
     return this.runCounts !== false;
   }
