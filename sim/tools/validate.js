@@ -242,7 +242,11 @@ console.log("\nBRAKING  (from 25 m/s, full pedal)");
     peak = Math.min(peak, car.telemetry.axG);
     t += DT;
   }
-  check("stopping distance", car.X - x0, 20, 40, " m");
+  // Full pedal locks every wheel; this is a locked-wheel stop. Floor 20 -> 17
+  // on 2026-09-22 when a locked tyre went from 0.72 to 0.90 of its peak (the
+  // team .tir holds 0.96-0.98): 19.4 m from 90 km/h is ~1.6 g mean, which is
+  // what an FSAE car on slicks does. A sanity band, not a validation.
+  check("stopping distance", car.X - x0, 17, 40, " m");
   check("peak deceleration", -peak, 1.3, 2.6, " g");
 }
 

@@ -119,6 +119,10 @@ export function axleMu(mu0, FzAxle, dFzLateral, Fz0, sensitivity) {
  * @param muX        effective longitudinal peak friction for this axle
  * @returns {fx, fy, utilisation} forces in N, utilisation 0..1+ of the ellipse
  */
+/** How much of the fitted longitudinal fall-off past the peak is kept: a
+ *  fully locked tyre holds 0.90 of its peak. Mirrors tyre.rs. */
+export const FX_FALLOFF_KEEP = 0.357;
+
 export function tyreForces(slipAngle, slipRatio, Fz, muY, muX) {
   if (Fz <= 1) return { fx: 0, fy: 0, utilisation: 0, trail: 0 };
 
@@ -131,7 +135,18 @@ export function tyreForces(slipAngle, slipRatio, Fz, muY, muX) {
 
   // Evaluate each pure curve at the combined slip magnitude, then split the
   // resulting force along the slip direction.
-  const fx0 = muX * Fz * KX * mf(s * PEAK_SLIP_RATIO, BX, CX, EX);
+  // 2026-09-22: past the peak the longitudinal force keeps FX_FALLOFF_KEEP of
+  // the fitted shape's fall-off, so a locked or spinning tyre holds ~0.90 of its
+  // peak instead of 0.72. The C 1.55 / E -0.40 shape was chosen to put the PEAK
+  // where a driver feels it and was never fitted past it; the team's MF6.1 .tir
+  // holds 0.96-0.98 of peak fully locked. The steep fall-off made every front
+  // lock-up snap (decel collapsed and the wheel stayed locked until the pedal came
+  // well up) and starved a wheelspin launch the real car pulls ~1 g through. Peak
+  // height and peak slip are unchanged; below the peak nothing moves.
+  // Same expression and order as tyre.rs, for parity.
+  let nx = KX * mf(s * PEAK_SLIP_RATIO, BX, CX, EX);
+  if (s > 1) nx = 1 - (1 - nx) * FX_FALLOFF_KEEP;
+  const fx0 = muX * Fz * nx;
   const fy0 = muY * Fz * KY * mf(Math.atan(s * Math.tan(PEAK_SLIP_ANGLE_RAD)), BY, CY, EY);
 
   return {

@@ -385,7 +385,19 @@ impl TyreModel for MagicFormulaTyre {
             return TyreForces { trail: self.pneumatic_trail(0.0, fz), ..TyreForces::zero() };
         }
 
-        let fx0 = mux * fz * self.kx * mf(s * self.peak_kappa, self.bx, self.cx, self.ex);
+        // 2026-09-22: past the peak the longitudinal force keeps FX_FALLOFF_KEEP of
+        // the fitted shape's fall-off, so a locked or spinning tyre holds ~0.90 of its
+        // peak instead of 0.72. The C 1.55 / E -0.40 shape was chosen to put the PEAK
+        // where a driver feels it and was never fitted past it; the team's MF6.1 .tir
+        // holds 0.96-0.98 of peak fully locked. The steep fall-off made every front
+        // lock-up snap (decel collapsed and the wheel stayed locked until the pedal came
+        // well up) and starved a wheelspin launch the real car pulls ~1 g through. Peak
+        // height and peak slip are unchanged; below the peak nothing moves.
+        let mut nx = self.kx * mf(s * self.peak_kappa, self.bx, self.cx, self.ex);
+        if s > 1.0 {
+            nx = 1.0 - (1.0 - nx) * FX_FALLOFF_KEEP;
+        }
+        let fx0 = mux * fz * nx;
         let fy0 =
             muy * fz * self.ky * mf((s * peak_alpha.tan()).atan(), by, self.cy, self.ey);
 
@@ -420,6 +432,10 @@ impl TyreModel for MagicFormulaTyre {
         self.relaxation_m
     }
 }
+
+/// How much of the fitted longitudinal fall-off past the peak is kept (see
+/// `forces`): 0.357 leaves a fully locked tyre at 0.90 of its peak.
+pub const FX_FALLOFF_KEEP: f64 = 0.357;
 
 /// Magic Formula core, normalised so the peak is exactly 1.0.
 fn mf(x: f64, b: f64, c: f64, e: f64) -> f64 {

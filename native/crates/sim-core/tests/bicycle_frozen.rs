@@ -10,7 +10,9 @@
 //!
 //! Regenerated ONCE since the freeze, with Nick's approval (2026-09-22,
 //! commit e9933c0): the launch clutch / clutch-lock fixes in the shared
-//! powertrain. Any other regeneration needs the same explicit sign-off.
+//! powertrain. And again the same night (Nick: "go ahead and add whatever"):
+//! the tyre's longitudinal fall-off past the peak (FX_FALLOFF_KEEP). Any
+//! other regeneration needs the same explicit sign-off.
 
 use sim_core::prelude::*;
 
