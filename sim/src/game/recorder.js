@@ -588,6 +588,14 @@ export class Recorder {
       // full; everything that ranks reads `valid` and nothing else has to
       // know the reason.
       valid: entry.valid !== false,
+      // Whether the car was one this lap could have been driven in (no model
+      // changes while it was driven), which vehicle model drove it, and the
+      // run-to-run setup it was on. The game stamps these on the entry
+      // (main.js lap hook); a caller that does not gets the permissive
+      // defaults, which is only honest for test fixtures.
+      counted: entry.counted !== false,
+      vehicleModel: entry.vehicleModel ?? 2,
+      ...(entry.setup ? { setup: entry.setup } : {}),
       // `null` for a sector that was never timed -- the car's course distance
       // jumped over the boundary. `round` turns a null into 0, and a 0.000 s
       // sector is a far worse answer than an admitted gap.
@@ -734,6 +742,12 @@ export class Recorder {
       bestLapRawS: bestLap ? bestLap.raw : null,
       bestLapNumber: bestLap ? bestLap.lap : null,
       bestLapCones: bestLap ? bestLap.cones : null,
+      // 0.7.2: which model the run was driven on, whether its times count,
+      // and the setup its best lap was set on -- in `stats` because `stats`
+      // is what travels to the team board. `counted` is false if ANY lap was
+      // driven on a modified car, or if the run changed model part way (a
+      // time belongs on exactly one board).
+      ...this.runClass(bestLap),
       /** The outright quickest lap ignoring penalties, whichever lap that was.
        *  Worth knowing -- it is the pace the car has in it -- but it is not
        *  the time that scores. */
@@ -764,6 +778,16 @@ export class Recorder {
       offTrackS: round(this._offTrackS, 2),
       ffbClippedFrac: round(this._ffbClippedS / n, 4),
     };
+  }
+
+  /** `vehicleModel`, `counted` and the best lap's `setup`, for `stats`. */
+  runClass(bestLap) {
+    const models = new Set(this.laps.map((l) => l.vehicleModel ?? 2));
+    const vehicleModel = models.size === 1 ? [...models][0] : (this.meta.vehicleModel ?? 2);
+    const counted = this.meta.counted !== false
+      && this.laps.every((l) => l.counted !== false)
+      && models.size <= 1;
+    return { vehicleModel, counted, setup: bestLap?.setup ?? null };
   }
 
   toManifest() {

@@ -26,7 +26,7 @@ import { ForceFeedback } from "./game/forceFeedback.js";
 import { NativeCar } from "./vehicle/nativeCar.js";
 import { renderSpecSheet, renderQuickSetup, syncEditors } from "./game/specSheet.js";
 import { PARAM_DEFAULTS, readParam, writeParam } from "./vehicle/paramMeta.js";
-import { serializeSetup, parseSetup, applySetup, setupFilename, diffSetup, modelChanges, timeCounts, carSnapshot, SETUP_PATHS, SETUP_DEFAULTS, SETUP_EXT, SETUP_MIME } from "./vehicle/setupFile.js";
+import { serializeSetup, parseSetup, applySetup, setupFilename, diffSetup, modelChanges, timeCounts, carSnapshot, lapSetup, SETUP_PATHS, SETUP_DEFAULTS, SETUP_EXT, SETUP_MIME } from "./vehicle/setupFile.js";
 import { SetupAdjuster, ADJUSTABLE_PATHS, formatSetupValue } from "./vehicle/setupAdjust.js";
 import { applySlot, nextSlot, markEdited, saveSlot, loadSlots } from "./game/setupSlots.js";
 import { renderSetupCard, syncSetupCard } from "./game/setupCard.js";
@@ -562,6 +562,10 @@ class Game {
   installLapHooks() {
     if (!this.timing) return;
     this.timing.onLap = (entry, sectors, sectorCones) => {
+      // What this lap was driven on: the model (its board) and the setup
+      // (shown beside the time). Stamped before the recorder files it.
+      entry.vehicleModel = SDM26.vehicleModel ?? 2;
+      entry.setup = lapSetup(readParam);
       this.recorder?.recordLap(entry, sectors, sectorCones);
       // The lap that just closed was scored on the verdict it was driven
       // under. The NEXT lap starts fresh: a car put back to legal counts from
@@ -633,6 +637,7 @@ class Game {
       // grip -- with the offending parameters named so a reader does not
       // have to diff two setups to find out why.
       counted: this.refreshTimeCounts() && !this.runTainted,
+      vehicleModel: SDM26.vehicleModel ?? 2,
       modelChanges: modelChanges().map((d) => ({
         path: d.path, label: d.label, unit: d.unit, from: d.from, to: d.to,
       })),

@@ -254,7 +254,30 @@ export const SETUP_LEGAL_PATHS = [
   "launchRpm", "finalDrive",
   // The double track's alignment: run-to-run setup, like the bars.
   "dt.toeInFrontDeg", "dt.toeInRearDeg", "dt.staticCamberFrontDeg", "dt.staticCamberRearDeg", "dt.ackermann",
+  // Which vehicle model drives the car is not a modification of it: it is a
+  // CLASS. Since 0.7.2 a lap on the 4-wheel beta counts, on its own board
+  // (every lap records `vehicleModel`, and Helios ranks each model
+  // separately). The beta's model-level knobs -- grip scales, compliance,
+  // bump steer, damping, the aero map -- are still model changes.
+  "vehicleModel",
 ];
+
+/**
+ * The run-to-run setup a lap was driven on: every legal setup item and the
+ * vehicle model, as numbers. Small on purpose -- it rides with each lap and
+ * with the run's shared stats, so a leaderboard can show exactly what a time
+ * was set on.
+ */
+export function lapSetup(read) {
+  const out = {};
+  for (const path of SETUP_LEGAL_PATHS) {
+    try {
+      const v = read(path);
+      if (typeof v === "number" && Number.isFinite(v)) out[path] = Math.round(v * 1e4) / 1e4;
+    } catch { /* not in this build */ }
+  }
+  return out;
+}
 
 /**
  * Everything the car is running that is NOT a setup change: mass, power,

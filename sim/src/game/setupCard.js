@@ -77,7 +77,7 @@ export function renderSetupCard(root, { onChange, onSlot, model = false } = {}) 
       <span class="slot-chip" data-slot-chip></span>
     </div>
     ${model ? `
-    <div class="sn-model" data-model title="Which vehicle model drives this run. Bicycle is the validated one. 4-wheel is the beta double track: the body rolls and pitches on its springs and every wheel has its own camber. A lap on the beta model does not count.">
+    <div class="sn-model" data-model title="Which vehicle model drives this run. Bicycle is the validated one. 4-wheel is the beta double track: the body rolls and pitches on its springs and every wheel has its own camber. A lap on the beta model counts on its own leaderboard, beside the bicycle's, not against it.">
       <span class="sn-name">MODEL</span>
       <button class="secondary" data-model-set="2">Bicycle</button>
       <button class="secondary" data-model-set="3">4-wheel &beta;</button>

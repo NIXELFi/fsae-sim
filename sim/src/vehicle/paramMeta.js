@@ -124,7 +124,7 @@ export function parameterGroups() {
   return [
     rows("Vehicle model", [
       p("Vehicle model", v.vehicleModel ?? 2, "", "estimate",
-        "2 = transient bicycle (validated). 3 = double track with a rolling, pitching body and camber from the team's kinematics and tyre fit (BETA, desktop rig only). Laps on 3 do not count.",
+        "2 = transient bicycle (validated). 3 = double track with a rolling, pitching body and camber from the team's kinematics and tyre fit (BETA, desktop rig only). Laps on 3 count on their own board in Helios (beside the bicycle), from simulator 0.7.2.",
         { path: "vehicleModel", min: 2, max: 3, step: 1 }),
     ]),
     rows("4-wheel β setup (model 3 only)", [

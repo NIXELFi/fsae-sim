@@ -226,6 +226,35 @@ section("An off-course lap's clean sector is still not a best");
      JSON.stringify(st.bestSectors));
 }
 
+section("model class, counted and setup ride with each lap and in the stats (0.7.2)");
+{
+  const setupA = { "roll.rsdFront": 0.48, brakeBiasFront: 0.65, vehicleModel: 3 };
+  const setupB = { "roll.rsdFront": 0.46, brakeBiasFront: 0.65, vehicleModel: 3 };
+  const rec = openRecorder({ counted: true, vehicleModel: 3 });
+  rec.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true, counted: true, vehicleModel: 3, setup: setupA }, [31]);
+  rec.recordLap({ lap: 2, raw: 30, cones: 0, off: 0, total: 30, valid: true, counted: true, vehicleModel: 3, setup: setupB }, [30]);
+  const st = rec.stats();
+  ok("a lap records its model", rec.laps[0].vehicleModel === 3);
+  ok("a lap records whether it counted", rec.laps[1].counted === true);
+  ok("the run is on the model its laps were", st.vehicleModel === 3, String(st.vehicleModel));
+  ok("the run counts", st.counted === true);
+  ok("the stats carry the BEST lap's setup", st.setup?.["roll.rsdFront"] === 0.46, JSON.stringify(st.setup));
+
+  const tainted = openRecorder({ counted: true });
+  tainted.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true, counted: false, vehicleModel: 2 }, [31]);
+  tainted.recordLap({ lap: 2, raw: 30, cones: 0, off: 0, total: 30, valid: true, counted: true, vehicleModel: 2 }, [30]);
+  ok("one lap on a modified car and the run does not count", tainted.stats().counted === false);
+
+  const mixed = openRecorder({ counted: true });
+  mixed.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true, counted: true, vehicleModel: 2 }, [31]);
+  mixed.recordLap({ lap: 2, raw: 30, cones: 0, off: 0, total: 30, valid: true, counted: true, vehicleModel: 3 }, [30]);
+  ok("a run that changed model part way belongs on neither board", mixed.stats().counted === false);
+
+  const legacy = openRecorder({});
+  legacy.recordLap({ lap: 1, raw: 31, cones: 0, off: 0, total: 31, valid: true }, [31]);
+  ok("a fixture with no stamps reads as a counted bicycle lap", legacy.stats().vehicleModel === 2 && legacy.stats().counted === true);
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
   console.error(`${failures} FAILED`);
