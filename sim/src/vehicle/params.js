@@ -269,6 +269,15 @@ export const SDM26 = {
      * from that unless the real rack says otherwise.
      */
     torqueRatio: null,
+    /**
+     * Steering-feel calibration: the fraction of the modelled tyre moment
+     * that reaches the rim, on top of `rackEfficiency`. Feel only -- it never
+     * touches the car's motion. 0.61 puts the model's steady-state rim
+     * torque (1.0 g cornering) on the design report's autocross steer-force
+     * targets (p.20, at the measured 0.1448 m grip radius); see `feel_scale`
+     * in sim-core's vehicle.rs.
+     */
+    feelScale: 0.61,
     /** Scrub radius, m, and kingpin inclination, deg (same OptimumK export). */
     scrubM: 0.0255,
     kpiDeg: 8.745,

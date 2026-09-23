@@ -57,6 +57,15 @@ fn low_speed_fade(speed: f64) -> f64 {
 /// instead of flattening into a ceiling. `gamma` below 1 lifts everything under
 /// full scale, which is what AC's `ff_post_process` GAMMA does and why a 5.5
 /// N.m base feels weighty there and thin here.
+///
+/// The lift is `((m + t)^g - t^g) / ((1 + t)^g - t^g)` with a small toe `t`
+/// (`GAMMA_TOE`), not a bare `m^g`: that has an INFINITE slope at zero, so at
+/// a standstill, where the command is a few percent of noise around nothing,
+/// it multiplied the noise -- 4x the tick-to-tick chatter of gamma 1 with
+/// the hands resting on a parked car's rim. With the toe the slope at zero is
+/// finite (1.9 at gamma 0.75), 0 and 1 are still fixed points, and the lift
+/// above a few percent is nearly what it was. Same as `compress` in
+/// `forceFeedback.js`.
 fn compress(x: f64, gamma: f64, knee: f64) -> f64 {
     if x == 0.0 || !x.is_finite() {
         return 0.0;
@@ -64,7 +73,8 @@ fn compress(x: f64, gamma: f64, knee: f64) -> f64 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let mut m = x.abs();
     if gamma > 0.0 && (gamma - 1.0).abs() > 1e-9 {
-        m = m.powf(gamma);
+        let t0 = GAMMA_TOE.powf(gamma);
+        m = ((m + GAMMA_TOE).powf(gamma) - t0) / ((1.0 + GAMMA_TOE).powf(gamma) - t0);
     }
     let k = knee.clamp(0.0, 1.0);
     if m > k {
@@ -73,6 +83,9 @@ fn compress(x: f64, gamma: f64, knee: f64) -> f64 {
     }
     sign * m
 }
+
+/// See `compress`: where the gamma lift stops being a power law at zero.
+const GAMMA_TOE: f64 = 0.03;
 
 /// 0 below `a`, 1 above `b`, a cubic between.
 fn smoothstep(x: f64, a: f64, b: f64) -> f64 {
@@ -379,22 +392,25 @@ impl Default for FfbConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            // 5.5 N.m rated against ~15 N.m of rim torque at the peak: this
-            // puts the TORQUE peak at the top of the motor, where the old 0.55
-            // put 0.8 g there and clipped everything above it. See
-            // `defaultGainFor` in wheelPresets.js.
-            gain: 0.37,
+            // 5.5 N.m rated against ~8.6 N.m of rim torque at the peak (the
+            // model on the design report's steer-force targets): this puts
+            // the TORQUE peak at the top of the motor. See `defaultGainFor`
+            // and `MODEL_PEAK_RIM_NM` in wheelPresets.js.
+            gain: 0.64,
             align_torque_gain: 1.0,
             road_texture_gain: 0.35,
-            damping: 0.10,
-            friction: 0.04,
+            // Before the gain, like the tyre torque: scaled by 0.37 / 0.64
+            // when the default gain went 0.37 -> 0.64, so the rim feels as
+            // it did.
+            damping: 0.058,
+            friction: 0.023,
             soft_lock_gain: 1.0,
             min_force: 0.0,
             max_force_nm: 5.5,
             invert: false,
             gamma: 0.75,
             knee: 0.6,
-            park_friction: 0.10,
+            park_friction: 0.058,
             stop_damping: 0.35,
             understeer_effect: 0.0,
             asphalt_vibration: 0.0,
@@ -465,6 +481,8 @@ pub struct ParamSet {
     pub dt_damping_rebound: Option<f64>,
     pub dt_chassis_torsion_nm_deg: Option<f64>,
     pub rack_efficiency: Option<f64>,
+    /// `SteeringParams::feel_scale` (`steering.feelScale` in params.js).
+    pub steer_feel_scale: Option<f64>,
     pub torque_ratio: Option<f64>,
     pub mu_lat: Option<f64>,
     pub mu_long: Option<f64>,
@@ -1270,6 +1288,7 @@ impl Loop {
                 diff_preload_nm => v.diff.preload_nm,
                 steer_lag_s => v.steering.lag_s, steering_ratio => v.steering.ratio,
                 kingpin_offset_trail_m => v.steering.kingpin_offset_trail_m, rack_efficiency => v.steering.rack_efficiency,
+                steer_feel_scale => v.steering.feel_scale,
             }
             if let Some(x) = p.max_steer_deg { v.steering.max_steer_rad = x.to_radians(); }
             if let Some(x) = p.steer_rate_deg_s { v.steering.rate_rad_s = x.to_radians(); }
@@ -1484,14 +1503,19 @@ impl Loop {
         let rim_ratio = if native && self.wheel_cfg.mapping == "match-car" {
             sim_core::vehicle::road_per_rim(rim_deg) * self.car.params().steering.rack_efficiency
         } else {
-            self.car.params().rim_torque_ratio()
+            self.car.params().rim_mech_ratio()
         };
+        // The tyres' moment also takes the steering-feel calibration
+        // (`SteeringParams::feel_scale`: the model's rim torque was about
+        // twice the design report's steer-force targets). The jacking below
+        // is geometry, not tyre moment, and goes through the rack alone.
+        let tyre_ratio = rim_ratio * self.car.params().steering.feel_scale;
         // FFB model v2 adds the front brake forces through the scrub radius.
         // Applied here, to the rim torque, so the logged `sim.rim_torque_nm`
         // is what the selected model put in the driver's hands.
         let kingpin_nm = tel.kingpin_torque_nm
             + if self.ffb_cfg.model >= 2 { tel.scrub_moment_nm } else { 0.0 };
-        tel.rim_torque_nm = kingpin_nm * rim_ratio;
+        tel.rim_torque_nm = kingpin_nm * tyre_ratio;
 
         // ---- force feedback ----
         // Caster/KPI jacking: the moment the front corner loads put on the
@@ -1667,6 +1691,22 @@ struct Feel {
     jacking_nm: f64,
 }
 
+/// Friction's view of the rim rate: filtered over 15 ms, where damping's is
+/// 4 ms. A Coulomb term is a SIGN of the rim speed, and at a standstill the
+/// rim speed is the encoder's noise: with the hands resting on a parked car
+/// it flipped the friction (and the standstill scrub, 0.14 of rated torque
+/// between them) back and forth hundreds of times a second.
+const FRICTION_RATE_TAU_S: f64 = 0.015;
+/// Below this rim speed (rad/s, ~4.6 deg/s) the friction does not act: a rim
+/// that is not being turned has nothing for friction to oppose, and the
+/// rate there is noise. A soft deadband, so the torque still builds
+/// smoothly as the driver starts to turn the wheel.
+const FRICTION_DEADBAND_RAD_S: f64 = 0.08;
+/// The minimum-force floor fades in between these speeds (m/s): below
+/// walking pace the tyre torque it follows is a fraction of a newton-metre
+/// of slip-angle noise, and lifting that to the floor chattered the rim.
+const MIN_FORCE_FADE: (f64, f64) = (0.5, 2.0);
+
 /// Asphalt buzz, shared with `forceFeedback.js` (`ASPHALT_*` there).
 const ASPHALT_MAX_FRAC: f64 = 0.08;
 const ASPHALT_FADE_START: f64 = 2.0;
@@ -1687,6 +1727,8 @@ const ASPHALT_SECOND_RATIO: f64 = 2.37;
 struct FfbMixer {
     rim_deg: f64,
     rim_rate_deg_s: f64,
+    /// The rim rate the friction reads, filtered longer (`FRICTION_RATE_TAU_S`).
+    friction_rate_deg_s: f64,
     friction_state: f64,
     phase: f64,
     /// The asphalt buzz's own phase: it runs at its own pitch, alongside the
@@ -1705,6 +1747,7 @@ impl FfbMixer {
         let tau = if native { 0.004 } else { 0.025 };
         let raw_rate = ((rim_deg - self.rim_deg) / dt.max(1e-4)).clamp(-MAX_RIM_RATE_DEG_S, MAX_RIM_RATE_DEG_S);
         self.rim_rate_deg_s += (raw_rate - self.rim_rate_deg_s) * (dt / tau).min(1.0);
+        self.friction_rate_deg_s += (raw_rate - self.friction_rate_deg_s) * (dt / tau.max(FRICTION_RATE_TAU_S)).min(1.0);
         self.rim_deg = rim_deg;
         if !on {
             self.kick = 0.0;
@@ -1733,14 +1776,19 @@ impl FfbMixer {
         // slip is a left turn, where counter-steer is clockwise, which is
         // the wheel's positive. Faded with the tyres, so a standstill
         // wriggle cannot fire it. Off at 0.
-        if cfg.oversteer_effect > 0.0 && tel.slip_deg[RL].abs() > 1e-6 {
+        // The rear axle's slip: both wheels, so the double track's two rears
+        // (which differ) read the same left and right. The bicycle's are one.
+        let slip_r = 0.5 * (tel.slip_deg[RL] + tel.slip_deg[RR]);
+        if cfg.oversteer_effect > 0.0 && slip_r.abs() > 1e-6 {
             let out_of_balance = smoothstep(tel.balance, OVERSTEER_BALANCE_START, OVERSTEER_BALANCE_FULL);
-            out.oversteer = tel.slip_deg[RL].signum() * cfg.oversteer_effect * rated * out_of_balance * fade;
+            out.oversteer = slip_r.signum() * cfg.oversteer_effect * rated * out_of_balance * fade;
         }
         // Damping: `damping` is the fraction of rated torque at 10 rad/s.
         out.damping = -cfg.damping * rated * (rate / 10.0);
-        // Coulomb friction with a soft sign.
-        let target = (rate / 0.3).tanh();
+        // Coulomb friction with a soft sign, on its own longer-filtered rate
+        // and with a soft deadband: see `FRICTION_RATE_TAU_S`.
+        let fr = self.friction_rate_deg_s.to_radians();
+        let target = fr.signum() * ((fr.abs() - FRICTION_DEADBAND_RAD_S).max(0.0) / 0.3).tanh();
         self.friction_state += (target - self.friction_state) * (dt / 0.03).min(1.0);
         out.friction = -cfg.friction * rated * self.friction_state;
         // Standstill. A stationary tyre resists being twisted about the
@@ -1786,10 +1834,19 @@ impl FfbMixer {
         let base = (out.align + out.damping + out.friction + out.jacking) * cfg.gain / rated + out.oversteer / rated;
         out.clipped = base.abs() > 1.0;
         let mut cmd = compress(base, cfg.gamma, cfg.knee);
-        // `f64::signum(0.0)` is +1, unlike Math.sign; a zero command must
-        // stay zero or a gain of 0 pushes the rim to the right.
-        if cfg.min_force > 0.0 && out.align.abs() > 1e-3 && cmd != 0.0 && cmd.abs() < cfg.min_force {
-            cmd = cmd.signum() * cfg.min_force;
+        // The minimum-force floor: lifts the tyre torque over the motor's
+        // cogging. It used to snap any command under the floor to +-floor by
+        // its sign -- a step of twice the floor every time the command
+        // crossed zero, which is exactly what it does on centre and at a
+        // crawl. Now it is a smooth OFFSET in the direction of the tyre
+        // torque, `floor * tanh(tyre / floor)`: the full floor once the
+        // tyres say anything, zero with them, continuous through centre,
+        // and faded in with speed (`MIN_FORCE_FADE`). A gain of 0 is still
+        // silence: the tyre command is then zero.
+        if cfg.min_force > 0.0 {
+            let tyre = out.align * cfg.gain / rated;
+            let w = cfg.min_force.max(1e-3);
+            cmd += cfg.min_force * (tyre / w).tanh() * smoothstep(tel.speed, MIN_FORCE_FADE.0, MIN_FORCE_FADE.1);
         }
         cmd = (cmd + stop).clamp(-1.0, 1.0);
 
@@ -2322,6 +2379,83 @@ mod tests {
         // A NaN or non-positive mass in a parameter push is refused.
         lp.apply_params(&ParamSet { mass_kg: Some(f64::NAN), izz_kg_m2: Some(0.0), crr: Some(f64::NAN), ..Default::default() });
         assert!(lp.car.params().mass_kg > 100.0 && lp.car.params().izz_kg_m2 > 1.0 && lp.car.params().crr.is_finite());
+    }
+
+    /// What a stationary (or crawling) car sends the motor for five seconds
+    /// at 1 kHz while the driver's hands rest on the rim: a slow random
+    /// wander of about half a degree plus encoder noise quantised to a
+    /// 16-bit axis over 900 deg. Returns (sign changes of the command,
+    /// RMS tick-to-tick change in N.m, mean |torque| N.m), over the last 4 s.
+    fn hands_on_a_parked_car(cfg: FfbConfig, speed: f64, throttle: f64, seed: u64) -> (usize, f64, f64) {
+        let mut lp = test_loop();
+        lp.wheel_cfg.enabled = true;
+        lp.device_present = true;
+        lp.ffb_cfg = cfg;
+        lp.apply_command(RigCommand::Respawn { x: 0.0, y: 0.0, psi: 0.0, speed, seq: 1 });
+        let mut rng = Lcg(seed);
+        let (mut wander, mut target) = (0.0f64, 0.0f64);
+        let lsb = 900.0 / 65536.0;
+        let mut cmds = Vec::new();
+        for i in 0..5000 {
+            if i % 200 == 0 {
+                target = (rng.next() - 0.5) * 1.0;
+            }
+            wander += (target - wander) * 0.001 / 0.15;
+            let noise = (rng.next() - 0.5) * 2.0 * 0.03;
+            let rim = ((wander + noise) / lsb).round() * lsb;
+            lp.device.axes[0] = (rim / 450.0) as f32;
+            let input = RigInput { throttle, ffb_enabled: true, ..Default::default() };
+            let n = lp.clock.advance(Duration::from_millis(1), true);
+            let s = lp.tick(0.001, n, &input, 0, 0, 0);
+            if i >= 1000 {
+                cmds.push(s.ffb.command);
+            }
+        }
+        let rated = cfg.max_force_nm;
+        // A sign change the hands could feel: at least 0.02 N.m either side.
+        let felt = 0.02 / cfg.max_force_nm;
+        let flips = cmds.windows(2).filter(|w| w[0] * w[1] < 0.0 && w[0].abs() > felt && w[1].abs() > felt).count();
+        let hf = (cmds.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum::<f64>() / (cmds.len() - 1) as f64).sqrt() * rated;
+        let mean = cmds.iter().map(|c| c.abs()).sum::<f64>() / cmds.len() as f64 * rated;
+        (flips, hf, mean)
+    }
+
+    /// Hands resting on the rim of a parked or crawling car: the motor must
+    /// be quiet. Before (0.7.5): the Coulomb friction and the standstill
+    /// scrub flipped with the encoder's noise and the gamma lift, whose slope
+    /// is infinite at zero, multiplied it -- 51 felt sign changes in 4 s
+    /// parked, 0.020 N.m RMS tick to tick; with a minimum force set, the
+    /// floor's step at centre made it 291 flips and 0.149 N.m at a crawl.
+    #[test]
+    fn a_parked_rim_does_not_chatter() {
+        let base = FfbConfig::default();
+        for (label, cfg) in [("default", base), ("min force 0.05", FfbConfig { min_force: 0.05, ..base })] {
+            for (speed, th) in [(0.0, 0.0), (0.6, 0.06)] {
+                for seed in [3, 11] {
+                    let (flips, hf, mean) = hands_on_a_parked_car(cfg, speed, th, seed);
+                    println!("{label:<16} v0 {speed} thr {th} seed {seed}: felt flips {flips:>3}  hf {hf:.4} N.m  mean {mean:.3} N.m");
+                    assert_eq!(flips, 0, "{label} at {speed} m/s: the rim chatters");
+                    assert!(hf < 0.01, "{label} at {speed} m/s: {hf:.4} N.m RMS tick to tick");
+                    assert!(mean < 0.03, "{label} at {speed} m/s: {mean:.3} N.m of noise torque");
+                }
+            }
+        }
+    }
+
+    /// ...but turning a parked rim still meets the stationary tyre's scrub:
+    /// the deadband is on noise, not on the feel.
+    #[test]
+    fn a_parked_rim_still_resists_being_turned() {
+        let cfg = FfbConfig::default();
+        let mut m = FfbMixer::default();
+        let parked = sim_core::solver::Telemetry::default();
+        let mut o = FfbOut::default();
+        // 30 deg/s of rim, clockwise, for a quarter of a second.
+        for i in 0..250 {
+            o = m.mix(0.001, &cfg, true, &parked, i as f64 * 0.03, 179.0, true, &feel_none());
+        }
+        let want = (cfg.friction + cfg.park_friction) * cfg.max_force_nm;
+        assert!(o.friction < -0.8 * want, "friction {} N.m against {want} N.m of scrub", o.friction);
     }
 
     #[test]

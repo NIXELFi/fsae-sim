@@ -174,6 +174,7 @@ export class NativeCar {
       steeringRatio: p.steeringRatio,
       casterDeg: p.steering.casterDeg, kingpinOffsetTrailM: p.steering.kingpinOffsetTrailM,
       rackEfficiency: p.steering.rackEfficiency, torqueRatio: p.steering.torqueRatio ?? undefined,
+      steerFeelScale: p.steering.feelScale,
       diffPowerLock: p.diff?.powerLock, diffCoastLock: p.diff?.coastLock,
       diffPreloadNm: p.diff?.preloadNm,
       dtToeInFrontDeg: p.dt?.toeInFrontDeg, dtToeInRearDeg: p.dt?.toeInRearDeg,
@@ -212,14 +213,14 @@ export class NativeCar {
     rigNative.command({
       kind: "ffb",
       enabled: ffb.enabled !== false,
-      gain: ffb.gain ?? 0.37, alignTorqueGain: ffb.alignTorqueGain ?? 1,
-      roadTextureGain: ffb.roadTextureGain ?? 0.35, damping: ffb.damping ?? 0.10,
-      friction: ffb.friction ?? 0.04, softLockGain: ffb.softLockGain ?? 1,
+      gain: ffb.gain ?? 0.64, alignTorqueGain: ffb.alignTorqueGain ?? 1,
+      roadTextureGain: ffb.roadTextureGain ?? 0.35, damping: ffb.damping ?? 0.058,
+      friction: ffb.friction ?? 0.023, softLockGain: ffb.softLockGain ?? 1,
       minForce: ffb.minForce ?? 0, maxForceNm: ffb.maxForceNm ?? 5.5, invert: !!ffb.invert,
       // Defaulted here as well as in the profile: a settings file written
       // before these existed must still get the compressor, not a hard clip.
       gamma: ffb.gamma ?? 0.75, knee: ffb.knee ?? 0.6,
-      parkFriction: ffb.parkFriction ?? 0.10, stopDamping: ffb.stopDamping ?? 0.35,
+      parkFriction: ffb.parkFriction ?? 0.058, stopDamping: ffb.stopDamping ?? 0.35,
       understeerEffect: ffb.understeerEffect ?? 0, oversteerEffect: ffb.oversteerEffect ?? 0,
       asphaltVibration: ffb.asphaltVibration ?? 0,
       // 1 = v1, 2 = v2, 3 = v2.1 (see `FfbConfig::model` in rig.rs).

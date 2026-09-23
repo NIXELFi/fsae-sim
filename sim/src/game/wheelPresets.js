@@ -128,22 +128,25 @@ export function presetFor(productName) {
 }
 
 /**
- * A default gain for a base of this rating.
- *
- * SDM26 makes about 12 N.m per g at the rim, and the aligning torque PEAKS
- * near 15 N.m at roughly 4 degrees of front slip -- well before the tyre's
- * own force peak, which is exactly why the rim goes light before the front
- * lets go. A base that can make 15 N.m gets unity; a smaller one is scaled so
- * the peak lands at full output and the fall-off past it is still inside the
- * motor's range rather than buried in the clip. Floored so a 2 N.m gear wheel
- * still gets a usable shape.
- *
- * The old divisor was 11, from a 9 N.m/g estimate that predates the fitted
- * pneumatic trail; it put a MOZA R5 in the clip from 0.8 g upward.
+ * The model's steady rim-torque peak, N.m: about 8.6 at 1.37 g and ~4 deg of
+ * front slip on the 14 m/s steer ramp (`node tools/ffb_sweep.mjs ramp`),
+ * after the steering-feel calibration put the model on the design report's
+ * steer-force targets (`feelScale` in params.js). It was ~14 N.m before.
+ */
+export const MODEL_PEAK_RIM_NM = 8.6;
+
+/**
+ * A default gain for a base of this rating: rated torque over the model's
+ * peak, so the torque peak lands at full output on a small base and the
+ * fall-off past it is still inside the motor rather than buried in the
+ * clip. Capped at 1 -- a base that can make the real car's torque gets the
+ * real car's torque, not more -- and floored only at 0.05 so a zero or junk
+ * rating cannot switch the wheel off. No 0.3 floor any more: that put a
+ * 2 N.m gear wheel's peak 50 % past its motor.
  */
 export function defaultGainFor(ratedNm) {
   const r = Math.max(0.1, ratedNm || 5);
-  return Math.round(Math.min(1, Math.max(0.3, r / 15)) * 100) / 100;
+  return Math.round(Math.min(1, Math.max(0.05, r / MODEL_PEAK_RIM_NM)) * 100) / 100;
 }
 
 /**

@@ -689,10 +689,13 @@ export class BicycleModel {
     t.mechTrailM = mechTrail;
     t.kingpinTorqueNm = kingpin;
     const torqueRatio = geo.torqueRatio ?? 1 / Math.max(p.steeringRatio, 1e-6);
-    t.rimTorqueNm = kingpin * torqueRatio * geo.rackEfficiency;
+    // `feelScale` is the steering-feel calibration (`feel_scale` in
+    // sim-core): feel only, the motion never sees it.
+    const feel = geo.feelScale ?? 1;
+    t.rimTorqueNm = kingpin * torqueRatio * geo.rackEfficiency * feel;
     t.scrubMomentNm = scrub;
     // At the rim through the same ratio, for the force-feedback mixer.
-    t.scrubRimNm = scrub * torqueRatio * geo.rackEfficiency;
+    t.scrubRimNm = scrub * torqueRatio * geo.rackEfficiency * feel;
   }
 
   /**
