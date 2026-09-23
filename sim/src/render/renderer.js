@@ -1663,6 +1663,15 @@ export class Renderer {
         }
         this.u[name] = map;
       }
+      // The livery sampler must never sit on unit 0 or 1, where the shadow
+      // cascades (sampler2DShadow) are bound: two sampler types on one unit
+      // is INVALID_OPERATION on every car draw. Set once, here, not only in
+      // drawCar -- the ghost and other passes draw with this program first.
+      if (this.u.car.uLivery) {
+        gl.useProgram(this.progCar);
+        gl.uniform1i(this.u.car.uLivery, LIVERY_UNIT);
+        gl.useProgram(null);
+      }
     }
     if (!old || old.shadowSize !== q.shadowSize) {
       for (const sm of this.shadow) { gl.deleteTexture(sm.tex); gl.deleteFramebuffer(sm.fbo); }
