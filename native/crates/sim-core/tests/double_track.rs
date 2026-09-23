@@ -196,8 +196,21 @@ fn body_rolls_and_pitches_by_the_team_gradients() {
     let t = c.telemetry();
     let pitch_grad = t.pitch_deg / -t.ax_g;
     println!("pitch {:.3} deg at {:.3} g -> {pitch_grad:.3} deg/g", t.pitch_deg, t.ax_g);
-    let want = sdm26().suspension.pitch_gradient_deg_g;
-    assert!((want * 0.97..=want * 1.03).contains(&pitch_grad), "pitch gradient {pitch_grad:.3} deg/g, want {want}");
+    // Pitch is no longer an input: it is the body on the two axle ride
+    // springs (spring + tyre in series, BOTH wheels). With heave free, a
+    // pitch moment M sits as M / L^2 (1/(2 k_f) + 1/(2 k_r)) -- the Ride Roll
+    // Calc's formula, which used one wheel's rate per axle and got 0.91.
+    let p = sdm26();
+    let sp = &p.suspension;
+    let series = |k: f64| 1.0 / (1.0 / k + 1.0 / sp.tyre_rate_n_m);
+    let (kf, kr) = (series(sp.wheel_rate_front_n_m), series(sp.wheel_rate_rear_n_m));
+    let anti = p.brakes.bias_front * sp.anti_dive_front + (1.0 - p.brakes.bias_front) * sp.anti_lift_rear;
+    let m = (1.0 - anti) * p.sprung_mass() * G * p.sprung_cg_height();
+    let l = p.wheelbase_m;
+    let want = (m / (l * l) * (1.0 / (2.0 * kf) + 1.0 / (2.0 * kr))).to_degrees();
+    println!("pitch gradient from the ride rates: {want:.3} deg/g (team sheet, one wheel per axle: 0.91)");
+    assert!((0.35..=0.55).contains(&want), "rate-derived pitch gradient {want:.3}");
+    assert!((want * 0.92..=want * 1.08).contains(&pitch_grad), "pitch gradient {pitch_grad:.3} deg/g, want {want:.3}");
 }
 
 /// Roll is a damped mode, not an instant: after a step steer it lags and

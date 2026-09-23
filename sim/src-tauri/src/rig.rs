@@ -401,6 +401,9 @@ pub struct ParamSet {
     pub dt_front_grip_scale: Option<f64>,
     pub dt_rear_grip_scale: Option<f64>,
     pub dt_aero_ride_map: Option<f64>,
+    pub dt_damping_jounce: Option<f64>,
+    pub dt_damping_rebound: Option<f64>,
+    pub dt_chassis_torsion_nm_deg: Option<f64>,
     pub rack_efficiency: Option<f64>,
     pub torque_ratio: Option<f64>,
     pub mu_lat: Option<f64>,
@@ -1201,6 +1204,9 @@ impl Loop {
                 if let Some(x) = p.dt_front_grip_scale { s.front_grip_scale = x; }
                 if let Some(x) = p.dt_rear_grip_scale { s.rear_grip_scale = x; }
                 if let Some(x) = p.dt_aero_ride_map { s.aero_map.enabled = x >= 0.5; }
+                if let Some(x) = p.dt_damping_jounce { s.damping_jounce = x; }
+                if let Some(x) = p.dt_damping_rebound { s.damping_rebound = x; }
+                if let Some(x) = p.dt_chassis_torsion_nm_deg { s.chassis_torsion_nm_deg = x; }
             }
             if p.torque_ratio.is_some() { v.steering.torque_ratio = p.torque_ratio; }
         }

@@ -172,6 +172,8 @@ export class NativeCar {
       dtSteerComplianceDegPer100Nm: p.dt?.steerComplianceDegPer100Nm,
       dtFrontGripScale: p.dt?.frontGripScale, dtRearGripScale: p.dt?.rearGripScale,
       dtAeroRideMap: p.dt?.aeroRideMap,
+      dtDampingJounce: p.dt?.dampingJounce, dtDampingRebound: p.dt?.dampingRebound,
+      dtChassisTorsionNmDeg: p.dt?.chassisTorsionNmDeg,
       muLat: p.muLat, muLong: p.muLong, tireLoadSensitivity: p.tireLoadSensitivity, relaxLengthM: p.relaxLengthM,
       frontGripFactor: p.frontGripFactor,
       gearRatios: p.gearRatios, primaryReduction: p.primaryReduction, finalDrive: p.finalDrive,

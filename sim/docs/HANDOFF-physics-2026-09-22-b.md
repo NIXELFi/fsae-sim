@@ -175,3 +175,31 @@ The car is staged with its nose 0.30 m behind the line. The clock runs from the 
   - Rear ×1.09, front ×1.13 gives 5.16 s (bicycle 5.14). The car pushes at 10/15/20 m/s and doesn't spin.
 - **Setup card:** a "4-wheel β setup" group. Toe, camber and Ackermann are setup-legal; the rest count as model changes.
 - **Not done: the two-state heave body.** Its axle rates imply a 0.49 deg/g pitch gradient against the team's 0.91. The Ride Roll sheet probably uses one wheel per axle. Changing it would change a setup number, so it waits for a decision. The shock-pot logs could settle pitch the same way they settled roll.
+
+## 9. Design-report pass (SDM26 Suspension DR, Overall Vehicle DR, ARB calculator, Ride Roll Calc)
+
+Nick: "don't assume the ARBs do nothing". Roll stiffness is unchanged.
+
+**Added (4-wheel only):**
+- **Heave/pitch body on the axle ride springs.** Both wheels per axle, each spring in series with its tyre. Pitch comes out 0.50 deg/g.
+  - The team's 0.91 is the Ride Roll Calc formula applied to one wheel's rate per axle (recomputed from the sheet). The SDR's own target is 0.5.
+  - Ride frequencies are 3.66 / 3.51 Hz, against the OVDR's 3.636 / 3.482.
+- **Damping:** 70 % jounce, 80 % rebound (OVDR).
+- **Chassis torsion:** 960 N·m/deg, from the physical test, feeding the lateral load-transfer split.
+- **Event presets** in `setups/`, from OVDR §5.3.
+
+**Checked and not changed:**
+- **Cornering stiffness.** The DB's 598 N/deg is at 250 lb (1112 N); the sim gives 633 there, so it agrees within 6 %. The earlier "30 % soft" came from comparing at different loads.
+- **Anti geometry:** OVDR 13.35 / 10.52 % against OptimumK-actual 12.8 / 11.5.
+- **Rear static camber:** OVDR −0.6 against −0.7.
+- **Rear unsprung mass:** 8.62 against 7.77.
+
+Each of these is small, and the sources disagree with each other.
+
+**Validation:**
+- **Toe test (SDR §6.7), not reproduced.** The model makes 1.1 / −0.5 about 0.04 s *slower*; the real car was 0.11 s faster. The robot repeats to 0.01 s, so this is a model–car mismatch, or a confounded test (run order, tyre temperature).
+- **Rear toe sign.** OVDR writes 1.1 / 0.5 and the SDR writes 1.1 / −0.5. The model favours rear toe-OUT at skidpad, which agrees with the team's −0.7 there.
+
+**Open:**
+- **ARB compliance.** The calculator ignores bearing, bearing-cup and bar-bending compliance, and the test-bench results were never published. The shock pots read roughly springs-only roll.
+- **Report figures.** The design reports' figures (ride-height table, damper curves, steer force) were unreadable through Drive export.

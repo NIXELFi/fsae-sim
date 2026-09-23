@@ -50,11 +50,15 @@ pub struct RollParams {
 pub struct SuspensionParams {
     /// Body roll per g of lateral acceleration, tyres included (deg/g).
     pub roll_gradient_deg_g: f64,
-    /// Body pitch per g of braking, tyres included (deg/g).
-    pub pitch_gradient_deg_g: f64,
-    /// Fraction of critical damping in roll and in pitch.
-    pub roll_damping_ratio: f64,
-    pub pitch_damping_ratio: f64,
+    /// Fraction of critical damping, jounce and rebound (the dampers are
+    /// asymmetric). Heave and pitch use them by direction at each axle; roll,
+    /// which has one side in jounce and the other in rebound, their mean.
+    pub damping_jounce: f64,
+    pub damping_rebound: f64,
+    /// Chassis torsional stiffness between the axles (N.m/deg). In series
+    /// between the front and rear roll springs, it pulls the lateral load
+    /// transfer split toward the mass split.
+    pub chassis_torsion_nm_deg: f64,
     /// Sprung-body inertias about its own CG (kg m^2).
     pub ixx_kg_m2: f64,
     pub iyy_kg_m2: f64,
@@ -180,11 +184,23 @@ impl SuspensionParams {
             // falls from 214 to 173 lb/in, 0.805 -> 0.91 deg/g. Roll is to be
             // checked against the shock pots in the SDM26 test logs.
             roll_gradient_deg_g: 0.66,
-            pitch_gradient_deg_g: 0.91,
-            // Ohlins TTX25, force-matched by Stillwell to a 0.7 damping-ratio
-            // curve (Suspension Design Report 4.4).
-            roll_damping_ratio: 0.70,
-            pitch_damping_ratio: 0.70,
+            // PITCH is no longer a gradient: 2026-09-22 the body heaves and
+            // pitches on the axle ride rates themselves (springs through the
+            // motion ratio, in series with the tyre, both wheels), which gives
+            // ~0.45 deg/g. The team's 0.91 (Ride Roll Calc 0.805 at 280 lb/in)
+            // is its formula k_f k_r / (k_f + k_r) L^2 on ONE wheel's rate per
+            // axle -- recomputed from the sheet; with both wheels it halves,
+            // and the Suspension Design Report's own target is 0.5 deg/g.
+            //
+            // Ohlins TTX25, force-matched to target damping ratios (Suspension
+            // Design Report 4.4); the Overall Vehicle Design Report's spec
+            // table gives 70 % critical in jounce and 80 % in rebound at
+            // 50 mm/s, front and rear.
+            damping_jounce: 0.70,
+            damping_rebound: 0.80,
+            // Overall Vehicle Design Report sec. 2: "Torsional stiffness |
+            // 1300 target; 1482 simulated; 960 physical test". The test.
+            chassis_torsion_nm_deg: 960.0,
             ixx_kg_m2: 24.8,
             iyy_kg_m2: 85.3,
             tyre_rate_n_m: 520.0 * 175.126_835,

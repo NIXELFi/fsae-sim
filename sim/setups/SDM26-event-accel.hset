@@ -1,0 +1,15 @@
+{
+  "format": "helios-setup",
+  "version": 1,
+  "car": "SDM26",
+  "name": "SDM26 event setup: acceleration",
+  "author": "From the SDM26 Overall Vehicle Design Report",
+  "created": "2026-09-23T05:45:20.330Z",
+  "track": "accel",
+  "notes": "Overall Vehicle Design Report sec. 5.3 event setup: RSD 51 %, diff preload 50 N.m. Only these items are in the file.",
+  "simVersion": "0.6.13",
+  "values": {
+    "roll.rsdFront": 0.51,
+    "diff.preloadNm": 50
+  }
+}

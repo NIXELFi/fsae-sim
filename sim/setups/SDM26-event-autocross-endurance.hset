@@ -1,0 +1,17 @@
+{
+  "format": "helios-setup",
+  "version": 1,
+  "car": "SDM26",
+  "name": "SDM26 event setup: autocross / endurance",
+  "author": "From the SDM26 Overall Vehicle Design Report",
+  "created": "2026-09-23T05:45:20.330Z",
+  "track": "autocross",
+  "notes": "Overall Vehicle Design Report sec. 5.3 event setup: RSD 47 %, diff preload 25 N.m, toe 1.1 front / 0.5 rear per wheel (toe: 4-wheel beta only). Pressures 10/10 psi not modelled. Only these items are in the file.",
+  "simVersion": "0.6.13",
+  "values": {
+    "roll.rsdFront": 0.47,
+    "diff.preloadNm": 25,
+    "dt.toeInFrontDeg": 1.1,
+    "dt.toeInRearDeg": 0.5
+  }
+}

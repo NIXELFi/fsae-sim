@@ -366,6 +366,11 @@ export const SDM26 = {
     rearGripScale: 1.09,
     /** 1 = aero follows ride height (2026 CFD map), 0 = fixed split. */
     aeroRideMap: 1,
+    /** Damping, fraction of critical at 50 mm/s (OVDR spec table). */
+    dampingJounce: 0.70,
+    dampingRebound: 0.80,
+    /** Chassis torsional stiffness, N.m/deg (OVDR sec. 2, physical test). */
+    chassisTorsionNmDeg: 960,
   },
 
   diff: {

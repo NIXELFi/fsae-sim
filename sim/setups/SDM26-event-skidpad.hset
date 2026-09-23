@@ -1,0 +1,17 @@
+{
+  "format": "helios-setup",
+  "version": 1,
+  "car": "SDM26",
+  "name": "SDM26 event setup: skidpad",
+  "author": "From the SDM26 Overall Vehicle Design Report",
+  "created": "2026-09-23T05:45:20.330Z",
+  "track": "skidpad",
+  "notes": "Overall Vehicle Design Report sec. 5.3 event setup: RSD 47 %, diff preload 0 N.m, toe 1.1 in front / 0.7 out rear (the toe applies to the 4-wheel beta model only). Tyre pressures 9/9 psi are not modelled. Only these items are in the file; everything else keeps its current value.",
+  "simVersion": "0.6.13",
+  "values": {
+    "roll.rsdFront": 0.47,
+    "diff.preloadNm": 0,
+    "dt.toeInFrontDeg": 1.1,
+    "dt.toeInRearDeg": -0.7
+  }
+}
