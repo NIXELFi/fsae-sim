@@ -2790,33 +2790,6 @@ export class Renderer {
    * canvas is a GPU copy of a megabyte (plus its mip chain) and doing it on
    * a frame where nothing changed is pure waste.
    */
-  /**
-   * Where the car's dash display landed on screen last frame: the centre of
-   * its top edge and its width, as fractions of the canvas (y down). The HUD
-   * parks its glance strip just above it, so the strip follows the eye-height
-   * slider, the FOV and head motion instead of guessing a fixed spot. Null
-   * when the panel is behind the camera (every camera but the cockpit).
-   */
-  dashOnScreen() {
-    if (!this.dashPanel) return null;
-    const hw = GEO.dashHalfWidth, hh = GEO.dashHalfHeight;
-    const vp = this.viewProj;
-    const out = this._dashOnScreen ?? (this._dashOnScreen = { x: 0, top: 0, w: 0 });
-    let xs = 0, ys = 0, xl = Infinity, xr = -Infinity, top = Infinity;
-    for (const [lx, ly] of [[-hw, hh], [hw, hh], [-hw, -hh], [hw, -hh]]) {
-      const p = transformPoint(this.dashModel, [lx, ly, 0]);
-      const cw = vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15];
-      if (!(cw > 1e-4)) return null;
-      const nx = (vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12]) / cw;
-      const ny = (vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13]) / cw;
-      const sx = 0.5 + 0.5 * nx, sy = 0.5 - 0.5 * ny;
-      xs += sx; ys += sy;
-      xl = Math.min(xl, sx); xr = Math.max(xr, sx); top = Math.min(top, sy);
-    }
-    out.x = xs / 4; out.top = top; out.w = xr - xl;
-    return out;
-  }
-
   drawDashScreen() {
     const gl = this.gl;
     const p = this.dashPanel;
