@@ -18,14 +18,21 @@ import { EYE_HEIGHT_RANGE_M } from "../vehicle/params.js";
 import { SETUP_META, modelChanges } from "../vehicle/setupFile.js";
 import { QUICK_SETUP_PATHS } from "./specSheet.js";
 import { SLOT_IDS, slotSummary, loadSlots } from "./setupSlots.js";
-import { ADJUSTMENTS } from "../vehicle/setupAdjust.js";
 
 /**
  * Dash-style short names, so eight rows fit a narrow column and read like the
- * HUD's setup panel rather than like the spec sheet. One source: the wheel
- * adjustments' own `short`, the names the HUD and the d-pad menu print.
+ * HUD's setup panel rather than like the spec sheet. Same order as the Car
+ * tab's block (`QUICK_SETUP_PATHS`), which is the order everything else uses.
  */
-const SHORT = Object.fromEntries(ADJUSTMENTS.map((a) => [a.path, a.short]));
+const SHORT = {
+  "roll.rsdFront": "RSD-F",
+  brakeBiasFront: "BB-F",
+  "diff.preloadNm": "PRELD",
+  "diff.coastLock": "LOCK-OFF",
+  "diff.powerLock": "LOCK-ON",
+  launchRpm: "LC",
+  finalDrive: "FINAL",
+};
 
 /** Decimals a step implies: 0.05 prints 2, 100 prints 0. */
 function decimalsFor(step) {
