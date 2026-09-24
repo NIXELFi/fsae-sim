@@ -141,7 +141,12 @@ const CAMERAS = [
   // not an option -- the lean and eye-lead code is gone. Pitch and the
   // fore-aft head slide under braking stay.
   { name: "Cockpit", live: true, pitch: -0.04, fov: 50, rigid: true },
-  { name: "Nose", ahead: 1.35, height: 0.46, pitch: -0.03, fov: 55, rigid: true },
+  // Above the nose skin, not in it: the CAD body's centreline top is 0.59 m
+  // at 1.10 m ahead of the CG and still 0.55 at 1.35, so the old 1.35 / 0.46
+  // put the camera ~0.1 m inside the bodywork (a black frame). From here the
+  // nose tip sits at the bottom edge and nothing is inside the 0.12 m near
+  // plane; the classic car is lower still.
+  { name: "Nose", ahead: 1.1, height: 0.72, pitch: -0.05, fov: 55, rigid: true },
   // Closer, lower and narrower than it was: at 58 deg from 4.6 m the car was
   // a toy in the middle of the frame. This fills it the way a broadcast
   // chase does and still keeps the next two gates in view.
