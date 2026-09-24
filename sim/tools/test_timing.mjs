@@ -418,6 +418,21 @@ section("message line: alerts are not pre-empted by info, info queues");
   ok(t.message === "" && t.messageQueue.length === 0, "reset clears the line and the queue");
 }
 
+section("message line: a status readout replaces a status, coalesces in the queue");
+{
+  const t = new Timing(axTrack());
+  const tick = (sec) => { for (let i = 0; i < Math.round(sec / DT); i++) t.update(DT, { s: 0, onTrack: true }, 0, 0); };
+  t.say("LOCK-OFF 0.42", 1.6, "status");
+  t.say("LOCK-ON 0.60", 1.6, "status");
+  ok(t.message === "LOCK-ON 0.60", `status on status replaces at once (got "${t.message}")`);
+  t.say("CONE +2s", 1.6, "alert");
+  t.say("LOCK-ON 0.61", 1.6, "status");
+  t.say("LOCK-ON 0.62", 1.6, "status");
+  ok(t.messageQueue.filter((m) => m.level === "status").length === 1, "queued statuses coalesce to the latest");
+  tick(1.7);
+  ok(t.message === "LOCK-ON 0.62", `and the latest is what follows the alert (got "${t.message}")`);
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
   console.error(`${failures} FAILED`);

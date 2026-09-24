@@ -219,34 +219,40 @@ export class Timing {
   /**
    * Put a message on the HUD's message line.
    *
-   * One line, two priorities. An "alert" (cone, off course, not saved, a
-   * load failure) shows at once, in red, and replaces whatever is up -- an
-   * info message it displaces goes back to the front of the queue if it had
-   * time left. An "info" message (splits, camera, overlay, setup) never
-   * pre-empts an alert: it queues behind it. Info on info gives the current
-   * one at least `MIN_INFO_S` on screen and then the next one takes over,
-   * so a burst of camera changes reads as the last one rather than as a
-   * slideshow, and a split is never wiped the instant it appears.
+   * One line, three priorities.
+   *  - "alert" (cone, off course, not saved, a load failure) shows at once,
+   *    in red, and replaces whatever is up; an info message it displaces
+   *    goes back to the front of the queue if it had time left.
+   *  - "info" (splits, lap times, green flag, reference) never pre-empts an
+   *    alert: it queues behind it. Info on info gives the current one at
+   *    least `MIN_INFO_S` on screen and then the next takes over, so a split
+   *    is never wiped the instant it appears.
+   *  - "status" (a setup nudge, camera, overlay, traction control) is a
+   *    readout of state where only the latest value matters: it replaces a
+   *    status already showing at once, waits like info behind anything else,
+   *    and a newer status replaces a queued one rather than queueing behind
+   *    it -- ten setup clicks are one readout, not ten.
    *
-   * @param {"info"|"alert"} level
+   * @param {"info"|"alert"|"status"} level
    */
   say(text, seconds = 2.5, level = "info") {
     const showing = this.message && this.clock <= this.messageUntil;
     if (!showing) { this._show(text, seconds, level); return; }
     if (level === "alert") {
       const left = this.messageUntil - this.clock;
-      if (this.messageLevel === "info" && left > 0.5) {
-        this.messageQueue.unshift({ text: this.message, seconds: left, level: "info" });
+      if (this.messageLevel !== "alert" && left > 0.5) {
+        this.messageQueue.unshift({ text: this.message, seconds: left, level: this.messageLevel });
       }
       this._show(text, seconds, level);
       return;
     }
-    if (this.messageLevel === "info") {
+    if (level === "status" && this.messageLevel === "status") { this._show(text, seconds, level); return; }
+    if (this.messageLevel !== "alert") {
       this.messageUntil = Math.min(this.messageUntil, Math.max(this.clock, this.messageStart + MIN_INFO_S));
     }
-    // The same text twice is one message; the queue is short so it never
-    // plays out stale news seconds after the fact.
-    this.messageQueue = this.messageQueue.filter((m) => m.text !== text);
+    // The same text twice is one message, a newer status replaces a queued
+    // one, and the queue is short so it never plays out stale news.
+    this.messageQueue = this.messageQueue.filter((m) => m.text !== text && !(level === "status" && m.level === "status"));
     this.messageQueue.push({ text, seconds, level });
     while (this.messageQueue.length > MAX_QUEUED) this.messageQueue.shift();
   }

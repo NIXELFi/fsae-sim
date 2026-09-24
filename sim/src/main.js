@@ -408,7 +408,7 @@ class Game {
     canvas.addEventListener("dblclick", () => {
       if (!active()) return;
       this.orbitAuto = !this.orbitAuto;
-      this.timing?.say(this.orbitAuto ? "WALKAROUND: AUTO" : "WALKAROUND: FREE", 1.2);
+      this.timing?.say(this.orbitAuto ? "WALKAROUND: AUTO" : "WALKAROUND: FREE", 1.2, "status");
     });
   }
 
@@ -1055,12 +1055,12 @@ class Game {
     if (this.guardedAction("home", dt)) { this.goHome(); return; }
     if (this.input.edges.hudDensity) {
       const d = this.hud.cycleDensity();
-      this.timing?.say(`OVERLAY  ${d.toUpperCase()}`, 1.5);
+      this.timing?.say(`OVERLAY  ${d.toUpperCase()}`, 1.5, "status");
     }
     if (this.input.edges.dashMode) {
       const m = this.hud.cycleDashMode();
       this.dom.dashMode && (this.dom.dashMode.value = m);
-      this.timing?.say(`DASH  ${m.toUpperCase()}`, 1.5);
+      this.timing?.say(`DASH  ${m.toUpperCase()}`, 1.5, "status");
     }
     if (this.input.edges.pause && !this.swallowPauseEdge) this.setPaused(!this.paused);
     this.swallowPauseEdge = false;
@@ -1083,7 +1083,7 @@ class Game {
     // mean reading the HUD deltas and undoing each one by hand.
     if (e.setupReset) {
       this.setup.resetAll();
-      this.timing?.say("SETUP  BASELINE", 1.6);
+      this.timing?.say("SETUP  BASELINE", 1.6, "status");
       this.pushParams();
       this.recorder?.event("setup", { item: "ALL", value: 0, unit: "baseline" });
       this.onSetupChanged?.();
@@ -1100,13 +1100,13 @@ class Game {
       this.cameraIndex = (this.cameraIndex + 1) % CAMERAS.length;
       saveCameraIndex(this.cameraIndex);
       this.audio.setCamera(CAMERAS[this.cameraIndex].name);
-      this.timing.say(CAMERAS[this.cameraIndex].name.toUpperCase(), 1.2);
+      this.timing.say(CAMERAS[this.cameraIndex].name.toUpperCase(), 1.2, "status");
     }
     if (this.input.edges.traction) {
       this.assists.traction = !this.assists.traction;
       this.dom.tcToggle.checked = this.assists.traction;
       updateSession();
-      this.timing.say(`TRACTION CONTROL ${this.assists.traction ? "ON" : "OFF"}`, 1.5);
+      this.timing.say(`TRACTION CONTROL ${this.assists.traction ? "ON" : "OFF"}`, 1.5, "status");
     }
     if (this.input.edges.reset) this.recover();
 
@@ -1874,7 +1874,7 @@ class Game {
       return null;
     }
     const n = applySlot(to, SDM26);
-    this.timing?.say(`SETUP  ${to}`, 1.8);
+    this.timing?.say(`SETUP  ${to}`, 1.8, "status");
     this.pushParams();
     this.recorder?.event("setup", { item: `SLOT ${to}`, value: n ?? 0, unit: "params" });
     this.onSetupChanged?.({ slotOnly: true });
@@ -1900,7 +1900,7 @@ class Game {
   }
 
   announceSetup(item) {
-    this.timing.say(`${item.short} ${formatSetupValue(item.get(), item)}`, 1.6);
+    this.timing.say(`${item.short} ${formatSetupValue(item.get(), item)}`, 1.6, "status");
   }
 
   openEtcEditor() {
