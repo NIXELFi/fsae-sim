@@ -322,7 +322,7 @@ section("each setup item has its own up/down, and they move the car");
      "aero balance is a model parameter on the sheet, not a wheel adjustment");
 
   // nudgeId moves the named parameter, only that one, and selects it.
-  const car = { roll: { rsdFront: 0.48 }, brakeBiasFront: 0.65, diff: { preloadNm: 25, coastLock: 0.42 },
+  const car = { roll: { rsdFront: 0.48 }, brakeBiasFront: 0.65, diff: { preloadNm: 25, coastLock: 0.42, powerLock: 0.6 },
     launchRpm: 7000, finalDrive: 3.0 };
   const adj = new SetupAdjuster(car);
   adj.nudgeId("bbias", 1, 1, 0);

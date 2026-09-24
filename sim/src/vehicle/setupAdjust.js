@@ -78,6 +78,21 @@ export const ADJUSTMENTS = [
     effect: "up = steadier on a lift",
   },
   {
+    id: "diffPower",
+    label: "Diff lock, on throttle",
+    bindLabel: "Diff lock, on throttle",
+    short: "LOCK-ON",
+    unit: "",
+    // The DRIVE ramp: how hard the rear wheels are tied together under
+    // power. Drexler's table: 40 deg 0.60 (as shipped), 45 deg 0.51, 30 deg
+    // 0.88. Already a run-to-run setup item (SETUP_LEGAL_PATHS) and on the
+    // setup card; this puts it on the wheel with the coast ramp. Same range
+    // and step as the sheet's slider.
+    path: "diff.powerLock", factor: 1,
+    min: 0, max: 0.95, step: 0.01, decimals: 2,
+    effect: "up = more power understeer, less inside-wheel spin",
+  },
+  {
     id: "launch",
     label: "Launch control",
     bindLabel: "Launch control rpm",
