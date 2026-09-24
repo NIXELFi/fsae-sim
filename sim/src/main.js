@@ -2618,10 +2618,48 @@ class Game {
       // device's button beside it, when the driver is on one -- a card that
       // only names keys is no use to somebody holding a pad.
       const parts = [];
-      if (codes.length) parts.push(keyLabel(codes[0]));
+      // `data-key-label` names the key the CARD answers to when it is not
+      // the action's own (the finish card's Enter for "Run it again").
+      if (el.dataset.keyLabel) parts.push(el.dataset.keyLabel);
+      else if (codes.length) parts.push(keyLabel(codes[0]));
       const dev = deviceButtonName(prof, el.dataset.key);
       if (dev) parts.push(dev);
       el.textContent = parts.join(" / ");
+    }
+
+    // The pad hints, from what the menu navigation actually reads (input.js
+    // `menu`): the d-pad slots move, launch accepts, reset backs out, the
+    // shift paddles switch tabs and pause starts the engine.
+    const dev = (slot) => deviceButtonName(prof, slot);
+    const up = dev("dpadUp"), down = dev("dpadDown");
+    const family = (a, b) => {
+      const m = /^(D-pad|Hat(?: \d+)?|Dev \d+ Hat(?: \d+)?)\b/.exec(a);
+      return m && b.startsWith(m[1]) ? m[1] : a && b ? `${a}/${b}` : "";
+    };
+    const move = family(up, down) || "D-pad";
+    const accept = dev("launch") || "A";
+    const back = dev("reset") || "B";
+    const start = dev("pause") || "Menu";
+    const prev = dev("downshift"), next = dev("upshift");
+    const tabsHint = prev && next ? `${prev}/${next} switch tabs` : "bumpers switch tabs";
+    const hints = {
+      pause: `${move} moves, ${accept} selects, ${back} resumes`,
+      finish: `${move} moves, ${accept} selects, ${back} keeps driving`,
+      menu: `On the device: ${start} starts the engine, ${tabsHint}, ${move} moves, ${accept} selects.`,
+    };
+    for (const el of document.querySelectorAll("[data-pad-hint]")) {
+      el.textContent = hints[el.dataset.padHint] ?? el.textContent;
+    }
+    const menuHint = document.getElementById("menuKeysHint");
+    if (menuHint) {
+      const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+      const either = (action) => {
+        const k = K[action]?.[0] ? keyLabel(K[action][0]) : "";
+        const d = dev(action);
+        return [d, k].filter(Boolean).map((x) => `<kbd>${esc(x)}</kbd>`).join(" or ") || "<kbd>-</kbd>";
+      };
+      menuHint.innerHTML = `${either("pause")} pauses; ${either("home")} returns here ` +
+        `(hold it during a timed lap). Drag the scene to look around the car.`;
     }
   }
 
@@ -2960,6 +2998,9 @@ function deviceButtonName(prof, slot) {
  * table this prints.
  */
 function renderCheatsheet() {
+  // Same trigger as the cards' chips and pad hints: a profile or a binding
+  // changed.
+  game?.syncMenuKeys?.();
   const host = document.getElementById("cheatsheet");
   if (!host || !game) return;
   const prof = game.input?.profile ?? {};

@@ -948,7 +948,7 @@
       </div>
       <button id="pauseHome" class="secondary" type="button"><span>Home screen<small>ends this recording</small></span><kbd data-key="home">H</kbd></button>
       <button id="pauseQuit" class="secondary" type="button" hidden><span>Quit</span></button>
-      <p class="pad-hint">D-pad moves, A selects, B resumes</p>
+      <p class="pad-hint" data-pad-hint="pause">D-pad moves, A selects, B resumes</p>
     </div>
   </div>
 
@@ -959,12 +959,12 @@
       <h2 id="finishTitle">RUN COMPLETE</h2>
       <p class="fin-head" id="finishHead"></p>
       <div class="fin-stats" id="finishStats"></div>
-      <button id="finishAgain" class="secondary" type="button"><span>Run it again</span><kbd>Enter</kbd></button>
+      <button id="finishAgain" class="secondary" type="button"><span>Run it again</span><kbd data-key="restart" data-key-label="Enter">Enter</kbd></button>
       <button id="finishWatch" class="secondary" type="button" hidden><span>Watch the replay</span><kbd>W</kbd></button>
       <button id="finishRoll" class="secondary" type="button"><span>Keep driving</span><kbd data-key="pause">Esc</kbd></button>
       <button id="finishHome" class="secondary" type="button"><span>Home screen and settings</span><kbd data-key="home">H</kbd></button>
       <button id="finishQuit" class="secondary" type="button" hidden><span>Quit</span><kbd>Q</kbd></button>
-      <p class="pad-hint">D-pad moves, A selects, B keeps driving</p>
+      <p class="pad-hint" data-pad-hint="finish">D-pad moves, A selects, B keeps driving</p>
     </div>
   </div>
 
@@ -1206,8 +1206,8 @@
         <button id="start" disabled>Start engine</button>
         <button id="restartBtn" class="secondary" hidden>Restart run</button>
         <span id="loadNote" class="note">Loading...</span>
-        <p class="hint"><kbd>Menu</kbd> or <kbd>Esc</kbd> pauses; <kbd>L3</kbd> or <kbd>H</kbd> returns here. Drag the scene to look around the car.</p>
-        <p class="pad-hint">On the pad: Menu starts the engine, bumpers switch tabs, d-pad moves, A selects.</p>
+        <p class="hint" id="menuKeysHint"><kbd>Esc</kbd> pauses; <kbd>H</kbd> returns here. Drag the scene to look around the car.</p>
+        <p class="pad-hint" data-pad-hint="menu">On the pad: Menu starts the engine, bumpers switch tabs, d-pad moves, A selects.</p>
       </div>
     </aside>
   </div>
