@@ -329,6 +329,13 @@ class Game {
     this.launchedBy = null;
     this.lastSavedRun = null;
     this.saveError = null;
+    /**
+     * A run that ended without being filed, as a persistent red HUD chip.
+     * The one-shot message could never carry it: a restart ends the run and
+     * then resets the timing, which wiped the "NOT SAVED" toast on the very
+     * frame it was said. Cleared when the next run leaves the line.
+     */
+    this.notSaved = null;
     this._ctx = { assists: this.assists, t: null, car: null };
 
     this.input.onPadChange = (connected, id) => {
@@ -741,7 +748,8 @@ class Game {
       // wondering whether the archive is broken; "no lap completed" is a thing
       // they can do something about.
       if (rec.samples > SAMPLE_HZ_FLOOR) {
-        this.timing?.say(`NOT SAVED  ${rec.notSavedReason.toUpperCase()}`, 3);
+        this.notSaved = `NOT SAVED: ${rec.notSavedReason.toUpperCase()}`;
+        this.timing?.say(`NOT SAVED  ${rec.notSavedReason.toUpperCase()}`, 3, "alert");
       }
       return null;
     }
@@ -763,6 +771,7 @@ class Game {
       .catch((err) => {
         console.error("could not save the run", err);
         this.saveError = String(err?.message ?? err);
+        this.notSaved = "NOT SAVED: WRITE FAILED";
         updateSession();
         return null;
       });
@@ -1079,10 +1088,10 @@ class Game {
       if (this.input.edges.downshift) {
         // Refuse a downshift that would bounce the engine off the limiter.
         if (pt.downshiftSafe(this.car.wR)) pt.requestDownshift();
-        else this.timing.say("MONEY SHIFT BLOCKED", 1.2);
+        else this.timing.say("MONEY SHIFT BLOCKED", 1.2, "alert");
       }
     }
-    if (this.car.native && this.car.moneyShiftBlocked) this.timing.say("MONEY SHIFT BLOCKED", 1.2);
+    if (this.car.native && this.car.moneyShiftBlocked) this.timing.say("MONEY SHIFT BLOCKED", 1.2, "alert");
 
     // ---- driver aids ----
     // Natively the rig applies them every millisecond; here only in the
@@ -1568,6 +1577,8 @@ class Game {
 
     const t = this.timing;
     const last = t.laps.length ? t.laps[t.laps.length - 1] : null;
+    // The chip stays until the driver is away on the next run.
+    if (this.notSaved && t.state === "running" && !this.paused) this.notSaved = null;
     // Which dash the driver is actually looking at.
     //
     // From the cockpit the real one is on the scuttle in front of them, and a
@@ -1614,6 +1625,10 @@ class Game {
       balance: tel.balance,
       delta: this.deltaTimer?.state() ?? null,
       message: t.message,
+      messageLevel: t.messageLevel,
+      // Persistent, unlike the message: from the excursion to the flag.
+      lapInvalid: t.state === "running" && t.lapInvalid,
+      notSaved: this.notSaved,
       paused: this.paused,
       tractionControl: this.assists.traction,
       sectors: this.liveSectors(),
@@ -1814,7 +1829,7 @@ class Game {
   switchSetupSlot() {
     const to = nextSlot();
     if (!to) {
-      this.timing?.say("NO SAVED SETUP", 1.6);
+      this.timing?.say("NO SAVED SETUP", 1.6, "alert");
       return null;
     }
     const n = applySlot(to, SDM26);
@@ -2049,7 +2064,7 @@ class Game {
       return true;
     } catch (err) {
       console.error("could not load the reference lap", err);
-      this.timing?.say("REFERENCE LAP NOT LOADED", 3);
+      this.timing?.say("REFERENCE LAP NOT LOADED", 3, "alert");
       return false;
     }
   }
@@ -2076,7 +2091,7 @@ class Game {
       this.ghost = null;
       this.replayPanel?.setGhost(null);
       this.rebuildSectorSync();
-      this.timing?.say("GHOST NOT LOADED", 2.5);
+      this.timing?.say("GHOST NOT LOADED", 2.5, "alert");
     }
   }
 

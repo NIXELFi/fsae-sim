@@ -118,6 +118,11 @@ export const OFF_COURSE_MIN_TRAVEL_M = 2;
  */
 export const MOVING_MPS = 0.6;
 
+/** An info message is on screen at least this long before a newer one replaces it. */
+const MIN_INFO_S = 0.8;
+/** Info messages waiting behind the one on screen; older ones are dropped. */
+const MAX_QUEUED = 3;
+
 export class Timing {
   constructor(track) {
     this.track = track;
@@ -179,6 +184,11 @@ export class Timing {
     this.lastSplitDelta = null;
     this.message = "";
     this.messageUntil = 0;
+    // "info" or "alert". Alerts (penalties, errors) are drawn in red and are
+    // never pre-empted by info; info waits in `messageQueue` behind them.
+    this.messageLevel = "info";
+    this.messageStart = 0;
+    this.messageQueue = [];
     // Messages time out on this, not on lap time: lap time is 0 while
     // staged and frozen after the flag, and a toast must still clear then.
     this.clock = 0;
@@ -206,9 +216,54 @@ export class Timing {
   /** Running total for the current lap including penalties accrued in it. */
   get provisionalTotal() { return this.lapTime + this.penaltyS; }
 
-  say(text, seconds = 2.5) {
+  /**
+   * Put a message on the HUD's message line.
+   *
+   * One line, two priorities. An "alert" (cone, off course, not saved, a
+   * load failure) shows at once, in red, and replaces whatever is up -- an
+   * info message it displaces goes back to the front of the queue if it had
+   * time left. An "info" message (splits, camera, overlay, setup) never
+   * pre-empts an alert: it queues behind it. Info on info gives the current
+   * one at least `MIN_INFO_S` on screen and then the next one takes over,
+   * so a burst of camera changes reads as the last one rather than as a
+   * slideshow, and a split is never wiped the instant it appears.
+   *
+   * @param {"info"|"alert"} level
+   */
+  say(text, seconds = 2.5, level = "info") {
+    const showing = this.message && this.clock <= this.messageUntil;
+    if (!showing) { this._show(text, seconds, level); return; }
+    if (level === "alert") {
+      const left = this.messageUntil - this.clock;
+      if (this.messageLevel === "info" && left > 0.5) {
+        this.messageQueue.unshift({ text: this.message, seconds: left, level: "info" });
+      }
+      this._show(text, seconds, level);
+      return;
+    }
+    if (this.messageLevel === "info") {
+      this.messageUntil = Math.min(this.messageUntil, Math.max(this.clock, this.messageStart + MIN_INFO_S));
+    }
+    // The same text twice is one message; the queue is short so it never
+    // plays out stale news seconds after the fact.
+    this.messageQueue = this.messageQueue.filter((m) => m.text !== text);
+    this.messageQueue.push({ text, seconds, level });
+    while (this.messageQueue.length > MAX_QUEUED) this.messageQueue.shift();
+  }
+
+  _show(text, seconds, level) {
     this.message = text;
+    this.messageLevel = level;
+    this.messageStart = this.clock;
     this.messageUntil = this.clock + seconds;
+  }
+
+  /** Expire the current message and bring on the next queued one. */
+  _tickMessage() {
+    if (this.clock <= this.messageUntil) return;
+    const next = this.messageQueue.shift();
+    if (next) this._show(next.text, next.seconds, next.level);
+    else { this.message = ""; this.messageLevel = "info"; }
   }
 
   /**
@@ -221,7 +276,7 @@ export class Timing {
    */
   update(dt, loc, speedMps, newCones, missedGates = null) {
     this.clock += dt;
-    if (this.clock > this.messageUntil) this.message = "";
+    this._tickMessage();
     if (this.state === "finished") return;
 
     if (this.state === "staged") {
@@ -265,7 +320,7 @@ export class Timing {
       const i = this.sectorIndex;
       this.sectorCones[i] = (this.sectorCones[i] ?? 0) + newCones;
       const pen = newCones * this.conePenaltyS;
-      this.say(`CONE +${Number.isInteger(pen) ? pen.toFixed(0) : pen.toFixed(3)}s`, 1.6);
+      this.say(`CONE +${Number.isInteger(pen) ? pen.toFixed(0) : pen.toFixed(3)}s`, 1.6, "alert");
     }
 
     // Off course: one excursion is one penalty, not one per frame, and it is
@@ -283,7 +338,7 @@ export class Timing {
       if (!this.offCharged && this.offTravelM > OFF_COURSE_MIN_TRAVEL_M) {
         this.offCharged = true;
         this.offCourse++;
-        this.say("OFF COURSE - LAP INVALID", 2.5);
+        this.say("OFF COURSE - LAP INVALID", 2.5, "alert");
         this.onCue?.("off");
       }
     } else if (this.wasOffCourse) {
@@ -298,7 +353,7 @@ export class Timing {
         if (this.gatesCharged.has(group)) continue;
         this.gatesCharged.add(group);
         this.offCourse++;
-        this.say("MISSED GATE - LAP INVALID", 2.5);
+        this.say("MISSED GATE - LAP INVALID", 2.5, "alert");
         this.onCue?.("off");
       }
     }
@@ -362,12 +417,12 @@ export class Timing {
       const coneNote = hit > 0 ? `  (${hit} cone${hit === 1 ? "" : "s"})` : "";
       if (prevBest == null) {
         this.lastSplitDelta = null;
-        this.say(`S${n} ${fmt(scored)}${coneNote}`, 2);
+        this.say(`S${n} ${fmt(scored)}${coneNote}`, 2, hit > 0 ? "alert" : "info");
         this.onCue?.("sector");
       } else {
         const d = scored - prevBest;
         this.lastSplitDelta = d;
-        this.say(`S${n} ${fmt(scored)}  ${d < 0 ? "" : "+"}${d.toFixed(2)}${coneNote}`, 2);
+        this.say(`S${n} ${fmt(scored)}  ${d < 0 ? "" : "+"}${d.toFixed(2)}${coneNote}`, 2, hit > 0 ? "alert" : "info");
         this.onCue?.(d < 0 ? "sectorUp" : "sectorDown");
       }
       this.sectorIndex++;
@@ -504,6 +559,7 @@ export class Timing {
           : entry.counted ? `LAP ${this.lap}  ${fmt(entry.total)}`
           : `LAP ${this.lap}  ${fmt(entry.total)}  NOT COUNTED`,
         3,
+        entry.valid ? "info" : "alert",
       );
       this.onCue?.(entry.valid ? "lap" : "invalid");
     }

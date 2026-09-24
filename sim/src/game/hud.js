@@ -290,6 +290,9 @@ export class Hud {
     // camera hides: a driver must not be able to end up with a time they
     // think counts. Top centre, under the message line.
     if (s.counted === false) this.notCounted(ctx, W);
+    // Also not behind a density switch: a lap that is already gone, and a
+    // run that did not reach the archive, are things a driver must not miss.
+    this.statusChips(ctx, W, s, show.delta && !!s.delta?.hasReference);
     if (show.message) this.message(ctx, W, H, s);
     if (s.paused) this.paused(ctx, W, H);
 
@@ -1306,12 +1309,54 @@ export class Hud {
 
   message(ctx, W, H, s) {
     if (!s.message) return;
+    const alert = s.messageLevel === "alert";
     ctx.textAlign = "center";
     ctx.font = "600 26px ui-monospace, monospace";
     const tw = ctx.measureText(s.message).width;
     panel(ctx, W / 2 - tw / 2 - 20, H * 0.24, tw + 40, 46, 10);
-    ctx.fillStyle = GOLD;
+    if (alert) {
+      ctx.strokeStyle = "rgba(255,69,58,0.85)";
+      ctx.lineWidth = 2;
+      roundRect(ctx, W / 2 - tw / 2 - 20, H * 0.24, tw + 40, 46, 10);
+      ctx.stroke();
+    }
+    ctx.fillStyle = alert ? "#ff453a" : GOLD;
     ctx.fillText(s.message, W / 2, H * 0.24 + 31);
+  }
+
+  /**
+   * Persistent red chips at the top centre: LAP INVALID from the excursion
+   * until the lap ends, NOT SAVED from a run that was not filed until the
+   * next one leaves the line. Beside the delta when it is up (invalid to its
+   * right, not-saved to its left), otherwise in a row where it would be.
+   */
+  statusChips(ctx, W, s, besideDelta) {
+    const chips = [];
+    if (s.notSaved) chips.push({ text: s.notSaved, side: -1 });
+    if (s.lapInvalid) chips.push({ text: "LAP INVALID", side: 1 });
+    if (!chips.length) return;
+    const h = 40, y = 34, padX = 16;
+    ctx.font = "600 17px ui-monospace, monospace";
+    for (const c of chips) c.w = ctx.measureText(c.text).width + padX * 2;
+    const deltaHalf = 95, gap = 8;
+    let rowX = W / 2 - (chips.reduce((a, c) => a + c.w, 0) + gap * (chips.length - 1)) / 2;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const c of chips) {
+      let x;
+      if (besideDelta) x = c.side < 0 ? W / 2 - deltaHalf - gap - c.w : W / 2 + deltaHalf + gap;
+      else { x = rowX; rowX += c.w + gap; }
+      ctx.fillStyle = "rgba(120,14,10,0.82)";
+      roundRect(ctx, x, y, c.w, h, 8);
+      ctx.fill();
+      ctx.strokeStyle = "#ff453a";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = "#fff";
+      ctx.fillText(c.text, x + c.w / 2, y + h / 2 + 1);
+    }
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
   }
 
   paused(ctx, W, H) {

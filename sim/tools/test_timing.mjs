@@ -395,6 +395,29 @@ section("a sector of a lap that did not count is not a best");
   ok(sectorVerdict(13.8, 13.8, true).best === true, "equalling the best is a best");
 }
 
+section("message line: alerts are not pre-empted by info, info queues");
+{
+  const t = new Timing(axTrack());
+  const tick = (sec) => { for (let i = 0; i < Math.round(sec / DT); i++) t.update(DT, { s: 0, onTrack: true }, 0, 0); };
+  t.say("CONE +2s", 1.6, "alert");
+  t.say("COCKPIT", 1.2);
+  ok(t.message === "CONE +2s" && t.messageLevel === "alert", `info does not replace an alert (got "${t.message}")`);
+  tick(1.7);
+  ok(t.message === "COCKPIT" && t.messageLevel === "info", `the queued info follows it (got "${t.message}")`);
+  t.say("S1 10.00", 2);
+  ok(t.message === "COCKPIT", "info on info: the current one keeps its minimum time");
+  tick(0.85);
+  ok(t.message === "S1 10.00", `then the newer info takes over (got "${t.message}")`);
+  t.say("OFF COURSE - LAP INVALID", 2.5, "alert");
+  ok(t.message === "OFF COURSE - LAP INVALID", "an alert shows at once");
+  tick(2.6);
+  ok(t.message === "S1 10.00", `the info it displaced comes back (got "${t.message}")`);
+  for (const c of ["A", "B", "C", "D", "E"]) t.say(c, 1);
+  ok(t.messageQueue.length <= 3, `the queue stays short (${t.messageQueue.length})`);
+  t.reset();
+  ok(t.message === "" && t.messageQueue.length === 0, "reset clears the line and the queue");
+}
+
 console.log(`\n${checks - failures}/${checks} checks passed`);
 if (failures) {
   console.error(`${failures} FAILED`);
