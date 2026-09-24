@@ -3771,6 +3771,9 @@ async function boot() {
                     el.offsetParent !== null &&
                     // The tab strip is the bumpers' job; up/down goes to content.
                     !el.classList.contains("tab") &&
+                    // Taken out of the tab order on purpose (the setup card's
+                    // -/+ buttons): left/right on the field does their job.
+                    el.tabIndex >= 0 &&
                     // Nothing on a pad can type into a text field.
                     !(el.tagName === "INPUT" && el.type === "text"));
   const moveFocus = (list, dir) => {
@@ -3792,6 +3795,29 @@ async function boot() {
     el.value = String(Math.min(hi, Math.max(lo, Number(el.value) + dir * step)));
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  // A number field steps by its own `step`, clamped, then goes through the
+  // same "change" the keyboard would -- the setup card snaps and writes it.
+  const nudgeNumber = (el, dir) => {
+    const step = Number(el.step) || 1;
+    const lo = el.min === "" ? -Infinity : Number(el.min);
+    const hi = el.max === "" ? Infinity : Number(el.max);
+    const dp = Math.max(0, Math.ceil(-Math.log10(step)));
+    const v = Math.min(hi, Math.max(lo, (Number(el.value) || 0) + dir * step));
+    el.value = v.toFixed(dp);
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  // A row of buttons side by side (slot Load/Save + Baseline, the MODEL and
+  // LOOK switches): left/right walks along it rather than changing tab.
+  const ROW_GROUPS = ".setup-now-slots, .sn-model";
+  const moveInRow = (el, dir) => {
+    const row = el.closest(ROW_GROUPS);
+    if (!row) return false;
+    const list = focusables(row);
+    const i = list.indexOf(el);
+    const next = list[i + dir];
+    if (next) next.focus();
+    return true;
   };
   const padNav = () => {
     const M = game.input.menu;
@@ -3829,6 +3855,8 @@ async function boot() {
         const dir = M.right ? 1 : -1;
         if (el?.tagName === "SELECT") nudgeSelect(el, dir);
         else if (el?.tagName === "INPUT" && el.type === "range") nudgeRange(el, dir);
+        else if (el?.tagName === "INPUT" && el.type === "number") nudgeNumber(el, dir);
+        else if (el && moveInRow(el, dir)) { /* moved along the row */ }
         else tabs.step(dir);
       }
       if (M.accept && el && list.includes(el)) {
@@ -3844,6 +3872,7 @@ async function boot() {
       if (M.up) moveFocus(list, -1);
       if (M.down) moveFocus(list, 1);
       if ((M.left || M.right) && el?.tagName === "INPUT" && el.type === "range") nudgeRange(el, M.right ? 1 : -1);
+      if ((M.left || M.right) && el?.tagName === "INPUT" && el.type === "number") nudgeNumber(el, M.right ? 1 : -1);
       if (M.accept) (list.includes(el) ? el : list[0])?.click();
       // B is "back to the car" from either card, exactly as Esc is.
       if (M.back) { game.setPaused(false); dom.gl.focus(); }
