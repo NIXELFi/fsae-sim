@@ -1617,6 +1617,8 @@ class Game {
       paused: this.paused,
       tractionControl: this.assists.traction,
       sectors: this.liveSectors(),
+      // Where the car's display is on screen, for the cockpit glance strip.
+      dashOnScreen: inCockpit ? this.renderer.dashOnScreen() : null,
     });
 
     // And the same layout onto the car's own panel.
@@ -3782,7 +3784,7 @@ async function boot() {
 
   // The settings a driver stops to change, on the card, so changing them
   // does not mean going Home and ending the recording.
-  const DASH_LABELS = { auto: "car + overlay outside", overlay: "screen overlay", car: "car's only" };
+  const DASH_LABELS = { auto: "car + glance strip", overlay: "screen overlay", car: "car's only" };
   const pauseEl = (id) => document.getElementById(id);
   const refreshPauseCard = () => {
     const set = (id, v) => { const b = pauseEl(id)?.querySelector("b"); if (b) b.textContent = v; };

@@ -21,7 +21,7 @@ const MAROON = "#8C1D40";
  * Everything here is useful to somebody, and all of it at once is a windscreen
  * you cannot see out of -- nine blocks around the edge of the frame, two of
  * them (the g-g trace and the balance bar) being engineering instruments
- * rather than driving ones. So the driver picks, `H` cycles, and the choice is
+ * rather than driving ones. So the driver picks, `U` cycles, and the choice is
  * remembered per machine.
  *
  * `clean` is the default and is what a real dash gives you: shift lights, a
@@ -63,12 +63,13 @@ const DENSITY_KEY = "fsae-sim:hud-density";
 /**
  * Which dash the driver wants.
  *
- *   auto    the panel on the car, and the overlay only from cameras where the
- *           real one is a postage stamp. What a real cockpit gives you.
+ *   auto    the panel on the car plus a glance strip above it (gear, speed,
+ *           delta, penalties in big digits) from the cockpit, and the overlay
+ *           from cameras where the real one is a postage stamp. The default.
  *   overlay the old screen dash, always. For anyone who does not get on with
  *           reading a panel at its real angular size -- which is small, and on
  *           a monitor at arm's length it is smaller than it is in the car.
- *   car     the panel on the car and nothing else, ever.
+ *   car     the panel on the car and nothing else, ever -- no strip either.
  *
  * The car's own panel is always drawn: it is a part of the car, and switching
  * it off would leave a hole in the cockpit.
@@ -263,6 +264,11 @@ export class Hud {
       : this.dashMode === "car" ? false
       : this.overlayDash !== false;
     if (show.dash && wantOverlay) this.dash(ctx, W, H, s);
+    // In the cockpit the real Strada is ~190 px wide on a 2560x1080 screen:
+    // right for its angular size, but its speed is a 12 px figure. "auto"
+    // adds a glance strip just above it -- gear, speed, delta, penalties,
+    // big and unlabelled. "car" is the unit alone.
+    else if (show.dash && this.dashMode === "auto" && s.dashOnScreen) this.glanceStrip(ctx, W, H, s);
     if (show.tach) this.tach(ctx, W, H, s);
     if (show.timing) this.timing(ctx, s);
     if (show.delta) this.delta(ctx, W, H, s);
@@ -858,6 +864,69 @@ export class Hud {
         x + w - 8, ry + 11);
       ctx.textAlign = "left";
     });
+  }
+
+  /**
+   * The cockpit glance strip: gear, speed, delta to the reference (when there
+   * is one) and the cone / off-course count (when non-zero), in one row of
+   * big digits parked just above the car's own dash, where the eye already
+   * goes. No labels: position and colour carry them, as on a real dash.
+   */
+  glanceStrip(ctx, W, H, s) {
+    const at = s.dashOnScreen;
+    const cx = at.x * W;
+    const bottom = at.top * H - 14;
+    const d = s.delta;
+    const known = d?.hasReference && d.delta != null;
+    const items = [];
+    items.push({ text: gearText(s), font: font(40, true), colour: s.shifting ? "rgba(255,255,255,0.45)" : GOLD });
+    items.push({ text: String(Math.round(s.speedKph ?? 0)).padStart(3, " "), font: font(34, true), colour: "#fff" });
+    if (d?.hasReference) {
+      const v = d.delta;
+      items.push({
+        text: known ? `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(2)}` : "--.--",
+        font: font(30, true),
+        colour: !known ? "rgba(255,255,255,0.35)" : v < -0.05 ? "#3ddc84" : v > 0.05 ? "#ff453a" : "rgba(255,255,255,0.85)",
+      });
+    }
+    if (s.cones > 0) items.push({ icon: "cone", text: String(s.cones), font: font(30, true), colour: "#ff9f0a" });
+    if (s.offCourse > 0) items.push({ icon: "off", text: String(s.offCourse), font: font(30, true), colour: "#ff453a" });
+
+    const pad = 16, gap = 22, icon = 20, h = 50;
+    let total = pad * 2 + gap * (items.length - 1);
+    for (const it of items) {
+      ctx.font = it.font;
+      it.w = ctx.measureText(it.text).width + (it.icon ? icon + 5 : 0);
+      total += it.w;
+    }
+    const x0 = cx - total / 2, y0 = bottom - h;
+    panel(ctx, x0, y0, total, h, 10);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    let x = x0 + pad;
+    const mid = y0 + h / 2 + 1;
+    for (const it of items) {
+      ctx.fillStyle = it.colour;
+      if (it.icon === "cone") {
+        ctx.beginPath();
+        ctx.moveTo(x + icon / 2, mid - icon / 2);
+        ctx.lineTo(x + icon, mid + icon / 2);
+        ctx.lineTo(x, mid + icon / 2);
+        ctx.closePath();
+        ctx.fill();
+      } else if (it.icon === "off") {
+        ctx.strokeStyle = it.colour;
+        ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        ctx.moveTo(x + 2, mid - icon / 2 + 2); ctx.lineTo(x + icon - 2, mid + icon / 2 - 2);
+        ctx.moveTo(x + icon - 2, mid - icon / 2 + 2); ctx.lineTo(x + 2, mid + icon / 2 - 2);
+        ctx.stroke();
+      }
+      ctx.font = it.font;
+      ctx.fillText(it.text, x + (it.icon ? icon + 5 : 0), mid);
+      x += it.w + gap;
+    }
+    ctx.textBaseline = "alphabetic";
   }
 
   /**
