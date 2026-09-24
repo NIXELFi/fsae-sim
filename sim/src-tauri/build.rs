@@ -66,9 +66,10 @@ fn stage(from: &Path, to: &Path) {
     }
 }
 
-/// data/car.glb, data/steering-wheel.glb, data/dash.glb (see .gitignore).
+/// data/car.glb, data/steering-wheel.glb, data/dash.glb and the team livery
+/// data/livery.png, which only dresses the CAD car (see .gitignore).
 fn is_team_cad(p: &Path) -> bool {
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let in_data = p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some("data");
-    in_data && matches!(name, "car.glb" | "steering-wheel.glb" | "dash.glb")
+    in_data && matches!(name, "car.glb" | "steering-wheel.glb" | "dash.glb" | "livery.png")
 }

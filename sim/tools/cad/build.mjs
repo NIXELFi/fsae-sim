@@ -705,7 +705,33 @@ for (const mesh of liveryMeshes) {
       const q = v.map((i) => [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]]);
       const c = [0, 1, 2].map((a) => (q[0][a] + q[1][a] + q[2][a]) / 3);
       let uvs;
+      // Which way the face looks: the winding's normal, turned to agree with
+      // the exported vertex normals where they disagree.
+      const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
+      const e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+      let fn = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      if (N) {
+        const mn = [0, 1, 2].map((ax) => (N[v[0] * 3 + ax] + N[v[1] * 3 + ax] + N[v[2] * 3 + ax]) / 3);
+        if (mn[0] * fn[0] + mn[1] * fn[1] + mn[2] * fn[2] < 0) fn = fn.map((x) => -x);
+      }
+      // Only faces that look OUT carry the livery. Inner skins (the inside of
+      // the bodywork, an endplate's inboard face, a wing's underside) share
+      // their outer face's place on the map, so they would show the artwork
+      // mirrored. They get (-1, -1): no livery, the panel's own finish.
+      let inward;
       if (kind === "body") {
+        const f = Math.min(NS - 1, Math.max(0, (c[0] - BX0) / DX)), i0 = Math.floor(f);
+        const zc = slices[i0].zcs;
+        inward = fn[1] * c[1] + fn[2] * (c[2] - zc) < 0;          // against the outward radial
+      } else if (kind === "endplate") {
+        inward = fn[1] * (c[1] >= 0 ? 1 : -1) < 0;                 // facing the centreline
+      } else {
+        inward = fn[2] < 0;                                         // a wing's underside
+      }
+      if (inward) {
+        uvs = [[-TEX_M, -TEX_M], [-TEX_M, -TEX_M], [-TEX_M, -TEX_M]];
+        report.liveryInward = (report.liveryInward ?? 0) + 1;
+      } else if (kind === "body") {
         // The triangle's own angle decides which side of the underside cut
         // all three corners go.
         const hint = arcAt(c[0], c[1], c[2]).phi;

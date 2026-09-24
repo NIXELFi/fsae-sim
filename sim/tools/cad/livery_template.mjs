@@ -20,6 +20,7 @@ for (const mesh of doc.getRoot().listMeshes()) for (const p of mesh.listPrimitiv
   const at = (i) => (idx ? idx[i] : i);
   for (let t = 0; t < n; t += 3) {
     const q = [0, 1, 2].map((k) => [a[at(t + k) * 2], a[at(t + k) * 2 + 1]]);
+    if (q[0][0] < 0) continue;   // an inward face: no livery
     segs.push(q);
   }
 }
