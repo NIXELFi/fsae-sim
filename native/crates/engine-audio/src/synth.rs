@@ -37,6 +37,9 @@ pub struct AudioParameters {
     /// Depth of the turbulent-air modulation, 0..1.
     pub air_noise: f32,
     pub air_noise_cutoff_hz: f32,
+    /// Steady share of the jet noise, riding the pressure signal's slow RMS
+    /// rather than each pulse. 0 turns it off.
+    pub air_noise_steady: f32,
     /// Cycle-to-cycle variation, 0..1.
     pub jitter: f32,
     /// Output tone control: a gentle roll-off above this.
@@ -96,8 +99,10 @@ impl Default for AudioParameters {
             // the recorded car (see dfFMix in engineAudio.js).
             df_f_mix: 0.2,
             // Flow noise of the exhaust jet: the rasp (see airNoise in engineAudio.js).
-            air_noise: 1.0,
+            air_noise: 0.4,
             air_noise_cutoff_hz: 6_000.0,
+            // Steady share of the jet noise (see airNoiseSteady in engineAudio.js).
+            air_noise_steady: 1.5,
             jitter: 0.06,
             tone_cutoff_hz: 8_000.0,
             pressure_ref_pa: 90_000.0,
@@ -117,6 +122,8 @@ struct ChannelFilters {
     air_noise_lp: ButterworthLowPass,
     convolution: ConvolutionFilter,
     rng: Rng,
+    /// Slow mean square of the pressure signal, for the steady jet noise.
+    f_ms: f32,
 }
 
 pub struct Synthesizer {
@@ -142,6 +149,7 @@ impl Synthesizer {
                 air_noise_lp: ButterworthLowPass::new(params.air_noise_cutoff_hz, sample_rate),
                 convolution: ConvolutionFilter::new(ir.clone()),
                 rng: Rng::new(0xBEEF + i as u64 * 7919),
+                f_ms: 0.0,
             })
             .collect();
 
@@ -210,7 +218,13 @@ impl Synthesizer {
             let noise = ch.air_noise_lp.f(ch.rng.uniform());
             let r_mixed = 1.0 + noise * p.air_noise * load.clamp(0.0, 1.0);
 
-            let v_in = f_p * p.df_f_mix + f * r_mixed * (1.0 - p.df_f_mix);
+            let mut v_in = f_p * p.df_f_mix + f * r_mixed * (1.0 - p.df_f_mix);
+            // Steady share of the jet noise, riding the pressure signal's slow
+            // (~30 ms) RMS rather than each pulse.
+            if p.air_noise_steady > 0.0 {
+                ch.f_ms += 0.0007 * (f * f - ch.f_ms);
+                v_in += noise * ch.f_ms.sqrt() * p.air_noise_steady * load.clamp(0.0, 1.0) * (1.0 - p.df_f_mix);
+            }
 
             let conv = p.convolution.clamp(0.0, 1.0);
             let v = if conv > 0.0 {

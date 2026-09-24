@@ -1,4 +1,4 @@
-// Engine, tyre and wind audio.
+// Engine, tyre, wind and drivetrain audio.
 //
 // The engine note comes from `src/audio/engineAudio.js`: a physical model of
 // combustion and exhaust gas dynamics, adapted from ange-yaghi/engine-sim, run
@@ -13,7 +13,45 @@
 // f_fire = rpm / 30) with harmonics stacked on top -- recognisably the same
 // engine, obviously synthetic next to the real thing.
 
+import { SDM26 } from "../vehicle/params.js";
+
 const MIX_KEY = "fsae-sim.audio.v1";
+
+/**
+ * The drivetrain's teeth, for the mesh frequencies.
+ *
+ * `primary` is the crank gear to the clutch basket, 36 -> 76, which is the
+ * 2.111 in params.js. `gears` are [driven, drive] per gear for a CBR600RR
+ * box consistent with params.js's ratios exactly (33/12 = 2.750, 32/16,
+ * 30/18, 26/18, 30/23, 29/24); Honda's own tooth counts are not in the repo,
+ * so these are the plausible integer pairs, not a parts list. The sprockets
+ * are not in params either: 14 front / 42 rear is the plausible pair for its
+ * finalDrive of 3.0.
+ *
+ * `level` is each source's peak amplitude before the Engine slider (the
+ * engine model runs at ~0.19 RMS by comparison): easy to trim, and
+ * deliberately quiet. A sportbike cassette box is not a race car's
+ * straight-cut box -- its whine is texture, not a feature -- and the chain,
+ * exposed behind the driver, is the only part meant to be noticed.
+ */
+export const DRIVETRAIN = {
+  primary: [76, 36],
+  gears: [[33, 12], [32, 16], [30, 18], [26, 18], [30, 23], [29, 24]],
+  frontSprocket: 14,
+  rearSprocket: 42,
+  level: { chain: 0.016, chainBuzz: 0.016, gear: 0.0025, primary: 0.0012, rattle: 0.010 },
+};
+
+/**
+ * Tyre, wind and road levels at full effect, before the Tyres / Wind sliders.
+ * No recording of these exists yet; they are set by ear to sit under the
+ * engine (the limiter stays at 0-1 dB), and live here so a recording can
+ * calibrate them.
+ */
+export const TYRE = {
+  scrub: 0.11, squeal: 0.035, spin: 0.10, lock: 0.20, rolling: 0.030,
+  wind: 0.18, windHiss: 0.03, road: 0.10,
+};
 
 /**
  * Per-source levels, 0..1.
@@ -43,10 +81,15 @@ export const DEFAULT_MIX = {
  * ~6 dB asked for in the cockpit, with the limiter still at 0-0.2 dB at
  * master 0.5 and about 1 dB at master 1.0 (measured, headless browser build).
  * +6 dB here put the cockpit into 3-7 dB of limiting at master 1.0.
+ * It is 2 x 1.4: the model's output is now halved for headroom
+ * (ENGINE_OUTPUT_HEADROOM in engineAudio.js) and this puts the level back.
  * A trim rather than a new default because the slider tops out at 1 and a
  * saved mix keeps its own slider value -- the trim applies to everyone.
  */
-export const ENGINE_MODEL_TRIM = 1.4;
+export const ENGINE_MODEL_TRIM = 2.8;
+
+/** The helmet's high-frequency loss for the cockpit listener: see startModel. */
+export const HELMET = { shelfHz: 1200, gainDb: -8 };
 
 export const MIX_LABELS = {
   master: "Master",
@@ -162,7 +205,13 @@ export class EngineAudio {
     };
 
     this.induction = branch("bandpass", 700, 0.8, 0);
-    this.squeal = branch("bandpass", 1350, 7.0, 0);
+    // Tyres, per axle: scrub (broadband) front and rear from decorrelated
+    // noise, a quiet tonal squeal past the limit, wheelspin, rolling noise.
+    this.scrubF = branch("bandpass", 700, 0.9, 0);
+    this.scrubR = branchFrom(this.noise2, "bandpass", 650, 0.9, 0, 0);
+    this.squeal = branch("bandpass", 1100, 6.0, 0);
+    this.spin = branchFrom(this.noise2, "bandpass", 420, 0.8, 0, 0);
+    this.rolling = branch("bandpass", 800, 0.6, 0);
     // Wind on both sides of the helmet, decorrelated, so speed has width.
     this.wind = branchFrom(this.noise, "lowpass", 520, 0.7, 0, -0.65);
     this.wind2 = branchFrom(this.noise2, "lowpass", 560, 0.7, 0, 0.65);
@@ -173,6 +222,57 @@ export class EngineAudio {
     // lower and rougher than squeal. Was never voiced, so a braking lock-up
     // sounded exactly like a power slide and ABS was inaudible.
     this.lockup = branch("lowpass", 520, 1.2, 0);
+    // Flow over the helmet shell: the hiss that only arrives at speed.
+    this.windHiss = branchFrom(this.noise2, "bandpass", 2600, 0.8, 0, 0);
+
+    // ---- drivetrain: chain, gearbox mesh, primary drive, overrun rattle ----
+    // Oscillators whose frequencies follow the gearing (see DRIVETRAIN), on
+    // one bus scaled by the Engine slider and by the camera.
+    this.driveBus = ctx.createGain();
+    this.driveBus.gain.value = 0;
+    this.driveBus.connect(this.master);
+    const tone = (type, lowpassHz) => {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.frequency.value = 100;
+      const f = ctx.createBiquadFilter();
+      f.type = "lowpass"; f.frequency.value = lowpassHz;
+      const gn = ctx.createGain();
+      gn.gain.value = 0;
+      o.connect(f); f.connect(gn); gn.connect(this.driveBus);
+      o.start();
+      return { o, f, g: gn };
+    };
+    this.chain = tone("sawtooth", 2500);
+    this.gearMesh = tone("triangle", 6000);
+    this.primaryMesh = tone("sine", 16000);
+    // The chain's polygon buzz: noise narrowed around twice the mesh rate.
+    {
+      const f = ctx.createBiquadFilter();
+      f.type = "bandpass"; f.frequency.value = 400; f.Q.value = 3;
+      const gn = ctx.createGain();
+      gn.gain.value = 0;
+      this.noise2.connect(f); f.connect(gn); gn.connect(this.driveBus);
+      this.chainBuzz = { f, g: gn };
+    }
+    // Backlash rattle: band noise, amplitude-modulated at the crank rate.
+    {
+      const f = ctx.createBiquadFilter();
+      f.type = "bandpass"; f.frequency.value = 1800; f.Q.value = 1.2;
+      const gn = ctx.createGain();
+      gn.gain.value = 0;
+      const am = ctx.createGain();
+      am.gain.value = 0.5;
+      const lfo = ctx.createOscillator();
+      lfo.type = "square"; lfo.frequency.value = 100;
+      const depth = ctx.createGain();
+      depth.gain.value = 0.5;
+      lfo.connect(depth); depth.connect(am.gain);
+      lfo.start();
+      this.noise.connect(f); f.connect(gn); gn.connect(am); am.connect(this.driveBus);
+      this.rattle = { f, g: gn };
+      this.rattleLfo = lfo;
+    }
     // Off the course: gravel and grass under the floor. The only cue that
     // the lap was void used to be a toast.
     this.surface = branch("lowpass", 240, 0.9, 0);
@@ -201,7 +301,17 @@ export class EngineAudio {
       });
       this.modelGain = ctx.createGain();
       this.modelGain.gain.value = this.mix.engine * ENGINE_MODEL_TRIM;
-      node.connect(this.modelGain);
+      // The helmet. The engine model was matched to a microphone outside the
+      // car; the driver hears it through a helmet, which takes the top off:
+      // roughly 5-10 dB above 1-2 kHz. A high shelf on the engine, cockpit
+      // cameras only (setCamera), and it answered the team driver's "it
+      // sounds very high pitched".
+      this.helmet = ctx.createBiquadFilter();
+      this.helmet.type = "highshelf";
+      this.helmet.frequency.value = HELMET.shelfHz;
+      this.helmet.gain.value = (this.camera?.inside ?? true) ? HELMET.gainDb : 0;
+      node.connect(this.helmet);
+      this.helmet.connect(this.modelGain);
       this.modelGain.connect(this.master);
       // Width. The model is mono, and a mono engine in headphones sits in
       // the middle of the skull. Two short, unequal delays panned either
@@ -326,7 +436,8 @@ export class EngineAudio {
    *   ignition is being cut; torqueNm is then what the engine would make),
    *   gear (0-based; a change is the shift clunk), speed m/s, slip 0..~2
    *   (worst axle utilisation), wheelspin 0..1, lock 0..1, offTrack bool,
-   *   shifting bool
+   *   shifting bool; and per axle, when available: utilF/utilR, kappaF/
+   *   kappaR, slipFDeg/slipRDeg, and driveForceN (the chain's load)
    */
   update(s, dt) {
     if (!this.ready || !this.enabled) return;
@@ -404,35 +515,106 @@ export class EngineAudio {
     this.induction.g.gain.setTargetAtTime(induction, now, glide);
     this.induction.f.frequency.setTargetAtTime(400 + firing * 1.6, now, glide);
 
-    // Tyres only talk once they are near the limit; the pitch climbs with
-    // how far past peak slip they are.
-    const scrub = Math.max(0, Math.min(1, (s.slip - 0.82) / 0.5));
-    const spin = Math.max(0, Math.min(1, s.wheelspin));
-    const squealAmt = Math.max(scrub, spin * 0.8) * Math.min(1, s.speed / 3);
-    this.squeal.g.gain.setTargetAtTime(0.20 * squealAmt * this.mix.tyres, now, glide);
-    this.squeal.f.frequency.setTargetAtTime(1100 + 900 * squealAmt, now, glide);
-
     const cam = this.camera ?? { inside: true, wind: 1 };
-    const windLevel = Math.min(0.10, (s.speed / 32) ** 2 * 0.10) * this.mix.wind * cam.wind;
+    const v = Math.max(0, s.speed || 0);
+    const speedGate = Math.min(1, v / 3);
+
+    // ---- tyres ------------------------------------------------------------
+    // Racing slicks on asphalt mostly SCRUB -- a broadband, gritty roar that
+    // rises through the last few percent before the limit -- and squeal only a
+    // little, and only past it. A road tyre's tonal squeal is what makes a
+    // sim sound cartoonish. Each axle is voiced from its own utilisation and
+    // slip angle, so an understeering push (front) and a sliding rear sound
+    // like different ends of the car. Longitudinal slip has its own voices:
+    // wheelspin (rear, driven) and lock-up.
+    const utilF = s.utilF ?? s.slip ?? 0;
+    const utilR = s.utilR ?? s.slip ?? 0;
+    const slipF = Math.abs(s.slipFDeg ?? 0);
+    const slipR = Math.abs(s.slipRDeg ?? 0);
+    const scrubOf = (util, slipDeg) =>
+      Math.max(0, Math.min(1, Math.max((util - 0.78) / 0.32, (slipDeg - 4) / 8)));
+    const scrubF = scrubOf(utilF, slipF) * speedGate;
+    const scrubR = scrubOf(utilR, slipR) * speedGate;
+    const tl = this.mix.tyres;
+    this.scrubF.g.gain.setTargetAtTime(TYRE.scrub * scrubF * tl, now, glide);
+    this.scrubF.f.frequency.setTargetAtTime(520 + 9 * v + 300 * scrubF, now, glide);
+    this.scrubR.g.gain.setTargetAtTime(TYRE.scrub * scrubR * tl, now, glide);
+    this.scrubR.f.frequency.setTargetAtTime(480 + 8 * v + 280 * scrubR, now, glide);
+    // The tonal part, past the peak of the curve only, and quiet.
+    const over = Math.max(0, Math.min(1, (Math.max(utilF, utilR) - 1.0) / 0.25))
+      * speedGate;
+    this.squeal.g.gain.setTargetAtTime(TYRE.squeal * over * tl, now, glide);
+    this.squeal.f.frequency.setTargetAtTime(880 + 420 * over + 6 * v, now, glide);
+    // Wheelspin: the driven rears turning faster than the road -- a coarse
+    // roar whose pitch follows the slip speed.
+    const kR = s.kappaR ?? ((s.wheelspin ?? 0) + 0.15);
+    const spin = Math.max(0, Math.min(1, (kR - 0.12) / 0.35)) * speedGate;
+    this.spin.g.gain.setTargetAtTime(TYRE.spin * spin * tl, now, glide);
+    this.spin.f.frequency.setTargetAtTime(300 + 900 * spin + 4 * v, now, glide);
+    // Lock-up: a flat spot being dragged, lower and rougher still.
+    const lock = Math.max(0, Math.min(1, s.lock ?? 0)) * Math.min(1, v / 4);
+    this.lockup.g.gain.setTargetAtTime(TYRE.lock * lock * tl, now, glide);
+    this.lockup.f.frequency.setTargetAtTime(380 + 320 * lock, now, glide);
+    // Rolling: tread on the surface texture, ~ speed^1.3 (road-tyre noise
+    // scales 30-40 log(v); a slick on smooth asphalt is at the quiet end).
+    const roll = Math.min(1.2, (v / 30) ** 1.3);
+    this.rolling.g.gain.setTargetAtTime(TYRE.rolling * roll * tl * (cam.inside ? 1 : 0.6), now, glide);
+    this.rolling.f.frequency.setTargetAtTime(500 + 14 * v, now, glide);
+
+    // ---- wind and road -----------------------------------------------------
+    // Aerodynamic noise at the helmet goes as dynamic pressure, speed^2: a
+    // low buffeting roar each side (decorrelated) plus the hiss of flow over
+    // the helmet shell that only comes in at speed.
+    const q = Math.min(1.1, (v / 32) ** 2);
+    const windLevel = TYRE.wind * q * this.mix.wind * cam.wind;
     this.wind.g.gain.setTargetAtTime(windLevel, now, glide);
     this.wind2.g.gain.setTargetAtTime(windLevel * 0.9, now, glide);
-    this.wind.f.frequency.setTargetAtTime(320 + s.speed * 22, now, glide);
-    this.wind2.f.frequency.setTargetAtTime(360 + s.speed * 24, now, glide);
-    // The road, felt more than heard: on the car only.
-    const road = Math.min(1, s.speed / 25) * (cam.inside ? 1 : 0.25);
-    this.road.g.gain.setTargetAtTime(0.10 * road * this.mix.wind, now, glide);
-    this.road.f.frequency.setTargetAtTime(70 + s.speed * 1.5, now, glide);
-
-    const lock = Math.max(0, Math.min(1, s.lock ?? 0)) * Math.min(1, s.speed / 4);
-    this.lockup.g.gain.setTargetAtTime(0.22 * lock * this.mix.tyres, now, glide);
-    this.lockup.f.frequency.setTargetAtTime(380 + 320 * lock, now, glide);
+    this.wind.f.frequency.setTargetAtTime(320 + v * 22, now, glide);
+    this.wind2.f.frequency.setTargetAtTime(360 + v * 24, now, glide);
+    this.windHiss.g.gain.setTargetAtTime(TYRE.windHiss * q * this.mix.wind * cam.wind, now, glide);
+    // The road through the seat, felt more than heard: on the car only.
+    const road = Math.min(1, v / 25) * (cam.inside ? 1 : 0.25);
+    this.road.g.gain.setTargetAtTime(TYRE.road * road * this.mix.wind, now, glide);
+    this.road.f.frequency.setTargetAtTime(70 + v * 1.5, now, glide);
 
     // Gravel is not steady: a slow flutter is most of what makes it read as
     // a surface rather than a hiss.
-    const off = s.offTrack ? Math.min(1, s.speed / 12) : 0;
+    const off = s.offTrack ? Math.min(1, v / 12) : 0;
     const flutter = 0.7 + 0.3 * Math.sin(now * 41) * Math.sin(now * 7.3);
-    this.surface.g.gain.setTargetAtTime(0.16 * off * flutter * this.mix.tyres, now, glide);
-    this.surface.f.frequency.setTargetAtTime(200 + s.speed * 9, now, glide);
+    this.surface.g.gain.setTargetAtTime(0.16 * off * flutter * tl, now, glide);
+    this.surface.f.frequency.setTargetAtTime(200 + v * 9, now, glide);
+
+    // ---- drivetrain ---------------------------------------------------------
+    // Frequencies from the car's own gearing (see DRIVETRAIN). The chain is
+    // exposed right behind the driver and is the one you hear: its mesh
+    // (rear sprocket teeth x wheel rev/s) and the polygon buzz around it. The
+    // gearbox is a sportbike cassette box -- spur gears, but small, oiled and
+    // inside the cases -- so its mesh and the primary drive's are barely-there
+    // texture. All of it scales with the load through the chain.
+    const wheelRps = v / (2 * Math.PI * SDM26.tireRadiusM);
+    const mainRps = (s.rpm / 60) * DRIVETRAIN.primary[1] / DRIVETRAIN.primary[0];
+    const g = Math.max(0, Math.min(DRIVETRAIN.gears.length - 1, s.gear ?? 0));
+    const fChain = Math.max(20, DRIVETRAIN.rearSprocket * wheelRps);
+    const fGear = Math.max(20, DRIVETRAIN.gears[g][1] * mainRps);
+    const fPrimary = Math.max(20, DRIVETRAIN.primary[1] * (s.rpm / 60));
+    const load = Math.max(0, Math.min(1, Math.abs(s.driveForceN ?? 0) / 3000));
+    const moving = Math.min(1, v / 2);
+    const busLevel = this.mix.engine * (cam.inside ? 1 : 0.35);
+    this.driveBus.gain.setTargetAtTime(busLevel, now, glide);
+    this.chain.o.frequency.setTargetAtTime(fChain, now, glide);
+    this.chain.g.gain.setTargetAtTime(DRIVETRAIN.level.chain * moving * (0.35 + 0.65 * load), now, glide);
+    this.chainBuzz.f.frequency.setTargetAtTime(fChain * 2, now, glide);
+    this.chainBuzz.g.gain.setTargetAtTime(DRIVETRAIN.level.chainBuzz * moving * (0.3 + 0.7 * load), now, glide);
+    this.gearMesh.o.frequency.setTargetAtTime(fGear, now, glide);
+    this.gearMesh.g.gain.setTargetAtTime(shifting ? 0 : DRIVETRAIN.level.gear * moving * load, now, glide);
+    this.primaryMesh.o.frequency.setTargetAtTime(Math.min(fPrimary, 16000), now, glide);
+    this.primaryMesh.g.gain.setTargetAtTime(DRIVETRAIN.level.primary * (0.3 + 0.7 * load) * Math.min(1, s.rpm / 4000), now, glide);
+    // Backlash rattle on the overrun: the gears unloaded, chattering at the
+    // crank rate. Closed throttle, at speed, not in a shift.
+    const overrun = !shifting && (s.throttlePlate ?? s.throttle ?? 0) < 0.08 && v > 5 && s.rpm > 4000 ? 1 : 0;
+    this.rattle.g.gain.setTargetAtTime(DRIVETRAIN.level.rattle * overrun, now, glide);
+    this.rattleLfo.frequency.setTargetAtTime(Math.max(10, s.rpm / 60), now, glide);
+    this._lastLoad = load;
   }
 
   /**
@@ -448,6 +630,7 @@ export class EngineAudio {
     const inside = name === "Cockpit" || name === "Nose";
     this.camera = { inside, wind: name === "Nose" ? 1.25 : inside ? 1.0 : name === "Chase" ? 0.5 : 0.25 };
     this.modelNode?.port.postMessage({ type: "cabin", cabin: inside ? "cockpit" : "trackside" });
+    if (this.helmet) this.helmet.gain.value = inside ? HELMET.gainDb : 0;
   }
 
   /** Forget the last gear and clear the engine model: the car was respawned. */
@@ -511,8 +694,12 @@ export class EngineAudio {
   shiftClunk(down) {
     if (!this.ready || !this.enabled) return;
     const now = this.ctx.currentTime;
-    const lvl = this.mix.engine;
+    // Louder the harder the dogs go in: the load through the chain just
+    // before the shift. Inside the car it comes through the seat.
+    const cam = this.camera ?? { inside: true };
+    const lvl = this.mix.engine * (0.7 + 0.3 * (this._lastLoad ?? 0.5)) * (cam.inside ? 1 : 0.5);
     this.burst({ type: "bandpass", freq: 2400, q: 1.2, gain: 0.14 * lvl, decay: 0.05, at: now });
+    this.burst({ type: "bandpass", freq: 3900, q: 3.0, gain: 0.06 * lvl, decay: 0.025, at: now });
     this.thump(75, 0.08, 0.16 * lvl, now);
     if (down) this.burst({ type: "lowpass", freq: 420, q: 0.8, gain: 0.10 * lvl, decay: 0.14, at: now });
   }

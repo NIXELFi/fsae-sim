@@ -7,6 +7,46 @@
 
 use core::f32::consts::PI;
 
+/// Two-pole resonator (RBJ band-pass, 0 dB at its peak): a pipe or cavity
+/// mode, rung by whatever drives it. `Resonator` in engineAudio.js.
+#[derive(Clone, Debug)]
+pub struct Resonator {
+    b0: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Resonator {
+    pub fn new(hz: f32, q: f32, sample_rate: f32) -> Self {
+        let w0 = 2.0 * core::f32::consts::PI * hz.min(sample_rate * 0.45) / sample_rate;
+        let alpha = w0.sin() / (2.0 * q.max(0.1));
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: alpha / a0,
+            a1: -2.0 * w0.cos() / a0,
+            a2: (1.0 - alpha) / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn f(&mut self, x: f32) -> f32 {
+        let y = self.b0 * (x - self.x2) - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
 /// One-pole low pass. Used two ways in the chain: to isolate the DC component
 /// of the manifold pressure so it can be subtracted, and to band-limit noise.
 #[derive(Clone, Debug)]

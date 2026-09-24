@@ -1318,6 +1318,11 @@ class Game {
       lock: Math.min(1, lock),
       offTrack: !!loc && !loc.onTrack && this.car.speed > 2,
       shifting,
+      // Per axle, for the tyre and drivetrain voices.
+      utilF: tel.utilF, utilR: tel.utilR,
+      kappaF: tel.kappaF, kappaR: tel.kappaR,
+      slipFDeg: tel.slipF, slipRDeg: tel.slipR,
+      driveForceN: tel.driveForceN,
     };
   }
 
@@ -1350,6 +1355,10 @@ class Game {
       lock: Math.min(1, Math.max(0, -Math.min(kF, kR) - 0.2) * 2.5),
       offTrack: r.valueAt("sim.on_track") < 0.5 && speed > 2,
       shifting,
+      utilF: r.value("sim.util_front"), utilR: r.value("sim.util_rear"),
+      kappaF: kF, kappaR: kR,
+      slipFDeg: r.value("sim.slip_front_deg"), slipRDeg: r.value("sim.slip_rear_deg"),
+      driveForceN: r.value("sim.drive_force_n"),
     };
   }
 

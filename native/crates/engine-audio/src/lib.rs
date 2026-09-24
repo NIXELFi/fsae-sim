@@ -53,14 +53,14 @@ pub mod ir;
 pub mod synth;
 
 pub use engine::{
-    cbr600rr_sdm26, single_cylinder_450, CombustionSpec, EngineSpec, GasProperties, IntakeSpec,
-    PipeSpec, ValveTiming,
+    cbr600rr_sdm26, single_cylinder_450, CombustionSpec, EngineSpec, GasProperties,
+    IntakeNoiseSpec, IntakeSpec, PipeSpec, ValveTiming,
 };
 pub use ir::Cabin;
 pub use synth::AudioParameters;
 
 use cylinder::{calibrate, step_cylinder, CycleCalibration, CycleTables, Cylinder, OperatingPoint};
-use filters::Rng;
+use filters::{ButterworthLowPass, LowPassFilter, Resonator, Rng};
 
 /// Seed of the cycle-to-cycle combustion variation; `CYCLE_SEED` in the JS port.
 pub const CYCLE_SEED: u64 = 0xC7_C1E5;
@@ -68,6 +68,22 @@ pub const CYCLE_SEED: u64 = 0xC7_C1E5;
 /// Scale from the intake mouth's radiated flow derivative to output full scale
 /// at intake level 1; `INTAKE_RADIATION_SCALE` in the JS port.
 pub const INTAKE_RADIATION_SCALE: f32 = 0.015;
+
+/// Final output scale before the +-1 clamp: 6 dB of headroom now that the
+/// induction noise is summed in. `ENGINE_OUTPUT_HEADROOM` in the JS port.
+pub const ENGINE_OUTPUT_HEADROOM: f32 = 0.5;
+
+/// Induction-noise state (see `IntakeNoiseSpec`).
+struct IntakeNoise {
+    runner: Resonator,
+    duct: Resonator,
+    whistle: Resonator,
+    gargle_lp: LowPassFilter,
+    drive_lp: ButterworthLowPass,
+    rng: Rng,
+    /// Each runner's air-column flow, per crank degree.
+    col: Vec<f32>,
+}
 use exhaust::ExhaustNetwork;
 use synth::Synthesizer;
 
@@ -126,6 +142,7 @@ pub struct EngineAudio {
     intake_x: f32,
     intake_v: f32,
     intake_prev: f32,
+    intake_noise: Option<IntakeNoise>,
 }
 
 impl EngineAudio {
@@ -167,6 +184,21 @@ impl EngineAudio {
 
         let n_cyl = cylinders.len();
         let n_tail = spec.tailpipes.len();
+        let z = spec.intake.noise;
+        let fs = config.sample_rate;
+        let intake_noise = if spec.intake.level > 0.0 && z.level > 0.0 {
+            Some(IntakeNoise {
+                runner: Resonator::new(z.runner_hz, z.runner_q, fs),
+                duct: Resonator::new(z.duct_hz, z.duct_q, fs),
+                whistle: Resonator::new(z.whistle_hz, z.whistle_q, fs),
+                gargle_lp: LowPassFilter::new(40.0, fs),
+                drive_lp: ButterworthLowPass::new(z.drive_hz, fs),
+                rng: Rng::new(0x1A7E5),
+                col: vec![0.0; n_cyl],
+            })
+        } else {
+            None
+        };
 
         Ok(Self {
             spec,
@@ -190,6 +222,7 @@ impl EngineAudio {
             intake_x: 0.0,
             intake_v: 0.0,
             intake_prev: 0.0,
+            intake_noise,
         })
     }
 
@@ -360,14 +393,31 @@ impl EngineAudio {
                 // Volume drawn by the cylinders whose intake valves are open,
                 // each scaled by its own charge trim and by manifold pressure.
                 let mut q = 0.0f32;
+                let mut kick = 0.0f32;
                 if self.running {
                     for (i, cyl) in self.cylinders.iter().enumerate() {
                         let th = cyl.theta(self.crank_deg);
-                        if cylinder::is_between(th, ivo, ivc) {
-                            let dvol = self.tables.volume((th + deg_per_sample) % 720.0) - self.tables.volume(th);
+                        let open = cylinder::is_between(th, ivo, ivc);
+                        let mut dvol = 0.0f32;
+                        if open {
+                            dvol = self.tables.volume((th + deg_per_sample) % 720.0) - self.tables.volume(th);
                             if dvol > 0.0 {
                                 q += self.trim[i] * dvol;
                             }
+                        }
+                        if let Some(nz) = self.intake_noise.as_mut() {
+                            // The runner's air column: follows the piston's
+                            // draw, coasts on its momentum after BDC, and is
+                            // choked off over the ~30 degrees the valve takes
+                            // to shut (and to open).
+                            let prev = nz.col[i];
+                            let draw = if open && dvol > 0.0 { dvol / deg_per_sample } else { 0.0 };
+                            let to_close = (ivc - th + 720.0) % 720.0;
+                            let from_open = (th - ivo + 720.0) % 720.0;
+                            let valve = if open { (to_close / 30.0).min(from_open / 30.0).min(1.0) } else { 0.0 };
+                            let col = draw.max(prev * 0.995) * valve;
+                            nz.col[i] = col;
+                            kick += self.trim[i] * (col - prev);
                         }
                     }
                     q = q / dt * map_frac;
@@ -377,9 +427,22 @@ impl EngineAudio {
                 self.intake_x += self.intake_v * dt;
                 let rad = (self.intake_x - self.intake_prev) / dt;
                 self.intake_prev = self.intake_x;
-                y = (y + i_gain * self.level * rad).clamp(-1.0, 1.0);
+                let mut ny = 0.0f32;
+                if let Some(nz) = self.intake_noise.as_mut() {
+                    let z = self.spec.intake.noise;
+                    let noise = nz.rng.uniform();
+                    let gargle = 1.0 + z.gargle * nz.gargle_lp.f(noise) * 8.0;
+                    let drive = nz.drive_lp.f(kick * 1e6 * map_frac * gargle);
+                    let honk = z.runner * nz.runner.f(drive) + z.duct * nz.duct.f(drive);
+                    let m = (self.intake_x.max(0.0) * 1.2 / 0.075).min(1.0);
+                    let w = ((m - 0.7) / 0.3).max(0.0) * z.whistle;
+                    ny = (z.sign * z.level * honk + w * nz.whistle.f(noise))
+                        * i_listener
+                        * self.synth.parameters().volume;
+                }
+                y += i_gain * self.level * rad + ny;
             }
-            *sample = y;
+            *sample = (y * ENGINE_OUTPUT_HEADROOM).clamp(-1.0, 1.0);
 
             self.crank_deg += deg_per_sample;
             if self.crank_deg >= 720.0 {
@@ -401,6 +464,11 @@ impl EngineAudio {
         self.intake_x = 0.0;
         self.intake_v = 0.0;
         self.intake_prev = 0.0;
+        if let Some(nz) = self.intake_noise.as_mut() {
+            for c in nz.col.iter_mut() {
+                *c = 0.0;
+            }
+        }
     }
 }
 

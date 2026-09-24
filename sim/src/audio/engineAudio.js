@@ -67,6 +67,29 @@ export class Rng {
 }
 
 /** One-pole low pass. Isolates DC, and band-limits noise. */
+/**
+ * Two-pole resonator (RBJ band-pass, 0 dB at its peak): a pipe or cavity
+ * mode, rung by whatever drives it.
+ */
+export class Resonator {
+  constructor(hz, q, sampleRate) {
+    const w0 = (2 * Math.PI * Math.min(hz, sampleRate * 0.45)) / sampleRate;
+    const alpha = Math.sin(w0) / (2 * Math.max(q, 0.1));
+    const a0 = 1 + alpha;
+    this.b0 = alpha / a0;
+    this.a1 = (-2 * Math.cos(w0)) / a0;
+    this.a2 = (1 - alpha) / a0;
+    this.x1 = 0; this.x2 = 0; this.y1 = 0; this.y2 = 0;
+  }
+
+  f(x) {
+    const y = this.b0 * (x - this.x2) - this.a1 * this.y1 - this.a2 * this.y2;
+    this.x2 = this.x1; this.x1 = x;
+    this.y2 = this.y1; this.y1 = y;
+    return y;
+  }
+}
+
 export class LowPassFilter {
   constructor(cutoffHz, sampleRate) {
     this.y = 0;
@@ -480,7 +503,23 @@ export function cbr600rrSdm26() {
     // is roughly equidistant from both. So the cockpit hears the intake
     // 2.7x (8.6 dB) louder relative to the exhaust; the exterior level is
     // the one judged against the camera recording.
-    intake: { helmholtzHz: 55, q: 1.8, level: 2, cockpitGain: 2.7 },
+    //
+    // `noise` is the induction noise proper: pulsed and resonant, the way a
+    // motorcycle airbox honks, rather than hiss (see buildIntakeNoise).
+    // Runner quarter-wave ~270 Hz (~0.30 m of runner and port, estimated from
+    // the runner part's CAD bounding box, not a measured centreline), duct
+    // ~520 Hz (~0.33 m of throttle body and restrictor), a gargle from flow
+    // unsteadiness and a faint throat whistle near choke. The levels are the
+    // ones the team picked by ear ("v5c").
+    intake: {
+      helmholtzHz: 55, q: 1.8, level: 2, cockpitGain: 2.7,
+      noise: {
+        level: 10, gargle: 0.5, whistle: 0.04, sign: -1,
+        runner: 1, runnerHz: 270, runnerQ: 8,
+        duct: 0.6, ductHz: 520, ductQ: 5,
+        whistleHz: 3200, whistleQ: 12, driveHz: 900,
+      },
+    },
     // How the ignition cut (rev limiter, launch control) sounds: per cylinder
     // per cycle, as an ECU cuts it. See EngineAudio.render.
     cutMode: "cylinder",
@@ -1159,10 +1198,14 @@ export const DEFAULT_AUDIO_PARAMETERS = {
   // Turbulent flow noise of the exhaust jet, modulated by the flow. The
   // recording of the car carries 3-10 dB more between 1.25 and 5 kHz than
   // the harmonics alone give (even stationary on launch control, so not
-  // wind): the rasp. 1.0 up to 6 kHz closes that; 0.5 to 2 kHz left the note
-  // clean where the car is raw.
-  airNoise: 1.0,
+  // wind): the rasp. Up to 6 kHz closes that; 0.5 to 2 kHz left the note
+  // clean where the car is raw. 0.4 riding the pulses plus 1.5 steady
+  // (airNoiseSteady) is the balance of pulse-locked to steady roar the
+  // recording shows, at the same 1-5 kHz level as the all-pulsed 1.0 it
+  // replaced -- and the driver's "the rasp is different".
+  airNoise: 0.4,
   airNoiseCutoffHz: 6000,
+  airNoiseSteady: 1.5,
   jitter: 0.06,
 
   /**
@@ -1255,6 +1298,9 @@ export class Synthesizer {
         airNoiseLp: new ButterworthLowPass(this.params.airNoiseCutoffHz, sampleRate),
         convolution: new ConvolutionFilter(ir),
         rng: new Rng(0xbeef + i * 7919),
+        // Slow mean square of the pressure signal, for the steady part of the
+        // jet noise (see airNoiseSteady).
+        fMs: 0,
       });
     }
     // engine-sim antialiases at 45% of the sample rate.
@@ -1315,7 +1361,17 @@ export class Synthesizer {
       const noise = ch.airNoiseLp.f(ch.rng.uniform());
       const rMixed = 1 + noise * p.airNoise * l;
 
-      const vIn = fP * p.dfFMix + f * rMixed * (1 - p.dfFMix);
+      let vIn = fP * p.dfFMix + f * rMixed * (1 - p.dfFMix);
+      // The noise above rides each pulse: it is gated by the pressure
+      // waveform itself. A real exhaust jet also roars steadily from its mean
+      // flow, and the recorded car's 1.5-5 kHz band is less locked to the
+      // firing pulses than that alone gives (envelope modulation at the firing
+      // frequency 0.09-0.17 on the clip against 0.23-0.26 without this). The
+      // steady share rides the pressure signal's slow (~30 ms) RMS instead.
+      if (p.airNoiseSteady > 0) {
+        ch.fMs += 0.0007 * (f * f - ch.fMs);
+        vIn += noise * Math.sqrt(ch.fMs) * p.airNoiseSteady * l * (1 - p.dfFMix);
+      }
       const conv = Math.min(Math.max(p.convolution, 0), 1);
       sum += conv > 0 ? conv * ch.convolution.f(vIn) + (1 - conv) * vIn : vIn;
     }
@@ -1364,6 +1420,15 @@ export const CYCLE_SEED = 0xc7c1e5;
  * balance between them.
  */
 export const INTAKE_RADIATION_SCALE = 0.015;
+
+/**
+ * Final output scale, applied after the intake is summed in and before the
+ * hard +-1 clamp. With the induction noise on, the cockpit listener's peaks
+ * reached the clamp at full load (0.99); halving the output gives 6 dB of
+ * headroom, and the game's ENGINE_MODEL_TRIM (sim/src/game/audio.js) is
+ * doubled to put the level back where it was.
+ */
+export const ENGINE_OUTPUT_HEADROOM = 0.5;
 
 export const DEFAULT_AUDIO_CONFIG = {
   sampleRate: 48000,
@@ -1442,6 +1507,7 @@ export class EngineAudio {
     this.intakeX = 0;
     this.intakeV = 0;
     this.intakePrev = 0;
+    this.buildIntakeNoise();
   }
 
   setParameters(p) {
@@ -1610,14 +1676,33 @@ export class EngineAudio {
         // Volume drawn into the cylinders whose intake valves are open, each
         // scaled by its own charge trim and by manifold pressure.
         let q = 0;
+        let kick = 0;
+        const inz = this.inz;
         if (this.running) {
           for (let i = 0; i < this.cylinders.length; i++) {
             let th = this.crankDeg - this.cylinders[i].phaseDeg;
             while (th < 0) th += 720;
             while (th >= 720) th -= 720;
-            if (isBetween(th, ivo, ivc)) {
-              const dvol = this.tables.volumeAt((th + degPerSample) % 720) - this.tables.volumeAt(th);
+            const open = isBetween(th, ivo, ivc);
+            let dvol = 0;
+            if (open) {
+              dvol = this.tables.volumeAt((th + degPerSample) % 720) - this.tables.volumeAt(th);
               if (dvol > 0) q += this.trim[i] * dvol;
+            }
+            if (inz) {
+              // The runner's air column: follows the piston's draw (per crank
+              // degree), keeps moving on its own momentum after BDC, and is
+              // stopped dead when the valve shuts.
+              const prev = this.inCol[i];
+              const draw = open && dvol > 0 ? dvol / degPerSample : 0;
+              // The valve takes ~30 crank degrees to shut (and to open), so the
+              // column is choked off over that, not in one sample.
+              const toClose = (ivc - th + 720) % 720;
+              const fromOpen = (th - ivo + 720) % 720;
+              const valve = open ? Math.min(1, toClose / 30, fromOpen / 30) : 0;
+              const col = Math.max(draw, prev * 0.995) * valve;
+              this.inCol[i] = col;
+              kick += this.trim[i] * (col - prev);
             }
           }
           q = (q / dt) * mapFrac;
@@ -1627,13 +1712,58 @@ export class EngineAudio {
         this.intakeX += this.intakeV * dt;
         const rad = (this.intakeX - this.intakePrev) / dt;
         this.intakePrev = this.intakeX;
-        y = Math.min(Math.max(y + iGain * this.level * rad, -1), 1);
+        let ny = 0;
+        if (inz) {
+          const noise = this.inRng.uniform();
+          const gargle = 1 + (inz.gargle ?? 0.3) * this.inGargleLp.f(noise) * 8;
+          // The column is air: its stop is not sharper than about a
+          // millisecond, so the drive is band-limited before it rings the
+          // pipes (otherwise the valve events click through as hiss).
+          const drive = this.inDriveLp.f(kick * 1e6 * mapFrac * gargle);
+          const honk = (inz.runner ?? 1) * this.inRunner.f(drive) + (inz.duct ?? 0.6) * this.inDuct.f(drive);
+          // The throat whistle, near choke: mass flow re the 20 mm restrictor's
+          // 0.075 kg/s, from the plenum's neck flow.
+          const m = Math.min(Math.max(this.intakeX, 0) * 1.2 / 0.075, 1);
+          const w = Math.max(0, (m - 0.7) / 0.3) * (inz.whistle ?? 0);
+          // Radiated from the intake mouth as air drawn IN: a negative volume
+          // velocity, the opposite sign to the exhaust's blowdown.
+          ny = ((inz.sign ?? -1) * inz.level * honk + w * this.inWhistle.f(noise)) * iListener * this.synth.params.volume;
+        }
+        y += iGain * this.level * rad + ny;
       }
-      out[s] = y;
+      out[s] = Math.min(Math.max(y * ENGINE_OUTPUT_HEADROOM, -1), 1);
 
       this.crankDeg += degPerSample;
       if (this.crankDeg >= 720) this.crankDeg -= 720;
     }
+  }
+
+  /**
+   * Induction noise: `spec.intake.noise` (or `config.intakeNoise`, which
+   * overrides it for experiments; level 0 turns it off).
+   *
+   * Pulsed and resonant, the way a motorcycle airbox is, rather than a band
+   * of hiss. Each runner carries its cylinder's intake flow; when the intake
+   * valve shuts on that moving column it stops dead, and the pressure pulse
+   * rings the runner (quarter-wave: ~0.30 m of runner and port, CAD
+   * 26_06_IN_RNRS_PRT_U, ~270 Hz hot-air-free) and the throttle/restrictor
+   * duct (~0.33 m, open both ends, ~520 Hz) -- the "honk". Flow unsteadiness
+   * adds a gargle, and near choke the 20 mm throat whistles faintly. The
+   * pulse strength is per crank degree, so it does not rise with rpm the way
+   * the exhaust does: strongest relative at low and mid rpm, then masked.
+   */
+  buildIntakeNoise() {
+    const z = this.config.intakeNoise ?? this.spec.intake?.noise;
+    this.inz = z && z.level > 0 ? { ...z } : null;
+    if (!this.inz) return;
+    const fs = this.config.sampleRate;
+    this.inRunner = new Resonator(z.runnerHz ?? 270, z.runnerQ ?? 8, fs);
+    this.inDuct = new Resonator(z.ductHz ?? 520, z.ductQ ?? 5, fs);
+    this.inWhistle = new Resonator(z.whistleHz ?? 3200, z.whistleQ ?? 12, fs);
+    this.inGargleLp = new LowPassFilter(40, fs);
+    this.inDriveLp = new ButterworthLowPass(z.driveHz ?? 900, fs);
+    this.inRng = new Rng(0x1a7e5);
+    this.inCol = new Float64Array(this.cylinders.length);
   }
 
   reset() {

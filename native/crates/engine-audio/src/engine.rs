@@ -145,10 +145,49 @@ pub struct IntakeSpec {
     /// Extra intake level for the cockpit listener, who sits much closer to
     /// the intake mouth than to the tailpipe.
     pub cockpit_gain: f32,
+    /// Induction noise: the runners and duct rung by each intake valve
+    /// event. See `IntakeNoiseSpec`.
+    pub noise: IntakeNoiseSpec,
+}
+
+/// Induction noise, pulsed and resonant (the airbox "honk"): each runner's air
+/// column is stopped when its intake valve shuts, and the pulse rings the
+/// runner and the throttle/restrictor duct; a gargle from flow unsteadiness;
+/// a faint throat whistle near choke. Mirrors `intake.noise` and
+/// `buildIntakeNoise` in sim/src/audio/engineAudio.js.
+#[derive(Clone, Copy, Debug)]
+pub struct IntakeNoiseSpec {
+    /// Overall level; 0 turns it off.
+    pub level: f32,
+    pub gargle: f32,
+    pub whistle: f32,
+    /// Radiated sign: -1, air drawn in, opposite to the exhaust's blowdown.
+    pub sign: f32,
+    pub runner: f32,
+    pub runner_hz: f32,
+    pub runner_q: f32,
+    pub duct: f32,
+    pub duct_hz: f32,
+    pub duct_q: f32,
+    pub whistle_hz: f32,
+    pub whistle_q: f32,
+    /// Band limit on the valve-event drive, Hz.
+    pub drive_hz: f32,
+}
+
+impl IntakeNoiseSpec {
+    pub const OFF: IntakeNoiseSpec = IntakeNoiseSpec {
+        level: 0.0, gargle: 0.0, whistle: 0.0, sign: -1.0,
+        runner: 1.0, runner_hz: 270.0, runner_q: 8.0,
+        duct: 0.6, duct_hz: 520.0, duct_q: 5.0,
+        whistle_hz: 3200.0, whistle_q: 12.0, drive_hz: 900.0,
+    };
 }
 
 impl IntakeSpec {
-    pub const OFF: IntakeSpec = IntakeSpec { helmholtz_hz: 55.0, q: 1.8, level: 0.0, cockpit_gain: 1.0 };
+    pub const OFF: IntakeSpec = IntakeSpec {
+        helmholtz_hz: 55.0, q: 1.8, level: 0.0, cockpit_gain: 1.0, noise: IntakeNoiseSpec::OFF,
+    };
 }
 
 /// A complete engine.
@@ -343,7 +382,14 @@ pub fn cbr600rr_sdm26() -> EngineSpec {
         // restrictor; level judged by ear against the IMG_5128 recording.
         // Cockpit: the throttle mouth is ~2.7x closer to the driver's head
         // than the muffler outlet (CAD), so the cockpit hears it 2.7x louder.
-        intake: IntakeSpec { helmholtz_hz: 55.0, q: 1.8, level: 2.0, cockpit_gain: 2.7 },
+        // Induction noise at the levels the team picked by ear ("v5c").
+        intake: IntakeSpec {
+            helmholtz_hz: 55.0,
+            q: 1.8,
+            level: 2.0,
+            cockpit_gain: 2.7,
+            noise: IntakeNoiseSpec { level: 10.0, gargle: 0.5, whistle: 0.04, ..IntakeNoiseSpec::OFF },
+        },
         idle_rpm: 2_000.0,
         redline_rpm: 14_500.0,
         gas: GasProperties::default(),
