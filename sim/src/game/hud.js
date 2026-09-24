@@ -883,9 +883,7 @@ export class Hud {
     const known = d?.hasReference && d.delta != null;
     const items = [];
     items.push({ text: gearText(s), font: font(40, true), colour: s.shifting ? "rgba(255,255,255,0.45)" : GOLD });
-    // Right-aligned in a three-digit slot, so the strip does not change width
-    // (and shuffle the gear sideways) every time the speed gains a digit.
-    items.push({ text: String(Math.round(s.speedKph ?? 0)), slot: "000", font: font(34, true), colour: "#fff" });
+    items.push({ text: String(Math.round(s.speedKph ?? 0)).padStart(3, " "), font: font(34, true), colour: "#fff" });
     if (d?.hasReference) {
       const v = d.delta;
       items.push({
@@ -901,8 +899,7 @@ export class Hud {
     let total = pad * 2 + gap * (items.length - 1);
     for (const it of items) {
       ctx.font = it.font;
-      it.w = Math.max(ctx.measureText(it.text).width, it.slot ? ctx.measureText(it.slot).width : 0) +
-        (it.icon ? icon + 5 : 0);
+      it.w = ctx.measureText(it.text).width + (it.icon ? icon + 5 : 0);
       total += it.w;
     }
     const x0 = cx - total / 2, y0 = bottom - h;
@@ -929,13 +926,7 @@ export class Hud {
         ctx.stroke();
       }
       ctx.font = it.font;
-      if (it.slot) {
-        ctx.textAlign = "right";
-        ctx.fillText(it.text, x + it.w, mid);
-        ctx.textAlign = "left";
-      } else {
-        ctx.fillText(it.text, x + (it.icon ? icon + 5 : 0), mid);
-      }
+      ctx.fillText(it.text, x + (it.icon ? icon + 5 : 0), mid);
       x += it.w + gap;
     }
     ctx.textBaseline = "alphabetic";
