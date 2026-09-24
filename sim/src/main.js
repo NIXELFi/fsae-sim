@@ -2650,8 +2650,8 @@ class Game {
         const d = dev(action);
         return [d, k].filter(Boolean).map((x) => `<kbd>${esc(x)}</kbd>`).join(" or ") || "<kbd>-</kbd>";
       };
-      menuHint.innerHTML = `${either("pause")} pauses; ${either("home")} returns here ` +
-        `(hold it during a timed lap). Drag the scene to look around the car.`;
+      menuHint.innerHTML = `${either("pause")} pauses; ${either("home")} returns here. ` +
+        `Drag the scene to look around the car.`;
     }
   }
 
@@ -2841,8 +2841,6 @@ function loadDriver() {
  */
 const RECENT_DRIVERS_KEY = "fsae-sim.recentDrivers";
 const RECENT_DRIVERS_MAX = 8;
-/** Past this since the name's last run, Start asks "still you?". */
-const DRIVER_STALE_MS = 2 * 3600 * 1000;
 function loadRecentDrivers() {
   try {
     const v = JSON.parse(localStorage.getItem(RECENT_DRIVERS_KEY) ?? "[]");
@@ -3938,50 +3936,8 @@ async function boot() {
     });
   }
 
-  // "Still you?" before a new drive on a shared rig. Asked when the run
-  // would file under a name whose last run here is more than two hours old,
-  // or under no name at all -- once per name per session, never for a run
-  // Helios signed the driver in for (driverId), never with logging off, and
-  // never for Resume. The first press arms it; the second, within 10 s,
-  // starts. Nothing to type, so it works from the wheel.
-  const startLabel = () => dom.startBtn.textContent;
-  let confirmArmed = null;
-  const disarm = () => {
-    if (!confirmArmed) return;
-    clearTimeout(confirmArmed.timer);
-    dom.startBtn.textContent = confirmArmed.label;
-    confirmArmed = null;
-    const n = document.getElementById("driverConfirm");
-    if (n) n.hidden = true;
-  };
-  const staleDriverNote = () => {
-    // A signed-in identity from Helios is not a guess; a typed name is.
-    if (!game.recording || game.driverId) return null;
-    const name = game.driverName;
-    if (game.driverConfirmedFor === name) return null;
-    if (!name) return "No driver name: this run will be filed as \"Unknown\". Pick your name above, or start anyway.";
-    const d = game.recentDrivers?.find((r) => r.name.toLowerCase() === name.toLowerCase());
-    if (!d || Date.now() - d.at < DRIVER_STALE_MS) return null;
-    return `The last run as ${name} was ${agoText(Date.now() - d.at)}. Still you? Pick your name above if not.`;
-  };
-  const gatedStart = (fresh) => {
-    const newDrive = fresh || !game.hasDriven;
-    const note = newDrive && !confirmArmed ? staleDriverNote() : null;
-    if (note) {
-      confirmArmed = { label: startLabel(), timer: setTimeout(disarm, 10000) };
-      dom.startBtn.textContent = game.driverName ? `Yes, start as ${game.driverName}` : "Start as Unknown";
-      const n = document.getElementById("driverConfirm");
-      if (n) { n.textContent = note; n.hidden = false; }
-      return;
-    }
-    if (confirmArmed) game.driverConfirmedFor = game.driverName;
-    disarm();
-    enterSim(fresh);
-  };
-  for (const box of nameBoxes) box.addEventListener("input", disarm);
-  recentSel?.addEventListener("change", disarm);
-  dom.startBtn.addEventListener("click", () => gatedStart(!game.started));
-  dom.restartBtn.addEventListener("click", () => gatedStart(true));
+  dom.startBtn.addEventListener("click", () => enterSim(!game.started));
+  dom.restartBtn.addEventListener("click", () => enterSim(true));
 
   // ---- pad navigation ------------------------------------------------------
   //
@@ -4070,7 +4026,7 @@ async function boot() {
     }
 
     if (!dom.menu.hidden) {
-      if (M.start) { if (!dom.startBtn.disabled) gatedStart(!game.started); return; }
+      if (M.start) { if (!dom.startBtn.disabled) enterSim(!game.started); return; }
       if (M.back && game.started) { enterSim(false); return; }
       if (M.nextTab || M.prevTab) { tabs.step(M.nextTab ? 1 : -1); return; }
       const list = focusables(dom.menu);
