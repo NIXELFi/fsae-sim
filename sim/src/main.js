@@ -770,6 +770,7 @@ class Game {
       .then((res) => {
         this.lastSavedRun = { ...res, stats: manifest.stats, track: manifest.trackName };
         this.saveError = null;
+        this.noteDriverRun?.(manifest.driver, Date.now());
         updateSession();
         refreshRuns();
         return res;
@@ -2839,6 +2840,47 @@ export function saveDriver(name) {
 function loadDriver() {
   try { return localStorage.getItem(DRIVER_KEY) ?? ""; } catch { return ""; }
 }
+
+/**
+ * Who has driven this rig lately: `[{ name, at }]`, newest first, `at` the
+ * epoch ms of the last run filed under that name. Kept locally (a run saved
+ * here adds to it) and merged with the names in the run archive at boot, so
+ * a shared rig can offer "who are you?" as a pick list instead of a text box
+ * nobody on a wheel can type into.
+ */
+const RECENT_DRIVERS_KEY = "fsae-sim.recentDrivers";
+const RECENT_DRIVERS_MAX = 8;
+/** Past this since the name's last run, Start asks "still you?". */
+const DRIVER_STALE_MS = 2 * 3600 * 1000;
+function loadRecentDrivers() {
+  try {
+    const v = JSON.parse(localStorage.getItem(RECENT_DRIVERS_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((d) => d && typeof d.name === "string" && Number.isFinite(d.at)) : [];
+  } catch { return []; }
+}
+/** Merge `{name, at}` rows into the list: one row per name (case-blind), latest time wins. */
+function mergeRecentDrivers(list, rows) {
+  const byKey = new Map(list.map((d) => [d.name.toLowerCase(), { ...d }]));
+  for (const r of rows) {
+    const name = String(r.name ?? "").trim().slice(0, 64);
+    if (!name || name.toLowerCase() === "unknown" || !Number.isFinite(r.at)) continue;
+    const k = name.toLowerCase();
+    const cur = byKey.get(k);
+    if (!cur || r.at > cur.at) byKey.set(k, { name, at: r.at });
+  }
+  return [...byKey.values()].sort((a, b) => b.at - a.at).slice(0, RECENT_DRIVERS_MAX);
+}
+function saveRecentDrivers(list) {
+  try { localStorage.setItem(RECENT_DRIVERS_KEY, JSON.stringify(list)); } catch { /* ignore */ }
+}
+/** "5 min ago", "3 h ago", "2 days ago". */
+function agoText(ms) {
+  const m = Math.max(0, ms) / 60000;
+  if (m < 60) return `${Math.max(1, Math.round(m))} min ago`;
+  const h = m / 60;
+  if (h < 48) return `${Math.round(h)} h ago`;
+  return `${Math.round(h / 24)} days ago`;
+}
 function saveSessionLabel(label) {
   try { localStorage.setItem(SESSION_KEY, label); } catch { /* ignore */ }
 }
@@ -2951,6 +2993,7 @@ function updateSession() {
       notes.innerHTML = (game.sessionLabel ? `<small>${esc(game.sessionLabel)}</small>` : "") + from +
         (game.driverName || !game.recording ? "" : `<small class="changed">unnamed: runs file as "Unknown"</small>`);
     }
+    game.syncDriverUi?.();
   }
   if (dom.sRecording) {
     if (!game.recording) {
@@ -3730,6 +3773,51 @@ async function boot() {
       updateSession();
     });
   }
+  // ---- who is driving, on a shared rig ----
+  game.recentDrivers = loadRecentDrivers();
+  const recentSel = document.getElementById("sDriverRecent");
+  const setDriver = (name) => {
+    game.driverName = String(name).trim().slice(0, 64);
+    for (const box of nameBoxes) box.value = game.driverName;
+    saveDriver(game.driverName);
+    game.driverId = null;
+    game.launchedBy = null;
+    updateSession();
+  };
+  const syncDriverUi = () => {
+    if (recentSel) {
+      const opts = [`<option value="">${game.recentDrivers.length ? "Recent drivers..." : "No recent drivers"}</option>`]
+        .concat(game.recentDrivers.map((d) =>
+          `<option value="${escHtml(d.name)}"${d.name === game.driverName ? " selected" : ""}>${escHtml(d.name)} (${agoText(Date.now() - d.at)})</option>`));
+      recentSel.innerHTML = opts.join("");
+      recentSel.hidden = !game.recentDrivers.length;
+    }
+    const who = game.driverName || "no name (files as Unknown)";
+    for (const el of document.querySelectorAll("[data-driving-as]")) {
+      el.innerHTML = `Driving as <b>${escHtml(who)}</b>`;
+      el.classList.toggle("unnamed", !game.driverName);
+    }
+  };
+  game.syncDriverUi = syncDriverUi;
+  recentSel?.addEventListener("change", () => {
+    if (recentSel.value) setDriver(recentSel.value);
+    syncDriverUi();
+  });
+  game.noteDriverRun = (name, at) => {
+    game.recentDrivers = mergeRecentDrivers(game.recentDrivers, [{ name, at }]);
+    saveRecentDrivers(game.recentDrivers);
+    syncDriverUi();
+  };
+  // The archive knows who drove here before this browser profile did.
+  listRuns(60).then((runs) => {
+    const rows = runs.map((r) => ({ name: r.manifest?.driver, at: Date.parse(r.manifest?.endedAt ?? r.manifest?.startedAt ?? "") }));
+    game.recentDrivers = mergeRecentDrivers(game.recentDrivers, rows);
+    saveRecentDrivers(game.recentDrivers);
+    syncDriverUi();
+  }).catch(() => {});
+  for (const box of nameBoxes) box.addEventListener("input", syncDriverUi);
+  syncDriverUi();
+
   if (dom.sessionName) {
     dom.sessionName.value = game.sessionLabel;
     dom.sessionName.addEventListener("input", () => {
@@ -3796,8 +3884,50 @@ async function boot() {
     });
   }
 
-  dom.startBtn.addEventListener("click", () => enterSim(!game.started));
-  dom.restartBtn.addEventListener("click", () => enterSim(true));
+  // "Still you?" before a new drive on a shared rig. Asked when the run
+  // would file under a name whose last run here is more than two hours old,
+  // or under no name at all -- once per name per session, never for a run
+  // Helios signed the driver in for (driverId), never with logging off, and
+  // never for Resume. The first press arms it; the second, within 10 s,
+  // starts. Nothing to type, so it works from the wheel.
+  const startLabel = () => dom.startBtn.textContent;
+  let confirmArmed = null;
+  const disarm = () => {
+    if (!confirmArmed) return;
+    clearTimeout(confirmArmed.timer);
+    dom.startBtn.textContent = confirmArmed.label;
+    confirmArmed = null;
+    const n = document.getElementById("driverConfirm");
+    if (n) n.hidden = true;
+  };
+  const staleDriverNote = () => {
+    // A signed-in identity from Helios is not a guess; a typed name is.
+    if (!game.recording || game.driverId) return null;
+    const name = game.driverName;
+    if (game.driverConfirmedFor === name) return null;
+    if (!name) return "No driver name: this run will be filed as \"Unknown\". Pick your name above, or start anyway.";
+    const d = game.recentDrivers?.find((r) => r.name.toLowerCase() === name.toLowerCase());
+    if (!d || Date.now() - d.at < DRIVER_STALE_MS) return null;
+    return `The last run as ${name} was ${agoText(Date.now() - d.at)}. Still you? Pick your name above if not.`;
+  };
+  const gatedStart = (fresh) => {
+    const newDrive = fresh || !game.hasDriven;
+    const note = newDrive && !confirmArmed ? staleDriverNote() : null;
+    if (note) {
+      confirmArmed = { label: startLabel(), timer: setTimeout(disarm, 10000) };
+      dom.startBtn.textContent = game.driverName ? `Yes, start as ${game.driverName}` : "Start as Unknown";
+      const n = document.getElementById("driverConfirm");
+      if (n) { n.textContent = note; n.hidden = false; }
+      return;
+    }
+    if (confirmArmed) game.driverConfirmedFor = game.driverName;
+    disarm();
+    enterSim(fresh);
+  };
+  for (const box of nameBoxes) box.addEventListener("input", disarm);
+  recentSel?.addEventListener("change", disarm);
+  dom.startBtn.addEventListener("click", () => gatedStart(!game.started));
+  dom.restartBtn.addEventListener("click", () => gatedStart(true));
 
   // ---- pad navigation ------------------------------------------------------
   //
@@ -3886,7 +4016,7 @@ async function boot() {
     }
 
     if (!dom.menu.hidden) {
-      if (M.start) { if (!dom.startBtn.disabled) enterSim(!game.started); return; }
+      if (M.start) { if (!dom.startBtn.disabled) gatedStart(!game.started); return; }
       if (M.back && game.started) { enterSim(false); return; }
       if (M.nextTab || M.prevTab) { tabs.step(M.nextTab ? 1 : -1); return; }
       const list = focusables(dom.menu);
