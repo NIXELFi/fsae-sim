@@ -3612,6 +3612,34 @@ async function boot() {
   });
   window.addEventListener("resize", () => { if (game?.track) drawCoursePlan(dom.coursePlan, game.track); });
 
+  // Launch-screen zoom and the in-drive card scale, from the window size.
+  // See the `--menu-zoom` / `--ui` rules in index.html.
+  const applyUiScale = () => {
+    const w = innerWidth, h = innerHeight;
+    const byHeight = Math.max(1, h / 900);
+    const byWidth = w >= 3400 ? 2 : w >= 2400 ? 1.45 : 1;
+    const root = document.documentElement.style;
+    root.setProperty("--menu-zoom", String(Math.min(byWidth, byHeight)));
+    root.setProperty("--ui", String(Math.min(1.9, byHeight)));
+  };
+  applyUiScale();
+  window.addEventListener("resize", applyUiScale);
+  // The session card's scroll shadow: on while rows sit under the sticky
+  // Start button.
+  const sessionCard = document.querySelector(".session");
+  if (sessionCard) {
+    const syncShadow = () => sessionCard.classList.toggle("more-below",
+      sessionCard.scrollTop + sessionCard.clientHeight < sessionCard.scrollHeight - 2);
+    sessionCard.addEventListener("scroll", syncShadow, { passive: true });
+    window.addEventListener("resize", syncShadow);
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(syncShadow);
+      ro.observe(sessionCard);
+      for (const c of sessionCard.children) ro.observe(c);
+    }
+    syncShadow();
+  }
+
   const sync = () => {
     game.assists.traction = dom.tcToggle.checked;
     game.assists.abs = dom.absToggle.checked;

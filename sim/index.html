@@ -513,6 +513,14 @@
     position: sticky; bottom: -18px; margin-bottom: -18px; padding: 10px 0 18px;
     background: var(--panel); z-index: 1;
   }
+  /* A shadow over the rows that are scrolled under the sticky Start, so the
+     card says there is more above the button instead of hiding it. */
+  .session .actions::before {
+    content: ""; position: absolute; left: -18px; right: -18px; top: -18px; height: 18px;
+    background: linear-gradient(to top, rgba(0,0,0,0.55), rgba(0,0,0,0));
+    pointer-events: none; opacity: 0; transition: opacity .15s;
+  }
+  .session.more-below .actions::before { opacity: 1; }
   button#start {
     background: var(--gold); color: #14100a; border: 0; font-weight: 700;
     font-size: 16px; padding: 14px 20px; border-radius: 10px; cursor: pointer;
@@ -785,8 +793,18 @@
     .session dl { gap: 4px 10px; }
     button#start { padding: 11px 18px; font-size: 15px; }
   }
-  @media (min-width: 2400px) { #menu { zoom: 1.45; } }
-  @media (min-width: 3400px) { #menu { zoom: 2; } }
+  /* Wide screens zoom the launch screen -- but never past what the HEIGHT
+     can hold: 1.45 on a 2560x1080 ultrawide left the session card 805 px of
+     content in a 707 px box, with the slot rows behind the sticky Start.
+     `--menu-zoom` is set by main.js (applyUiScale) as
+     min(width step, max(1, height / 900)); the numbers here are only the
+     fallback before it runs. */
+  @media (min-width: 2400px) { #menu { zoom: var(--menu-zoom, 1.45); } }
+  @media (min-width: 3400px) { #menu { zoom: var(--menu-zoom, 2); } }
+  /* The in-drive DOM cards scale with the window height exactly as the
+     canvas HUD does (hud.js: clamp(1, cssH / 900, 1.9)); `--ui` is set by
+     applyUiScale. Fixed CSS px made them postage stamps on a big screen. */
+  .pause-card, .staging-setup, .rp-root { zoom: var(--ui, 1); }
 
   /* ---------------- ETC throttle-map editor ---------------- */
   #etcOverlay {
