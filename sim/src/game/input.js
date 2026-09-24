@@ -56,6 +56,12 @@ const HOLD_ACTIONS = new Set(["steerLeft", "steerRight", "throttle", "brake", "l
 const REPEAT_IDS = ACTIONS.filter((a) => a.repeat).map((a) => a.id);
 const REPEAT_ACTIONS = new Set(REPEAT_IDS);
 const REPEAT_LIST = ACTIONS.filter((a) => a.repeat);
+/**
+ * Edge actions whose button is also read as a LEVEL (`Input.levels`), so the
+ * game can ask for a hold instead of a tap: restarting or leaving a timed lap
+ * is one stray thumb away otherwise.
+ */
+const LEVEL_ACTIONS = ACTIONS.filter((a) => a.id === "restart" || a.id === "home");
 /** Everything else: one edge per press. */
 const EDGE_ACTIONS = ACTIONS.filter(
   (a) => !HOLD_ACTIONS.has(a.id) && !REPEAT_ACTIONS.has(a.id),
@@ -96,6 +102,9 @@ export class Input {
     // panel offers to bind cannot be one the game never reads.
     this.edges = {};
     for (const a of ACTIONS) if (!HOLD_ACTIONS.has(a.id)) this.edges[a.id] = false;
+    /** Is the button for restart / home down right now (any device)? */
+    this.levels = {};
+    for (const a of LEVEL_ACTIONS) this.levels[a.id] = false;
     /**
      * Menu navigation from the device, for the screens the driving edges do
      * not reach: the home screen, the pause and finish cards, the replay
@@ -555,6 +564,7 @@ export class Input {
   /** Read the pad and keyboard into `state` and `edges`. Call once per frame. */
   poll() {
     for (const k in this.edges) this.edges[k] = false;
+    for (const k in this.levels) this.levels[k] = false;
     for (const id of REPEAT_IDS) { this._repHeld[id] = false; this._repEdge[id] = false; }
     for (const k in this.menu) this.menu[k] = false;
 
@@ -631,6 +641,7 @@ export class Input {
       for (const a of EDGE_ACTIONS) {
         if (edge(B[buttonSlot(a)])) this.edges[a.id] = true;
       }
+      for (const a of LEVEL_ACTIONS) if (pressed(B[buttonSlot(a)])) this.levels[a.id] = true;
       const M = this.menu;
       M.up = edge(B.dpadUp);
       M.down = edge(B.dpadDown);
@@ -772,6 +783,7 @@ export class Input {
     for (const a of EDGE_ACTIONS) {
       if (anyEdge(K[a.id])) this.edges[a.id] = true;
     }
+    for (const a of LEVEL_ACTIONS) if (held(K[a.id])) this.levels[a.id] = true;
     for (const id of REPEAT_IDS) {
       this.applyRepeat(id,
         this._repHeld[id] || held(K[id]),

@@ -294,6 +294,7 @@ export class Hud {
     // run that did not reach the archive, are things a driver must not miss.
     this.statusChips(ctx, W, s, show.delta && !!s.delta?.hasReference);
     if (show.message) this.message(ctx, W, H, s);
+    if (s.hold) this.holdRing(ctx, W, H, s.hold);
     if (s.paused) this.paused(ctx, W, H);
 
     ctx.restore();
@@ -1322,6 +1323,26 @@ export class Hud {
     }
     ctx.fillStyle = alert ? "#ff453a" : GOLD;
     ctx.fillText(s.message, W / 2, H * 0.24 + 31);
+  }
+
+  /** "Hold to restart / home": a ring filling while the button is held. */
+  holdRing(ctx, W, H, hold) {
+    const cx = W / 2, cy = H * 0.36, r = 24;
+    panel(ctx, cx - 120, cy - r - 12, 240, 2 * r + 50, 12);
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = GOLD;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + hold.frac * Math.PI * 2);
+    ctx.stroke();
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = font(13, true);
+    ctx.fillText(hold.id === "home" ? "HOLD FOR HOME SCREEN" : "HOLD TO RESTART", cx, cy + r + 26);
+    ctx.textAlign = "left";
   }
 
   /**

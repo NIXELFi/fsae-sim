@@ -47,6 +47,12 @@ const CHECKPOINT_ROWS = 1000;
  *  about this fast and nobody can read one that changes quicker. */
 const DASH_REFRESH_MS = 1000 / 30;
 /**
+ * Restart / home during a timed lap need the button HELD this long. One edge
+ * used to end the recording, and both sit on buttons a thumb brushes past on
+ * a wheel rim. The pause card and the finish card stay instant.
+ */
+const HOLD_TO_ACT_S = 0.6;
+/**
  * How far ahead of the native snapshot the car is DRAWN, seconds, on top of
  * the snapshot's measured age: about one frame, which is when the frame
  * being built now actually reaches the screen. See `drawnPose`.
@@ -1014,7 +1020,7 @@ class Game {
     if (this.etcEditor.isOpen) { this.holdNative(); return; }
 
     if (this.input.edges.mapEditor) { this.openEtcEditor(); return; }
-    if (this.input.edges.home) { this.goHome(); return; }
+    if (this.guardedAction("home", dt)) { this.goHome(); return; }
     if (this.input.edges.hudDensity) {
       const d = this.hud.cycleDensity();
       this.timing?.say(`OVERLAY  ${d.toUpperCase()}`, 1.5);
@@ -1027,7 +1033,7 @@ class Game {
     if (this.input.edges.pause && !this.swallowPauseEdge) this.setPaused(!this.paused);
     this.swallowPauseEdge = false;
     // The pause overlay offers a restart, so it has to work from there.
-    if (this.input.edges.restart) { this.restart(); this.setPaused(false); }
+    if (this.guardedAction("restart", dt)) { this.restart(); this.setPaused(false); }
     // The cards are navigable from the pad; see `padNav` in boot.
     if (this.paused) { this.padNav?.(); this.holdNative(); return; }
 
@@ -1628,6 +1634,7 @@ class Game {
       messageLevel: t.messageLevel,
       // Persistent, unlike the message: from the excursion to the flag.
       lapInvalid: t.state === "running" && t.lapInvalid,
+      hold: this.holdProgress(),
       notSaved: this.notSaved,
       paused: this.paused,
       tractionControl: this.assists.traction,
@@ -1866,6 +1873,41 @@ class Game {
     this.setPaused(true);
     this.dom.pauseMenu.hidden = true;
     this.etcEditor.open();
+  }
+
+  /**
+   * Should restart / home fire this frame?
+   *
+   * A tap, as always -- unless a timed lap is running and the game is not
+   * paused, where the button has to be held for `HOLD_TO_ACT_S`; the HUD
+   * draws a ring filling as it is held (`holdProgress`). Releasing early
+   * cancels. After it fires the button must be released before it can arm
+   * again, so one long press is one restart.
+   */
+  guardedAction(id, dt) {
+    const inp = this.input;
+    const h = this._hold ?? (this._hold = { restart: 0, home: 0, armed: { restart: true, home: true } });
+    const guarded = !this.paused && this.timing?.state === "running";
+    if (!guarded) {
+      h[id] = 0;
+      if (!inp.levels?.[id]) h.armed[id] = true;
+      return !!inp.edges[id] && h.armed[id];
+    }
+    if (!inp.levels?.[id]) { h[id] = 0; h.armed[id] = true; return false; }
+    if (!h.armed[id]) return false;
+    h[id] += dt;
+    if (h[id] >= HOLD_TO_ACT_S) { h[id] = 0; h.armed[id] = false; return true; }
+    return false;
+  }
+
+  /** The hold in progress, for the HUD ring: `{ id, frac }` or null. */
+  holdProgress() {
+    const h = this._hold;
+    if (!h) return null;
+    for (const id of ["restart", "home"]) {
+      if (h[id] > 0) return { id, frac: Math.min(1, h[id] / HOLD_TO_ACT_S) };
+    }
+    return null;
   }
 
   /** Back to the home screen, with the run left paused behind it. */
