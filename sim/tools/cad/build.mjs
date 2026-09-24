@@ -552,42 +552,73 @@ await out.transform(dedup(), prune());
 const afterSimplify = trisOf();
 
 // ---- the livery UV map --------------------------------------------------------
-// An UNWRAP, laid flat the way livery templates are:
+// A real unwrap, one scale for everything, every visible surface in its own
+// place (nothing stacked, nothing mirrored):
 //
-//   +--------------------------------------------------+
-//   | BODY SKIN: nose, side panels and cowl as one      |
-//   | piece. Across = along the car, nose left. Down   |
-//   | = around it, measured along the surface: right    |
-//   | side (upside down), the top centreline, then the  |
-//   | left side (upright). Cut along the underside.     |
-//   +--------------------------------------------------+
-//   | wings from above | endplates, left + right, side  |
-//   +--------------------------------------------------+
+//  - BODY SKIN: nose, side panels and cowl as one piece. Across = along the
+//    car, nose left; down = round it, measured along the surface, from the
+//    right side (upside down) over the top centreline to the left side
+//    (upright); cut along the underside. A stripe drawn straight down runs
+//    over the car unbroken.
+//  - WING ELEMENTS: every element of the front wing, the rear wing and the
+//    small body wings is its own pair of pieces, UPPER and LOWER surface,
+//    each flattened onto that element's own best-fit plane (a cambered flap
+//    is unrolled, not seen from overhead where its neighbours would cover
+//    it). Upper: nose left, the car's left side down. Lower: as seen from
+//    underneath, nose left, the car's left side up.
+//  - ENDPLATES: outer faces only, seen from the side they face.
 //
-// The body is unrolled station by station: at each station along the car the
-// outline of the bodywork is traced round an axis through its middle, and a
-// point's place down the image is its distance round that outline from the
-// top centreline. A stripe painted down the image runs unbroken from one
-// side, over the top, down the other. Inner skins land under their outer
-// ones (same angle), so they take the same paint. Wings and endplates are
-// near-flat and each gets its own flat piece. Image v runs down (row 0 is
-// v = 0, as WebGL samples an unflipped image). One scale for everything.
+// Faces that look INTO the car (inner skins, an endplate's inboard face)
+// get no livery (-1, -1) so nothing shows mirrored. Image v runs down (row
+// 0 is v = 0, as WebGL samples an unflipped image).
 const liveryMeshes = out.getRoot().listMeshes().filter((m) => livery.has(m));
 function liveryKind(name) {
   if (/STRU-Hood|STRU-Body-Panels|STRU-Cowl/i.test(name)) return "body";
   if (/Endplate/i.test(name)) return "endplate";
-  return "wing";   // front and rear wing elements, the small body wings
+  return "element";   // a wing element: front or rear wing, or a small body wing
 }
-const eachTri = (fn) => {
+/** A readable name for a wing element, from its CAD part. */
+function elementName(name, c) {
+  const leaf = name.replace(/-mirrored$/, "");
+  if (/Aero-Body-Wing/i.test(leaf)) return `body wing ${c[1] >= 0 ? "left" : "right"}`;
+  const fw = /FW-013-(E\d)(?:-FINAL)?(?:-Radius)?(?:-thickness)?-?(Upper|Lower)?/i.exec(leaf);
+  if (fw) return `front wing ${fw[1]}${fw[2] ? (fw[2].toLowerCase() === "upper" ? "a" : "b") : ""}`;
+  const rw = /Rear-Wing-(?:018-)?(E_?\d)/i.exec(leaf);
+  if (rw) return `rear wing ${rw[1].replace("_", "")}`;
+  return leaf.slice(0, 24);
+}
+const triCentroid = (q) => [0, 1, 2].map((a) => (q[0][a] + q[1][a] + q[2][a]) / 3);
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const unit = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+/** The face's outward normal: its winding, turned to agree with the exported
+ *  vertex normals where they disagree. */
+function faceNormal(q, N, v) {
+  const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
+  const e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+  let fn = cross3(e1, e2);
+  if (N) {
+    const mn = [0, 1, 2].map((ax) => (N[v[0] * 3 + ax] + N[v[1] * 3 + ax] + N[v[2] * 3 + ax]) / 3);
+    if (dot3(mn, fn) < 0) fn = fn.map((x) => -x);
+  }
+  return fn;
+}
+const forEachTri = (fn) => {
   for (const mesh of liveryMeshes) {
     const kind = liveryKind(mesh.getName());
     for (const prim of mesh.listPrimitives()) {
-      const P = prim.getAttribute("POSITION").getArray(), I = prim.getIndices().getArray();
-      for (let t = 0; t < I.length; t += 3) fn(kind, [0, 1, 2].map((k) => [P[I[t + k] * 3], P[I[t + k] * 3 + 1], P[I[t + k] * 3 + 2]]), mesh.getName());
+      const P = prim.getAttribute("POSITION").getArray(), N = prim.getAttribute("NORMAL")?.getArray();
+      const I = prim.getIndices().getArray();
+      for (let t = 0; t < I.length; t += 3) {
+        const v = [I[t], I[t + 1], I[t + 2]];
+        const q = v.map((i) => [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]]);
+        fn(kind, mesh, prim, t / 3, q, faceNormal(q, N, v));
+      }
     }
   }
 };
-// -- the body's outline, station by station --
+
+// -- the body skin: its outline, station by station -----------------------------
 const bodyPts = [];
 for (const mesh of liveryMeshes) if (liveryKind(mesh.getName()) === "body") for (const prim of mesh.listPrimitives()) {
   const P = prim.getAttribute("POSITION").getArray();
@@ -595,13 +626,12 @@ for (const mesh of liveryMeshes) if (liveryKind(mesh.getName()) === "body") for 
 }
 let BX0 = Infinity, BX1 = -Infinity;
 for (const p of bodyPts) { BX0 = Math.min(BX0, p[0]); BX1 = Math.max(BX1, p[0]); }
-const DX = 0.02, NS = Math.ceil((BX1 - BX0) / DX) + 1, NB = 180;   // 2 deg bins
+const DX = 0.02, NS = Math.ceil((BX1 - BX0) / DX) + 1, NB = 180;
 const slices = Array.from({ length: NS }, () => ({ zlo: Infinity, zhi: -Infinity, pts: [] }));
 for (const p of bodyPts) {
   const i = Math.min(NS - 1, Math.max(0, Math.round((p[0] - BX0) / DX)));
   for (const j of [i - 1, i, i + 1]) if (j >= 0 && j < NS) { const sl = slices[j]; sl.pts.push(p); sl.zlo = Math.min(sl.zlo, p[2]); sl.zhi = Math.max(sl.zhi, p[2]); }
 }
-// phi = 0 straight up, + toward the car's left (CAD +y), +-pi straight down.
 const phiOf = (y, dz) => Math.atan2(y, dz);
 const binOf = (phi) => Math.min(NB - 1, Math.max(0, Math.floor(((phi + Math.PI) / (2 * Math.PI)) * NB)));
 for (const sl of slices) {
@@ -609,7 +639,6 @@ for (const sl of slices) {
   if (!sl.pts.length) continue;
   const r = new Float64Array(NB).fill(NaN);
   for (const p of sl.pts) { const b = binOf(phiOf(p[1], p[2] - sl.zc)); const rr = Math.hypot(p[1], p[2] - sl.zc); if (!(r[b] >= rr)) r[b] = rr; }
-  // Fill empty bins round the circle, then smooth.
   const known = []; for (let b = 0; b < NB; b++) if (Number.isFinite(r[b])) known.push(b);
   for (let b = 0; b < NB; b++) if (!Number.isFinite(r[b])) {
     let a = known[0], c = known[0], da = 1e9, dc = 1e9;
@@ -618,24 +647,21 @@ for (const sl of slices) {
   }
   sl.r = Float64Array.from(r, (_, b) => (r[(b + NB - 1) % NB] + 2 * r[b] + r[(b + 1) % NB]) / 4);
 }
-// Arc length from the top (phi = 0) to each bin edge, both ways round.
 const dphi = (2 * Math.PI) / NB;
 for (const sl of slices) {
   if (!sl.r) continue;
-  const S = new Float64Array(NB + 1);            // S[k] at phi = -pi + k dphi
-  const k0 = NB / 2;                             // phi = 0
+  const S = new Float64Array(NB + 1), k0 = NB / 2;
   for (let k = k0; k < NB; k++) { const a = sl.r[k], b = sl.r[(k + 1) % NB]; S[k + 1] = S[k] + Math.hypot(((a + b) / 2) * dphi, b - a); }
   for (let k = k0; k > 0; k--) { const a = sl.r[k - 1], b = sl.r[k % NB]; S[k - 1] = S[k] - Math.hypot(((a + b) / 2) * dphi, b - a); }
   sl.S = S;
 }
-// Smooth the arc lengths along the car, so neighbouring stations agree.
 for (let i = 0; i < NS; i++) {
   if (!slices[i].S) continue;
   const acc = new Float64Array(NB + 1); let w = 0, zc = 0;
   for (let j = i - 2; j <= i + 2; j++) if (j >= 0 && j < NS && slices[j].S) { for (let k = 0; k <= NB; k++) acc[k] += slices[j].S[k]; zc += slices[j].zc; w++; }
   slices[i].Ss = acc.map((v) => v / w); slices[i].zcs = zc / w;
 }
-for (let i = 0; i < NS; i++) if (!slices[i].Ss) {   // a station with nothing: the nearest that has
+for (let i = 0; i < NS; i++) if (!slices[i].Ss) {
   let j = 1; while (!(slices[i - j]?.Ss || slices[i + j]?.Ss)) j++;
   const n = slices[i - j]?.Ss ? slices[i - j] : slices[i + j];
   slices[i].Ss = n.Ss; slices[i].zcs = n.zcs;
@@ -644,55 +670,253 @@ function arcAt(x, y, z, phiHint) {
   const f = Math.min(NS - 1, Math.max(0, (x - BX0) / DX)), i = Math.floor(f), t = f - i, j = Math.min(NS - 1, i + 1);
   const zc = slices[i].zcs * (1 - t) + slices[j].zcs * t;
   let phi = phiOf(y, z - zc);
-  if (phiHint != null && Math.abs(phi - phiHint) > Math.PI) phi += phi < 0 ? 2 * Math.PI : -2 * Math.PI;   // across the underside cut
+  if (phiHint != null && Math.abs(phi - phiHint) > Math.PI) phi += phi < 0 ? 2 * Math.PI : -2 * Math.PI;
   const q = (phi + Math.PI) / dphi, k = Math.floor(q), a = q - k;
-  const look = (S) => {
-    if (k < 0) return S[0] + (S[1] - S[0]) * q;
-    if (k >= NB) return S[NB] + (S[NB] - S[NB - 1]) * (q - NB);
-    return S[k] * (1 - a) + S[k + 1] * a;
-  };
-  return { s: look(slices[i].Ss) * (1 - t) + look(slices[j].Ss) * t, phi };
+  const look = (S) => { if (k < 0) return S[0] + (S[1] - S[0]) * q; if (k >= NB) return S[NB] + (S[NB] - S[NB - 1]) * (q - NB); return S[k] * (1 - a) + S[k + 1] * a; };
+  return { s: look(slices[i].Ss) * (1 - t) + look(slices[j].Ss) * t, phi, zc };
 }
 let sMin = Infinity, sMax = -Infinity;
 for (const sl of slices) { sMin = Math.min(sMin, sl.Ss[0]); sMax = Math.max(sMax, sl.Ss[NB]); }
-// -- flat islands for the wings and endplates --
-const islands = new Map();
-const islandKey = (kind, name, c) => kind === "endplate"
-  ? `${/FW-013/i.test(name) ? "front" : "rear"} endplate ${c[1] >= 0 ? "left" : "right"}`
-  : /FW-013/i.test(name) ? "front wing" : /Rear-Wing/i.test(name) ? "rear wing" : `body wing ${c[1] >= 0 ? "left" : "right"}`;
-eachTri((kind, q, name) => {
-  if (kind === "body") return;
-  const c = [0, 1, 2].map((a) => (q[0][a] + q[1][a] + q[2][a]) / 3);
-  const key = islandKey(kind, name, c);
-  if (!islands.has(key)) islands.set(key, { key, kind, side: c[1] >= 0 ? 1 : -1, lo: [9, 9, 9], hi: [-9, -9, -9] });
-  const isl = islands.get(key);
-  for (const p of q) for (let a = 0; a < 3; a++) { isl.lo[a] = Math.min(isl.lo[a], p[a]); isl.hi[a] = Math.max(isl.hi[a], p[a]); }
+
+// -- classify every face into a piece -------------------------------------------
+// Element planes: least-squares plane of each element's vertices (PCA), normal
+// turned to point up; span axis = the car's y projected into the plane, chord
+// axis = normal x span (pointing forward).
+const elementPlanes = new Map();
+for (const mesh of liveryMeshes) {
+  if (liveryKind(mesh.getName()) !== "element") continue;
+  const pts = [];
+  for (const prim of mesh.listPrimitives()) { const P = prim.getAttribute("POSITION").getArray(); for (let i = 0; i < P.length; i += 3) pts.push([P[i], P[i + 1], P[i + 2]]); }
+  const c = [0, 1, 2].map((a) => pts.reduce((s, p) => s + p[a], 0) / pts.length);
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (const p of pts) { const d = [p[0] - c[0], p[1] - c[1], p[2] - c[2]]; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) C[i][j] += d[i] * d[j]; }
+  // Smallest eigenvector by inverse power iteration on C + eps I.
+  const solve = (M, b) => { // 3x3 Cramer
+    const det = (m) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    const D = det(M) || 1e-30;
+    return [0, 1, 2].map((k) => det(M.map((row, i) => row.map((v, j) => (j === k ? b[i] : v)))) / D);
+  };
+  const tr = C[0][0] + C[1][1] + C[2][2];
+  const M = C.map((row, i) => row.map((v, j) => v + (i === j ? 1e-9 * tr : 0)));
+  let n = [0.1, 0.2, 1];
+  for (let it = 0; it < 30; it++) n = unit(solve(M, n));
+  if (n[2] < 0) n = n.map((x) => -x);
+  const span = unit([0 - n[1] * n[0], 1 - n[1] * n[1], 0 - n[1] * n[2]]);   // y minus its normal component
+  const chord = unit(cross3(span, n));                                     // forward-ish
+  const fwd = chord[0] >= 0 ? chord : chord.map((x) => -x);
+  elementPlanes.set(mesh, { c, n, span, fwd });
+}
+// A face is on the OUTSIDE only if a ray from it, along its normal, leaves
+// its own part (for the body: all the body panels) without hitting it again.
+// That drops the inner skin of a hollow wing element or a thick panel, and a
+// panel tucked under its neighbour, which would otherwise stack on the same
+// paint as the face that covers it.
+const groupTris = new Map();
+const groupOf = (kind, mesh) => (kind === "body" ? "body" : mesh);
+forEachTri((kind, mesh, prim, t, q) => {
+  const g = groupOf(kind, mesh);
+  if (!groupTris.has(g)) groupTris.set(g, []);
+  groupTris.get(g).push(q);
 });
-// Wings from above, nose left, the car's left side down the image (as on the
-// body). Endplates from the side they face: the left one nose-left, the
-// right one nose-right, both upright.
-for (const isl of islands.values()) {
-  isl.w = isl.hi[0] - isl.lo[0];
-  if (isl.kind === "endplate") {
-    isl.h = isl.hi[2] - isl.lo[2];
-    isl.map = isl.side > 0 ? (p) => [isl.hi[0] - p[0], isl.hi[2] - p[2]] : (p) => [p[0] - isl.lo[0], isl.hi[2] - p[2]];
-  } else {
-    isl.h = isl.hi[1] - isl.lo[1];
-    isl.map = (p) => [isl.hi[0] - p[0], p[1] - isl.lo[1]];
+// Only near hits count: an inner skin faces the opposite skin a wall's
+// thickness away; a bracket or a curl metres off doesn't hide anything.
+const RAY_MAX = +(process.env.RAY_MAX ?? 0.06);
+function rayHits(g, o, d) {
+  let best = Infinity;
+  for (const q of groupTris.get(g)) {
+    const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]], e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+    const h = cross3(d, e2), a = dot3(e1, h);
+    if (Math.abs(a) < 1e-12) continue;
+    const f = 1 / a, s = [o[0] - q[0][0], o[1] - q[0][1], o[2] - q[0][2]];
+    const u = f * dot3(s, h); if (u < 0 || u > 1) continue;
+    const qq = cross3(s, e1), v = f * dot3(d, qq); if (v < 0 || u + v > 1) continue;
+    const tt = f * dot3(e2, qq); if (tt > 2e-4 && tt < best) best = tt;
+  }
+  return best;
+}
+let hiddenFaces = 0;
+// (The face itself is skipped by the minimum hit distance.)
+const isOutside = (kind, mesh, q, fn) => {
+  const tHit = rayHits(groupOf(kind, mesh), triCentroid(q), unit(fn)), hit = tHit < (kind === "endplate" ? Infinity : RAY_MAX);
+  if (hit) hiddenFaces++;
+  return !hit;
+};
+// Wing elements are sorted by height instead: flattened on the element's
+// plane, a face is on the UPPER surface where nothing of the element lies
+// above it, on the LOWER where nothing lies below; anything in between is an
+// inner skin. (Normals can't be trusted at a thin trailing edge, where the
+// simplified mesh's vertex normals average top and bottom.)
+const ELEM_CELL = 0.005, ELEM_TOL = 0.003;
+const heightFields = new Map();
+function heightField(mesh) {
+  if (heightFields.has(mesh)) return heightFields.get(mesh);
+  const pl = elementPlanes.get(mesh), tris = groupTris.get(mesh);
+  const st = (p) => [dot3(p, pl.span), dot3(p, pl.fwd), dot3(p, pl.n)];
+  const P = tris.map((q) => q.map(st));
+  let s0 = Infinity, s1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+  for (const q of P) for (const [a, b] of q) { s0 = Math.min(s0, a); s1 = Math.max(s1, a); c0 = Math.min(c0, b); c1 = Math.max(c1, b); }
+  const NSx = Math.ceil((s1 - s0) / ELEM_CELL) + 1, NC = Math.ceil((c1 - c0) / ELEM_CELL) + 1;
+  const hi = new Float64Array(NSx * NC).fill(-Infinity), lo = new Float64Array(NSx * NC).fill(Infinity);
+  const put = (i, j, h) => { const k = j * NSx + i; if (h > hi[k]) hi[k] = h; if (h < lo[k]) lo[k] = h; };
+  for (const q of P) {
+    const [[ax, ay, ah], [bx, by, bh], [cx, cy, ch]] = q;
+    const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    for (const v of q) put(Math.round((v[0] - s0) / ELEM_CELL), Math.round((v[1] - c0) / ELEM_CELL), v[2]);
+    if (Math.abs(d) < 1e-12) continue;
+    const i0 = Math.floor((Math.min(ax, bx, cx) - s0) / ELEM_CELL), i1 = Math.ceil((Math.max(ax, bx, cx) - s0) / ELEM_CELL);
+    const j0 = Math.floor((Math.min(ay, by, cy) - c0) / ELEM_CELL), j1 = Math.ceil((Math.max(ay, by, cy) - c0) / ELEM_CELL);
+    for (let j = Math.max(0, j0); j <= Math.min(NC - 1, j1); j++) for (let i = Math.max(0, i0); i <= Math.min(NSx - 1, i1); i++) {
+      const px = s0 + i * ELEM_CELL, py = c0 + j * ELEM_CELL;
+      const w1 = ((px - ax) * (cy - ay) - (cx - ax) * (py - ay)) / d, w2 = ((bx - ax) * (py - ay) - (px - ax) * (by - ay)) / d, w0 = 1 - w1 - w2;
+      if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) continue;
+      put(i, j, w0 * ah + w1 * bh + w2 * ch);
+    }
+  }
+  const hf = { st, at: (a, b) => { const k = Math.min(NC - 1, Math.max(0, Math.round((b - c0) / ELEM_CELL))) * NSx + Math.min(NSx - 1, Math.max(0, Math.round((a - s0) / ELEM_CELL))); return [lo[k], hi[k]]; } };
+  heightFields.set(mesh, hf);
+  return hf;
+}
+/** "upper", "lower" or null (an inner skin) for a wing element's face. */
+function elementSide(mesh, q, fn) {
+  const hf = heightField(mesh), pl = elementPlanes.get(mesh);
+  const [a, b, h] = hf.st(triCentroid(q));
+  const [lo, hi] = hf.at(a, b);
+  const top = h >= hi - ELEM_TOL, bottom = h <= lo + ELEM_TOL;
+  // The wall's inner skin sits within the tolerance of the outer one but
+  // faces the other way; the normal settles it.
+  const facesUp = dot3(fn, pl.n) >= 0;
+  return top && facesUp ? "upper" : bottom && !facesUp ? "lower" : null;
+}
+// An "endplate" part can hold several parallel plates (the front wing's
+// endplate and its fences). Each plate is its own piece: group the side-facing
+// faces by distance from the centreline, a gap over 5 cm starts a new plate.
+// The outermost is the endplate; inner ones are fences A, B.. from inboard.
+const plateLayers = new Map();
+{
+  const ys = new Map();
+  forEachTri((kind, mesh, prim, t, q, fn) => {
+    if (kind !== "endplate") return;
+    const c = triCentroid(q), k = `${/FW-013/i.test(mesh.getName()) ? "front" : "rear"} ${c[1] >= 0 ? "left" : "right"}`;
+    if (!ys.has(k)) ys.set(k, []);
+    ys.get(k).push(Math.abs(c[1]));
+  });
+  for (const [k, arr] of ys) {
+    arr.sort((a, b) => a - b);
+    const layers = [[arr[0], arr[0]]];
+    for (const y of arr) { if (y - layers.at(-1)[1] > 0.05) layers.push([y, y]); else layers.at(-1)[1] = y; }
+    plateLayers.set(k, layers);
   }
 }
-const MARGIN = 0.05;
-const BODY = { key: "body skin", x: MARGIN, y: MARGIN, w: BX1 - BX0, h: sMax - sMin };
-// Shelf-pack the islands under the body, tallest first.
-const packW = Math.max(BODY.w, 2.4);
-let cx = MARGIN, cy = BODY.y + BODY.h + MARGIN * 2, rowH = 0;
-for (const isl of [...islands.values()].sort((a, b) => b.h - a.h)) {
-  if (cx + isl.w > MARGIN + packW) { cx = MARGIN; cy += rowH + MARGIN; rowH = 0; }
-  isl.x = cx; isl.y = cy; cx += isl.w + MARGIN; rowH = Math.max(rowH, isl.h);
+const pieces = new Map();   // key -> { key, lo:[u,v], hi:[u,v], map(p) -> [u, v] in metres }
+const faceInfo = [], faceVis = [];        // per livery face, in forEachTri order: { key | null }
+function pieceFor(key, map) {
+  if (!pieces.has(key)) pieces.set(key, { key, map, lo: [Infinity, Infinity], hi: [-Infinity, -Infinity], tris: 0, area3: 0 });
+  return pieces.get(key);
 }
-const TEX_M = Math.max(MARGIN * 2 + packW, cy + rowH + MARGIN);   // metres across the (square) texture
-let liveryTris = 0;
-const kindCount = {};
+forEachTri((kind, mesh, prim, t, q, fn) => {
+  const c = triCentroid(q);
+  let key = null, map = null;
+  const side = kind === "element" ? elementSide(mesh, q, fn) : null;
+  const outside = kind === "element" ? side !== null : isOutside(kind, mesh, q, fn);
+  if (kind === "element" && !side) hiddenFaces++;
+  if (!outside) { /* inner skin: no livery */ }
+  else if (kind === "body") {
+    const zc = arcAt(c[0], c[1], c[2]).zc;
+    if (fn[1] * c[1] + fn[2] * (c[2] - zc) >= 0) {
+      key = "body skin";
+      map = null;   // done per vertex below (needs the triangle's cut side)
+    }
+  } else if (kind === "endplate") {
+    const side = c[1] >= 0 ? 1 : -1;
+    // Its outer face only; a flange or rim seen edge-on would smear.
+    if (unit(fn)[1] * side >= 0.8) {
+      const which = /FW-013/i.test(mesh.getName()) ? "front" : "rear";
+      const sideName = side > 0 ? "left" : "right";
+      const layers = plateLayers.get(`${which} ${sideName}`), ay = Math.abs(c[1]);
+      const li = layers.findIndex(([a, b]) => ay >= a - 1e-6 && ay <= b + 1e-6);
+      key = li === layers.length - 1 ? `${which} endplate ${sideName}` : `${which} wing fence ${sideName} ${"ABCDEF"[li]}`;
+      map = side > 0 ? (p) => [-p[0], -p[2]] : (p) => [p[0], -p[2]];
+    }
+  } else {
+    const pl = elementPlanes.get(mesh);
+    const up = side === "upper";
+    key = `${elementName(mesh.getName(), c)} ${up ? "upper" : "lower"}`;
+    // Span across the image, leading edge up, as you would read a wing:
+    // upper surface seen from behind and above (car's left on the left),
+    // lower surface seen from underneath, leading edge up (car's left on the
+    // right, as it is when you look up at it).
+    map = up
+      ? (p) => [-dot3(p, pl.span), -dot3(p, pl.fwd)]
+      : (p) => [dot3(p, pl.span), -dot3(p, pl.fwd)];
+  }
+  faceInfo.push(key);
+  // VISCHK=1: also write out/vis.bin, the UVs of the faces that see out, for
+  // the overlap check (tools/cad/livery_overlap.py).
+  if (process.env.VISCHK) faceVis.push(kind !== "element" || rayHits(mesh, triCentroid(q), unit(fn)) === Infinity);
+  if (!key) return;
+  const pc = pieceFor(key, map);
+  pc.tris++;
+  const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]], e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+  pc.area3 += Math.hypot(...cross3(e1, e2)) / 2;
+  let uvs;
+  if (key === "body skin") {
+    const hint = arcAt(c[0], c[1], c[2]).phi;
+    uvs = q.map((p) => [BX1 - p[0], arcAt(p[0], p[1], p[2], hint).s - sMin]);
+  } else uvs = q.map(pc.map);
+  for (const [u, v] of uvs) { pc.lo[0] = Math.min(pc.lo[0], u); pc.lo[1] = Math.min(pc.lo[1], v); pc.hi[0] = Math.max(pc.hi[0], u); pc.hi[1] = Math.max(pc.hi[1], v); }
+});
+// Drop slivers: a piece under 2 cm^2 is a CAD edge, not a paintable surface.
+for (const [k, pc] of pieces) if (pc.area3 < 2e-4) { pieces.delete(k); }
+
+// -- pack: skyline bottom-left, body first, one scale ---------------------------
+const MARGIN = 0.04;   // metres between pieces (~35 px at 4096): room for mip bleed
+const list = [...pieces.values()].map((pc) => ({ pc, w: pc.hi[0] - pc.lo[0], h: pc.hi[1] - pc.lo[1] }));
+list.sort((a, b) => (a.pc.key === "body skin" ? -1 : b.pc.key === "body skin" ? 1 : b.h - a.h || b.w - a.w));
+function packInto(W) {
+  const sky = [{ x: 0, w: W, y: 0 }];
+  const placed = [];
+  for (const it of list) {
+    const w = it.w + MARGIN, h = it.h + MARGIN;
+    let best = null;
+    for (let i = 0; i < sky.length; i++) {
+      if (sky[i].x + w > W + 1e-9) break;
+      let y = 0, rem = w, j = i;
+      while (rem > 1e-9 && j < sky.length) { y = Math.max(y, sky[j].y); rem -= sky[j].w; j++; }
+      if (rem > 1e-9) continue;
+      if (!best || y + h < best.y + best.h - 1e-9 || (Math.abs(y + h - best.y - best.h) < 1e-9 && sky[i].x < best.x)) best = { i, x: sky[i].x, y, h };
+    }
+    if (!best) return null;
+    placed.push({ it, x: best.x, y: best.y });
+    // raise the skyline over [x, x + w)
+    const x0 = best.x, x1 = best.x + w, ny = best.y + h, next = [];
+    for (const s of sky) {
+      const s0 = s.x, s1 = s.x + s.w;
+      if (s1 <= x0 || s0 >= x1) { next.push(s); continue; }
+      if (s0 < x0) next.push({ x: s0, w: x0 - s0, y: s.y });
+      if (s1 > x1) next.push({ x: x1, w: s1 - x1, y: s.y });
+    }
+    next.push({ x: x0, w: x1 - x0, y: ny });
+    next.sort((a, b) => a.x - b.x);
+    sky.length = 0; sky.push(...next);
+  }
+  const H = Math.max(...placed.map((p) => p.y + p.it.h + MARGIN));
+  return { placed, H };
+}
+let bestPack = null;
+const minW = Math.max(...list.map((it) => it.w)) + MARGIN;
+for (let W = minW; W < minW * 3; W += 0.02) {
+  const r = packInto(W);
+  if (!r) continue;
+  const side = Math.max(W, r.H);
+  if (!bestPack || side < bestPack.side) bestPack = { ...r, W, side };
+}
+const TEX_M = bestPack.side + MARGIN;
+for (const { it, x, y } of bestPack.placed) { it.pc.x = x + MARGIN / 2; it.pc.y = y + MARGIN / 2; it.pc.w = it.w; it.pc.h = it.h; }
+
+// -- write the UVs ----------------------------------------------------------------
+let liveryTris = 0, inward = 0, fi = 0;
+const visUV = [];
+const stretch = new Map();   // key -> [uv area / 3d area] per face
 for (const mesh of liveryMeshes) {
   const kind = liveryKind(mesh.getName());
   for (const prim of mesh.listPrimitives()) {
@@ -701,79 +925,66 @@ for (const mesh of liveryMeshes) {
     const nt = I.length / 3;
     const pos = new Float32Array(nt * 9), nrm = new Float32Array(nt * 9), uv = new Float32Array(nt * 6);
     for (let t = 0; t < nt; t++) {
-      const v = [0, 1, 2].map((k) => I[t * 3 + k]);
+      const v = [I[t * 3], I[t * 3 + 1], I[t * 3 + 2]];
       const q = v.map((i) => [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]]);
-      const c = [0, 1, 2].map((a) => (q[0][a] + q[1][a] + q[2][a]) / 3);
+      const key = faceInfo[fi++];
+      const pc = key ? pieces.get(key) : null;
       let uvs;
-      // Which way the face looks: the winding's normal, turned to agree with
-      // the exported vertex normals where they disagree.
-      const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
-      const e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
-      let fn = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-      if (N) {
-        const mn = [0, 1, 2].map((ax) => (N[v[0] * 3 + ax] + N[v[1] * 3 + ax] + N[v[2] * 3 + ax]) / 3);
-        if (mn[0] * fn[0] + mn[1] * fn[1] + mn[2] * fn[2] < 0) fn = fn.map((x) => -x);
+      if (!pc) { uvs = [[-TEX_M, -TEX_M], [-TEX_M, -TEX_M], [-TEX_M, -TEX_M]]; inward++; }
+      else {
+        let raw;
+        if (key === "body skin") {
+          const c = triCentroid(q), hint = arcAt(c[0], c[1], c[2]).phi;
+          raw = q.map((p) => [BX1 - p[0], arcAt(p[0], p[1], p[2], hint).s - sMin]);
+        } else raw = q.map(pc.map);
+        uvs = raw.map(([a, b]) => [pc.x + (a - pc.lo[0]), pc.y + (b - pc.lo[1])]);
+        const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]], e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+        const a3 = Math.hypot(...cross3(e1, e2)) / 2;
+        const a2 = Math.abs((uvs[1][0] - uvs[0][0]) * (uvs[2][1] - uvs[0][1]) - (uvs[2][0] - uvs[0][0]) * (uvs[1][1] - uvs[0][1])) / 2;
+        if (a3 > 1e-7) (stretch.get(key) ?? stretch.set(key, []).get(key)).push([a2 / a3, a3]);
       }
-      // Only faces that look OUT carry the livery. Inner skins (the inside of
-      // the bodywork, an endplate's inboard face, a wing's underside) share
-      // their outer face's place on the map, so they would show the artwork
-      // mirrored. They get (-1, -1): no livery, the panel's own finish.
-      let inward;
-      if (kind === "body") {
-        const f = Math.min(NS - 1, Math.max(0, (c[0] - BX0) / DX)), i0 = Math.floor(f);
-        const zc = slices[i0].zcs;
-        inward = fn[1] * c[1] + fn[2] * (c[2] - zc) < 0;          // against the outward radial
-      } else if (kind === "endplate") {
-        inward = fn[1] * (c[1] >= 0 ? 1 : -1) < 0;                 // facing the centreline
-      } else {
-        inward = fn[2] < 0;                                         // a wing's underside
-      }
-      if (inward) {
-        uvs = [[-TEX_M, -TEX_M], [-TEX_M, -TEX_M], [-TEX_M, -TEX_M]];
-        report.liveryInward = (report.liveryInward ?? 0) + 1;
-      } else if (kind === "body") {
-        // The triangle's own angle decides which side of the underside cut
-        // all three corners go.
-        const hint = arcAt(c[0], c[1], c[2]).phi;
-        uvs = q.map((p) => [BODY.x + (BX1 - p[0]), BODY.y + (arcAt(p[0], p[1], p[2], hint).s - sMin)]);
-      } else {
-        const isl = islands.get(islandKey(kind, mesh.getName(), c));
-        uvs = q.map((p) => { const [a, b] = isl.map(p); return [isl.x + a, isl.y + b]; });
-      }
-      kindCount[kind] = (kindCount[kind] ?? 0) + 1;
       for (let k = 0; k < 3; k++) {
         pos.set(q[k], (t * 3 + k) * 3);
         if (N) nrm.set([N[v[k] * 3], N[v[k] * 3 + 1], N[v[k] * 3 + 2]], (t * 3 + k) * 3);
         uv[(t * 3 + k) * 2] = uvs[k][0] / TEX_M;
         uv[(t * 3 + k) * 2 + 1] = uvs[k][1] / TEX_M;
+        if (process.env.VISCHK && pc && faceVis[fi - 1]) visUV.push(uvs[k][0] / TEX_M, uvs[k][1] / TEX_M);
       }
     }
     liveryTris += nt;
     prim.getAttribute("POSITION").setArray(pos);
     if (N) prim.getAttribute("NORMAL").setArray(nrm);
     prim.setAttribute("TEXCOORD_0", out.createAccessor().setType("VEC2").setArray(uv).setBuffer(buffer));
-    // Its own copy of the material, so `join` below merges livery panels only
-    // with each other: joined with an untextured part of the same finish,
-    // the UVs are dropped.
     const mat = prim.getMaterial();
     if (mat) {
-      const key = "livery:" + mat.getName();
-      if (!matCache.has(key)) matCache.set(key, mat.clone().setName(mat.getName() + "-livery"));
-      prim.setMaterial(matCache.get(key));
+      const mk = "livery:" + mat.getName();
+      if (!matCache.has(mk)) matCache.set(mk, mat.clone().setName(mat.getName() + "-livery"));
+      prim.setMaterial(matCache.get(mk));
     }
     prim.setIndices(out.createAccessor().setType("SCALAR").setArray(Uint32Array.from({ length: nt * 3 }, (_, i) => i)).setBuffer(buffer));
   }
 }
-report.livery = { tris: liveryTris, kinds: kindCount, textureMetres: +TEX_M.toFixed(3), bodySkin: [+BODY.w.toFixed(3), +BODY.h.toFixed(3)], islands: [...islands.keys()] };
-// The layout, in texture fractions (0..1, v down), for the template: each
-// piece's box, and where the body's top centreline runs.
-const frac = (r) => [r.x / TEX_M, r.y / TEX_M, r.w / TEX_M, r.h / TEX_M];
+// Stretch: area-weighted, 1.0 = true scale. Report the spread per piece.
+const stretchReport = {};
+for (const [k, arr] of stretch) {
+  arr.sort((a, b) => a[0] - b[0]);
+  const tot = arr.reduce((s, x) => s + x[1], 0);
+  const q = (f) => { let acc = 0; for (const [r, a] of arr) { acc += a; if (acc >= f * tot) return +r.toFixed(2); } return +arr.at(-1)[0].toFixed(2); };
+  stretchReport[k] = [q(0.05), q(0.5), q(0.95)];
+}
+const used = [...pieces.values()].reduce((s, pc) => s + pc.w * pc.h, 0) / (TEX_M * TEX_M);
+if (process.env.VISCHK) (await import("node:fs")).writeFileSync("out/vis.bin", Buffer.from(new Float32Array(visUV).buffer));
+report.livery = { tris: liveryTris, inwardNoLivery: inward, innerSkin: hiddenFaces, pieces: pieces.size, textureMetres: +TEX_M.toFixed(3),
+  mmPerPx4096: +(TEX_M * 1000 / 4096).toFixed(2), boxFill: +used.toFixed(2), stretch_p5_p50_p95: stretchReport };
+const frac = (pc) => [pc.x / TEX_M, pc.y / TEX_M, pc.w / TEX_M, pc.h / TEX_M];
+const bodyPc = pieces.get("body skin");
 outScene.setExtras({ ...outScene.getExtras(), livery: {
   size: TEX_M,
-  layout: "unwrap",
-  topLineV: (BODY.y - sMin) / TEX_M,
-  views: { "body skin": frac(BODY), ...Object.fromEntries([...islands.values()].map((i) => [i.key, frac(i)])) },
+  layout: "unwrap-v2",
+  topLineV: (bodyPc.y + (0 - sMin) - 0) / TEX_M,
+  views: Object.fromEntries([...pieces.values()].map((pc) => [pc.key, frac(pc)])),
 } });
+
 if (process.env.TOP) {
   const rows = out.getRoot().listMeshes().map((m) => [m.listPrimitives().reduce((t, p) => t + p.getIndices().getCount() / 3, 0), m.getName()]);
   rows.sort((a, b) => b[0] - a[0]);

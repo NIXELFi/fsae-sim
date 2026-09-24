@@ -1,5 +1,6 @@
 # Headless Blender: build a ready-to-paint livery file from the sim's car.glb.
-#   blender -b --python make_paint_blend.py -- <car.glb> <template.png> <out.blend> <size>
+#   blender -b --python make_paint_blend.py -- <car.glb> <template.png> <out.blend> <size> [start.png]
+# With start.png (an existing livery on this layout) painting picks up from it.
 # Every mesh that carries the livery UV map (TEXCOORD_0) gets a material whose
 # colour is its own finish with the livery image laid over it by the image's
 # alpha -- exactly what the sim's shader does -- so painting in Texture Paint
@@ -21,8 +22,11 @@ car.rotation_euler = (math.radians(-90), 0, 0)
 for ob in roots:
     ob.parent = car
 
-livery = bpy.data.images.new("livery", width=size, height=size, alpha=True)
-livery.generated_color = (0, 0, 0, 0)
+if len(argv) > 4:
+    livery = bpy.data.images.load(argv[4]); livery.name = "livery"; livery.pack()
+else:
+    livery = bpy.data.images.new("livery", width=size, height=size, alpha=True)
+    livery.generated_color = (0, 0, 0, 0)
 livery.filepath_raw = "//livery.png"
 livery.file_format = "PNG"
 ref = bpy.data.images.load(template)

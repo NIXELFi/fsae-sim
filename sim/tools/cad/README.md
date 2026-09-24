@@ -54,8 +54,20 @@ the scene extras, `livery`):
   the surface, cut along the underside. The right side sits above the top
   centreline, upside down; the left side below it, upright. A stripe drawn
   straight down the image runs over the car unbroken.
-- wings (seen from above) and endplates (from the side they face) as their
-  own flat pieces underneath.
+- every wing element (front wing, rear wing, the small body wings) as an
+  UPPER and a LOWER piece, each flattened on that element's own best-fit
+  plane, span across, leading edge up: upper as seen from behind, lower as
+  seen from underneath. An element is sorted into surfaces by height over
+  its plane (a face is upper where nothing of the element lies above it),
+  so the hollow shells' inner skins get no paint.
+- endplates and the front wing's fences, each plate its own piece, outer
+  face only, seen from the side it faces.
+
+One scale for everything (about 0.9 mm per px at 4096), skyline-packed.
+Faces looking into the car (inner skins, inboard faces, a panel tucked under
+its neighbour) get UV (-1, -1): no livery, so nothing shows mirrored. The
+build report's `livery` block has per-piece stretch (5th/50th/95th
+percentile of UV area over surface area; 1 = true scale).
 
 A livery is `data/livery.png`: square PNG with alpha, any size. It is laid
 over those panels by its alpha; transparent leaves the carbon. No file (or
@@ -67,6 +79,19 @@ the team's CAD.
 7. `blender -b --python make_paint_blend.py -- out/car.glb out/livery/livery_template.png out/livery/SDM26_livery_paint.blend 4096`
    -- a Blender file to paint on the 3D car directly (Texture Paint mode;
    Image > Save As livery.png). Portable Blender 4.5 works.
+
+Checking and moving a livery between layouts:
+
+- `VISCHK=1 node build.mjs ...` also writes `out/vis.bin` (UVs of the faces
+  that see out); `node livery_uvdump.mjs out/car.glb out/uv.bin` then
+  `python livery_overlap.py out/uv.bin` (or `out/vis.bin` with the dump's
+  `.json` beside it) counts texels painted by two faces, per piece.
+- `node livery_uvpairs.mjs old.glb new.glb out/pairs.bin` then
+  `python livery_rebake.py old_livery.png out/pairs.bin new_livery.png 4096`
+  re-projects a painted livery onto a new layout, triangle by triangle, so
+  it lands on the car where it was.
+- `make_paint_blend.py` takes an optional 5th argument, a livery to start
+  the paint file from.
 
 `inspect.mjs` / `scan.mjs` dump a GLB's tree, sizes and misplaced parts.
 Paths in the scripts point at the scratch folder they were written in.

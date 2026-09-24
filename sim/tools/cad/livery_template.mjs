@@ -33,7 +33,8 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
   const S = SIZE;
   if (mode === "template") { g.fillStyle = "#ffffff"; g.fillRect(0, 0, S, S); }
   const NAMES0 = { left: "LEFT SIDE  (nose \u2190)", right: "RIGHT SIDE  (nose \u2192)", top: "TOP  (nose \u2190)", bottom: "BOTTOM  (nose \u2192)", front: "FRONT", rear: "REAR" };
-  const NAMES = layout === "unwrap" ? {
+  const unwrap = layout.startsWith("unwrap");
+  const NAMES = unwrap ? {
     "body skin": "BODY SKIN  (nose ←; right side upside down above the dashed top centreline, left side below)",
   } : NAMES0;
   const keys = Object.keys(views);
@@ -50,15 +51,19 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
         if ((i + j) % 4 === 0) { g.fillStyle = "#000"; g.font = `${Math.round(cell * S * 0.35)}px sans-serif`; g.fillText(String(n), gx * S + 4, gy * S + cell * S * 0.5); }
         n++;
       }
-      g.fillStyle = "rgba(255,255,255,0.9)"; g.font = `bold ${Math.round(h * S * 0.22)}px sans-serif`;
-      g.fillText(k.toUpperCase(), (x + w * 0.05) * S, (y + h * 0.6) * S);
+      g.fillStyle = "rgba(255,255,255,0.9)";
+      const fs = Math.min(h * S * 0.35, (w * S * 0.9) / (0.62 * k.length));
+      g.font = `bold ${Math.round(fs)}px sans-serif`;
+      g.fillText(k.toUpperCase(), (x + w * 0.05) * S, (y + h * 0.5) * S + fs * 0.35);
     }
     if (mode === "template") {
       g.strokeStyle = "#1a73e8"; g.lineWidth = Math.max(2, S / 1024);
       g.strokeRect(x * S, y * S, w * S, h * S);
       // In the margin above the frame, clear of the panels.
-      g.fillStyle = "#1a73e8"; g.font = `bold ${Math.round(S / 120)}px sans-serif`;
-      g.fillText(NAMES[k] ?? k.toUpperCase(), x * S + 4, y * S - S / 400);
+      const label = NAMES[k] ?? k.toUpperCase();
+      const fs = Math.min(S / 120, (w * S + 30) / (0.6 * label.length));
+      g.fillStyle = "#1a73e8"; g.font = `bold ${Math.round(fs)}px sans-serif`;
+      g.fillText(label, x * S + 2, y * S - S / 500);
     }
   }
   if (mode === "template" || mode === "test") {
@@ -69,7 +74,7 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
     g.stroke();
   }
   if (mode === "template") {
-    if (layout === "unwrap" && topLineV != null) {
+    if (unwrap && topLineV != null) {
       const [bx, , bw] = views["body skin"];
       g.save(); g.setLineDash([S / 150, S / 250]); g.strokeStyle = "#e8371a"; g.lineWidth = Math.max(2, S / 1500);
       g.beginPath(); g.moveTo(bx * S, topLineV * S); g.lineTo((bx + bw) * S, topLineV * S); g.stroke(); g.restore();
@@ -78,7 +83,7 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
     }
     // In the empty space to the right of the pieces.
     let rx = 0; for (const [x, , w] of Object.values(views)) rx = Math.max(rx, x + w);
-    const fx = layout === "unwrap" ? rx + 0.03 : views.front[0], fy = layout === "unwrap" ? 0.02 : views.top[1] + 0.01;
+    const fx = unwrap ? rx + 0.03 : views.front[0], fy = unwrap ? 0.02 : views.top[1] + 0.01;
     g.fillStyle = "#333"; g.font = `bold ${Math.round(S / 80)}px sans-serif`;
     g.fillText("SDM26 livery template", fx * S, fy * S + S / 60);
     g.fillStyle = "#555"; g.font = `${Math.round(S / 125)}px sans-serif`;
@@ -94,14 +99,21 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
       "Each view is drawn as you would see it standing",
       "there, so text reads correctly on both sides.",
       "",
-      ...(layout === "unwrap" ? [
+      ...(unwrap ? [
         "The body is unrolled: across the image is along",
         "the car, down the image is round it, measured on",
         "the surface. A stripe drawn straight down runs",
         "over the car unbroken, side to top to side.",
         "The cut is along the underside.",
-        "Wings are seen from above, endplates from the",
-        "side they face.",
+        "",
+        "Every wing element has its own UPPER and LOWER",
+        "piece, flattened on that element's own plane, span",
+        "across, leading edge up. UPPER is seen from behind",
+        "(car's left on the left); LOWER from underneath",
+        "(car's left on the right). Endplates are seen from",
+        "the side they face. Surfaces facing into the car",
+        "carry no livery.",
+        "Front wing E1a / E1b: the E1 element's two CAD parts.",
       ] : [
         "A panel belongs to the view it faces most; paint",
         "a stripe across a view edge in both views.",
