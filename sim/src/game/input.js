@@ -335,6 +335,14 @@ export class Input {
     }
     this.padIndex = g.index;
     this.padName = g.id;
+    // A wheel on the Gamepad API gets its preset too -- in a plain browser
+    // it is the only path there is. Without it the wheel profile's generic
+    // pedal guess (axes 1 and 2, resting at +1) reads a MOZA's pedals, which
+    // rest at -1, as full throttle AND full brake with nothing pressed.
+    // Not in the desktop shell: there the rig reads the base natively and
+    // applies the preset under DirectInput's name, and two names taking
+    // turns would re-apply it -- over the driver's calibration -- every boot.
+    if (!IN_SHELL && detectProfile(g.id) === "wheel") this.applyWheelPreset(gamepadProductName(g.id));
     // Pick a profile from the vendor string unless the driver has chosen one
     // by hand. The Gamepad API gives a free-form id and nothing else, so this
     // is pattern matching and will sometimes be wrong -- it only sets the
@@ -433,7 +441,10 @@ export class Input {
     const stamp = `${name}@${PRESET_VERSION}`;
     if (s.read("wheel", "wheel.presetApplied") === stamp) return null;
     const preset = presetFor(name);
-    for (const [path, value] of Object.entries(presetPaths(preset))) s.set("wheel", path, value);
+    // Rotation follows the mapping: under "match-car" the profile must say
+    // the car's lock to lock (358 deg for SDM26), not what the base ships at.
+    const ctx = { mapping: s.read("wheel", "wheel.mapping"), carRimHalfDeg: this.carRimHalfDeg };
+    for (const [path, value] of Object.entries(presetPaths(preset, ctx))) s.set("wheel", path, value);
     s.set("wheel", "wheel.presetApplied", stamp);
     this.lastPreset = preset;
     this.profile = s.active();
@@ -836,6 +847,18 @@ function padRank(id) {
     return 2;
   }
   return 1;
+}
+
+/** Running inside the Tauri shell (where the rig owns the wheel). */
+const IN_SHELL = typeof window !== "undefined" && !!window.__TAURI__;
+
+/**
+ * The product name inside a Gamepad API id. Chrome appends
+ * " (Vendor: 346e Product: 0004)" (or "(STANDARD GAMEPAD Vendor: ...)") on
+ * Windows; the preset stamp should not change because the browser did.
+ */
+export function gamepadProductName(id) {
+  return String(id || "").replace(/\s*\((?:STANDARD GAMEPAD\s*)?Vendor:[^)]*\)\s*$/i, "").trim() || String(id || "");
 }
 
 // NaN fails both comparisons and would pass straight through into the car.

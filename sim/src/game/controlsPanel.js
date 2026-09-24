@@ -13,7 +13,7 @@
 // produces is the only way to get full travel out of it.
 
 import { applyPedal, editableSettings } from "./controlProfiles.js";
-import { presetFor } from "./wheelPresets.js";
+import { matchCarRotationDeg, presetFor } from "./wheelPresets.js";
 import {
   ACTIONS, ACTION_GROUPS, BindingCapture, buttonLabel, buttonSlot,
   defaultKeys, ensureEscapeHatch, keyLabel, UNBOUND,
@@ -266,7 +266,7 @@ export class ControlsPanel {
 
     const sel = document.createElement("select");
     for (const [v, text] of [
-      ["match-car", `Match the car (${carRim} deg rim, lock to lock)`],
+      ["match-car", `Match the car (${2 * carRim} deg lock to lock, ${carRim} each way)`],
       ["scale-to-lock", "Scale my wheel's rotation to full lock"],
     ]) {
       const o = document.createElement("option");
@@ -297,6 +297,36 @@ export class ControlsPanel {
           `${(profile.wheel.rotationDeg / carRim).toFixed(1)}x slower than the real ` +
           `car's and the ratio is a fiction.`;
     box.append(el("small", "ctl-hint", explain));
+
+    // Under match-car the profile's rotation has exactly one right value.
+    // Say so in red when it is anything else, and make the fix one click --
+    // a slider with a 10-degree step could not even land on it.
+    if (profile.wheel.mapping === "match-car") {
+      const want = matchCarRotationDeg(this.input.carRimHalfDeg);
+      const have = profile.wheel.rotationDeg;
+      const row = el("div", "ctl-rotfix");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "secondary";
+      btn.textContent = `Set to ${want}°`;
+      btn.disabled = have === want;
+      btn.addEventListener("click", () => {
+        s.set(id, "wheel.rotationDeg", want);
+        this.input.refreshProfile();
+        this.onChange?.();
+        this.render();
+      });
+      row.append(btn);
+      if (have !== want) {
+        row.append(el("small", "ctl-hint ctl-warn",
+          `Wheel rotation is ${have} deg but this mapping needs ${want}. ` +
+          `The rim angle is read wrong until they match.`));
+      } else {
+        row.append(el("small", "ctl-hint", `Rotation is ${want} deg here. ` +
+          `Your wheel's software (Pit House, G HUB...) must say ${want} deg too.`));
+      }
+      box.append(row);
+    }
 
     const soft = checkbox("Soft lock beyond full steering", profile.wheel.softLock, (on) => {
       s.set(id, "wheel.softLock", on);
@@ -416,8 +446,11 @@ export class ControlsPanel {
     const base = st?.wheelName || this.input.padName;
     if (profile.kind === "wheel" && base) {
       const preset = presetFor(base);
+      const rot = profile.wheel.mapping === "match-car"
+        ? `set its rotation to ${matchCarRotationDeg(this.input.carRimHalfDeg)} deg in the vendor software (ships at ${preset.rotationDeg})`
+        : `${preset.rotationDeg} deg`;
       box.append(el("small", "ctl-hint",
-        `${preset.label}: rated ${preset.ratedNm} N.m, ${preset.rotationDeg} deg. ${preset.note}` +
+        `${preset.label}: rated ${preset.ratedNm} N.m, ${rot}. ${preset.note}` +
         (preset.verify ? " Pedal axes are a starting guess: press each pedal and watch the monitor." : "")));
     }
     box.append(el("small", "ctl-hint",

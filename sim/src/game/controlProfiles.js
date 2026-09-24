@@ -915,7 +915,8 @@ export function editableSettings(profile) {
           path: "wheel.rotationDeg",
           label: "Wheel rotation",
           unit: " deg",
-          min: 90, max: 1440, step: 10,
+          // Step 2, not 10: "match-car" needs exactly 358 for SDM26.
+          min: 90, max: 1440, step: 2,
           note: "Must match the setting in your wheel's driver software.",
         },
         {

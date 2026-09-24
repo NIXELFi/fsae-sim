@@ -785,6 +785,22 @@ console.log("\nWHEEL PRESETS");
     if (paths["forceFeedback.maxForceNm"] !== p.ratedNm) bad++;
   }
   check("every preset is well formed", bad, 0, 0, "");
+  // Under "match-car" (the default mapping) the rim is read as +-rotation/2,
+  // so a preset must write the car's lock to lock, not the base's 900.
+  const r5 = presetFor("MOZA R5 Base");
+  check("match-car preset writes 2 x rim half-lock", presetPaths(r5, { mapping: "match-car", carRimHalfDeg: 179 })["wheel.rotationDeg"], 358, 358, " deg");
+  check("default mapping is match-car for presets", presetPaths(r5)["wheel.rotationDeg"], 358, 358, " deg");
+  check("scale-to-lock preset keeps the base rotation", presetPaths(r5, { mapping: "scale-to-lock" })["wheel.rotationDeg"], 900, 900, " deg");
+  // A MOZA pedal rests at the bottom of its axis (-1): at rest the preset
+  // must read zero throttle and zero brake, full travel must read one.
+  const { applyPedal, PROFILES } = await import("../src/game/controlProfiles.js");
+  const r5p = presetPaths(r5);
+  const cal = (which) => ({ ...PROFILES.wheel.pedals[which], rawMin: r5p[`pedals.${which}.rawMin`], rawMax: r5p[`pedals.${which}.rawMax`] });
+  check("MOZA throttle at rest reads 0", applyPedal(cal("throttle"), -1), 0, 0, "");
+  check("MOZA brake at rest reads 0", applyPedal(cal("brake"), -1), 0, 0, "");
+  check("MOZA throttle at full travel reads 1", applyPedal(cal("throttle"), 1), 1, 1, "");
+  const { gamepadProductName } = await import("../src/game/input.js");
+  check("Gamepad API id reduces to the product name", gamepadProductName("MOZA R5 Base (Vendor: 346e Product: 0004)") === "MOZA R5 Base" ? 1 : 0, 1, 1, "");
 }
 
 // ----------------------------------------------------------- steering feel ---

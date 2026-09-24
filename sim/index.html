@@ -272,7 +272,9 @@
     font: 11px var(--mono); color: var(--dim); background: rgba(0,0,0,0.25); border-radius: 6px;
     padding: 8px 10px; margin: 6px 0; white-space: pre-wrap; max-height: 150px; overflow: auto;
   }
-  .ctl-warn { color: var(--bad); }
+  .ctl-warn, small.ctl-hint.ctl-warn { color: var(--bad); }
+  .ctl-rotfix { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 4px 0 6px; }
+  .ctl-rotfix small.ctl-hint { margin: 0; flex: 1 1 240px; }
   .ctl-reset { margin-top: 12px; }
 
   /* ---- bindings ----

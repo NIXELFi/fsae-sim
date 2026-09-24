@@ -150,13 +150,32 @@ export function defaultGainFor(ratedNm) {
 }
 
 /**
+ * The rotation a wheel must be set to, lock to lock, for the "match-car"
+ * mapping: twice the car's measured rim half-lock (179 deg for SDM26, so 358).
+ * Anything else scales the rim angle wrong -- `Input.wheelSteer` reads the
+ * axis as +-rotation/2 degrees.
+ */
+export function matchCarRotationDeg(carRimHalfDeg = 179) {
+  return Math.round(2 * (carRimHalfDeg || 179));
+}
+
+/**
  * The settings this preset would set on the wheel profile, as dotted paths.
  * Applied once per newly seen base; anything the driver has since changed is
  * left alone (see `Input.applyWheelPreset`).
+ *
+ * `rotationDeg` in the table is what the base SHIPS set to. Under "match-car"
+ * (the default mapping) the profile needs the car's rotation instead, and the
+ * driver software has to be set to the same number -- the preset's note and
+ * the controls panel both say so.
+ *
+ * @param {WheelPreset} preset
+ * @param {{mapping?: string, carRimHalfDeg?: number}} [ctx]
  */
-export function presetPaths(preset) {
+export function presetPaths(preset, ctx = {}) {
+  const matchCar = (ctx.mapping ?? "match-car") === "match-car";
   const out = {
-    "wheel.rotationDeg": preset.rotationDeg,
+    "wheel.rotationDeg": matchCar ? matchCarRotationDeg(ctx.carRimHalfDeg) : preset.rotationDeg,
     "axes.steer": preset.steerAxis,
     "forceFeedback.maxForceNm": preset.ratedNm,
     "forceFeedback.gain": defaultGainFor(preset.ratedNm),
