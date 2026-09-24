@@ -3157,14 +3157,28 @@ function loadParams() {
 
 // ---- toast: a short line at the bottom of the launch screen ---------------
 let toastTimer = 0;
-function toast(text, { error = false, ms = 2800 } = {}) {
+function toast(text, { error = false, ms = 2800, action = null } = {}) {
   const el = dom.toast;
   if (!el) return;
   el.textContent = text;
+  // An optional button (Undo): the toast takes the pointer only while it has one.
+  el.classList.toggle("has-action", !!action);
+  if (action) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "secondary toast-action";
+    b.textContent = action.label;
+    b.addEventListener("click", () => {
+      el.classList.remove("show", "has-action");
+      clearTimeout(toastTimer);
+      action.run();
+    });
+    el.append(" ", b);
+  }
   el.classList.toggle("error", error);
   el.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), ms);
+  toastTimer = setTimeout(() => el.classList.remove("show", "has-action"), ms);
 }
 
 function downloadText(name, text, mime) {
@@ -3456,6 +3470,15 @@ function selectTrackInMenu(dom, id) {
   syncSeedRow(dom);
 }
 
+/** The last course picked in the menu, per machine. Not written by launches. */
+const TRACK_KEY = "fsae-sim.track";
+function saveLastTrack(id) {
+  try { localStorage.setItem(TRACK_KEY, id); } catch { /* ignore */ }
+}
+function loadLastTrack() {
+  try { return localStorage.getItem(TRACK_KEY) ?? ""; } catch { return ""; }
+}
+
 function syncSeedRow(dom) {
   if (dom.seedRow) dom.seedRow.hidden = !isGeneratedChoice(dom.trackSel.value);
 }
@@ -3573,8 +3596,13 @@ async function boot() {
   renderSetupCard(dom.stagingSetupCard, { onChange: onStagingChange, onSlot: onSlot(dom.stagingSetupCard), model: isDesktop, onLook: setVisualCar });
   if (restored) dom.paramNote.textContent = `${restored} parameter${restored === 1 ? "" : "s"} restored from your last session.`;
 
-  dom.resetParams.addEventListener("click", () => {
-    for (const path of Object.keys(PARAM_DEFAULTS)) writeParam(path, PARAM_DEFAULTS[path]);
+  // Every parameter back to as-shipped is a lot to lose to one stray click:
+  // the first click arms it (the button says so for 4 s), the second does it,
+  // and an Undo on the toast puts every value back for 8 s after.
+  const RESET_LABEL = dom.resetParams.textContent;
+  let resetArmed = 0;
+  const applyParams = (values) => {
+    for (const [path, v] of Object.entries(values)) writeParam(path, v);
     saveParams();
     renderSpecSheet(dom.vehicle, onSheetChange);
     syncEditors(dom.quickSetup);
@@ -3582,8 +3610,31 @@ async function boot() {
     markEdited();
     game?.pushParams();
     game?.renderer.rebuildCar(SDM26);
-    dom.paramNote.textContent = "All parameters back to as-shipped.";
     updateSession();
+  };
+  dom.resetParams.addEventListener("click", () => {
+    if (!resetArmed) {
+      dom.resetParams.textContent = "Click again to reset every parameter";
+      dom.resetParams.classList.add("danger-armed");
+      resetArmed = setTimeout(() => {
+        resetArmed = 0;
+        dom.resetParams.textContent = RESET_LABEL;
+        dom.resetParams.classList.remove("danger-armed");
+      }, 4000);
+      return;
+    }
+    clearTimeout(resetArmed);
+    resetArmed = 0;
+    dom.resetParams.textContent = RESET_LABEL;
+    dom.resetParams.classList.remove("danger-armed");
+    const before = {};
+    for (const path of Object.keys(PARAM_DEFAULTS)) before[path] = readParam(path);
+    applyParams(PARAM_DEFAULTS);
+    dom.paramNote.textContent = "All parameters back to as-shipped.";
+    toast("All parameters back to as-shipped.", {
+      ms: 8000,
+      action: { label: "Undo", run: () => { applyParams(before); dom.paramNote.textContent = "Reset undone."; } },
+    });
   });
   const setupUi = wireSetupFiles(tabs, onSheetChange);
 
@@ -3609,6 +3660,16 @@ async function boot() {
     dom.loadNote.textContent = String(err.message ?? err);
     dom.loadNote.classList.add("error");
     return;
+  }
+
+  // The course the driver last picked comes back -- unless a launcher (URL
+  // `?track=` / `--track`, or a replay to open) is choosing it this time.
+  {
+    const q = new URLSearchParams(location.search);
+    const shell = isDesktop ? await launchOptions() : null;
+    const launched = q.get("track") || q.get("replay") || shell?.track || shell?.replay;
+    const saved = loadLastTrack();
+    if (!launched && saved && isTrackId(saved)) selectTrackInMenu(dom, saved);
   }
 
   dom.startBtn.disabled = true;
@@ -3686,20 +3747,22 @@ async function boot() {
   };
   // The seed box only means something for a generated course; the selector
   // shows and hides it, and either a new seed or a new selection reloads.
+  // The driver's own pick is remembered (see loadLastTrack at boot).
+  const pickCourse = () => { saveLastTrack(selectedTrackId(dom)); return loadCourse(); };
   const seedChanged = () => {
     const clean = normaliseSeed(dom.seed.value);
     if (!clean) dom.seed.value = randomSeed();
     else if (clean !== dom.seed.value) dom.seed.value = clean;
-    loadCourse();
+    pickCourse();
   };
   dom.trackSel.addEventListener("change", () => {
     syncSeedRow(dom);
     if (isGeneratedChoice(dom.trackSel.value) && !normaliseSeed(dom.seed.value)) dom.seed.value = randomSeed();
-    loadCourse();
+    pickCourse();
   });
   dom.seed?.addEventListener("change", seedChanged);
   dom.seed?.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); dom.seed.blur(); } });
-  dom.seedNew?.addEventListener("click", () => { dom.seed.value = randomSeed(); loadCourse(); });
+  dom.seedNew?.addEventListener("click", () => { dom.seed.value = randomSeed(); pickCourse(); });
   syncSeedRow(dom);
   loadCourseFromSelect = loadCourse;
 

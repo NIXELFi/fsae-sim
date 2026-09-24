@@ -230,6 +230,13 @@ export class ReplayPanel {
       ? when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
       : "";
 
+    // A theoretical best is the sum of the best sectors, so it can never be
+    // slower than a lap actually driven; one that reads a thousandth over
+    // the best is the sectors' rounding showing. Display only.
+    const theoretical = st.theoreticalBestS != null && st.bestLapS != null
+      ? Math.min(st.theoreticalBestS, st.bestLapS)
+      : st.theoreticalBestS;
+
     this.root.innerHTML = `
       <div class="rp-root">
         <header class="rp-head">
@@ -240,7 +247,7 @@ export class ReplayPanel {
           </div>
           <div class="rp-headline">
             <div><span>Best</span><b>${st.bestLapS != null ? fmt(st.bestLapS) : "--.---"}</b></div>
-            <div><span>Theoretical</span><b>${st.theoreticalBestS != null ? fmt(st.theoreticalBestS) : "--.---"}</b></div>
+            <div><span>Theoretical</span><b>${theoretical != null ? fmt(theoretical) : "--.---"}</b></div>
             <div><span>Cones</span><b>${st.totalCones ?? 0}</b></div>
             <div><span>Off course</span><b>${st.totalOffCourse ?? 0}</b></div>
             <div><span>Peak lat</span><b>${(st.peakLatG ?? 0).toFixed(2)} g</b></div>
@@ -259,7 +266,7 @@ export class ReplayPanel {
 
         <aside class="rp-side rp-left" data-panel="left">
           <div class="rp-side-head">
-            <b>Live</b>
+            <b>At playhead</b>
             <button class="rp-roll" data-roll="left" title="Roll this panel up">&#9650;</button>
           </div>
           <div class="rp-bars">

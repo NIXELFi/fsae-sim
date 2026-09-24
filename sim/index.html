@@ -221,6 +221,7 @@
   .qs-grid table { margin-bottom: 0; }
   .car-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px 26px; }
   .checks { display: grid; gap: 8px; }
+  .audio-switch { margin-bottom: 16px; }
   .check {
     display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start;
     padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius);
@@ -398,6 +399,9 @@
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #toast.error { border-color: var(--bad); }
+  #toast.has-action { pointer-events: auto; }
+  #toast .toast-action { margin-left: 10px; padding: 3px 10px; font-size: 12px; }
+  #resetParams.danger-armed { border-color: var(--bad); color: var(--bad); }
 
   /* ---------------- vehicle model / parameter provenance ---------------- */
   .veh-head { display: flex; gap: 26px; flex-wrap: wrap; align-items: flex-start; }
@@ -1095,9 +1099,7 @@
                 <label class="check"><input type="checkbox" id="abs">
                   <span><b>ABS</b><small>Releases brake pressure on lockup.</small></span></label>
                 <label class="check"><input type="checkbox" id="auto">
-                  <span><b>Automatic gearbox</b><small>Shifts at the torque crossover from the CFD sweep.</small></span></label>
-                <label class="check"><input type="checkbox" id="sound" checked>
-                  <span><b>Engine audio</b><small>Physical exhaust model; levels are in the Audio tab.</small></span></label>
+                  <span><b>Automatic gearbox</b><small>Shifts at the torque crossover of the measured dyno curve.</small></span></label>
               </div>
             </div>
             <div>
@@ -1144,6 +1146,11 @@
 
         <!-- ============ Audio ============ -->
         <div class="pane" data-pane="audio" role="tabpanel">
+          <!-- Not a driver aid: it sat in that list and read as one. -->
+          <div class="checks audio-switch">
+            <label class="check"><input type="checkbox" id="sound" checked>
+              <span><b>Engine audio</b><small>Physical exhaust model; the levels are below.</small></span></label>
+          </div>
           <div id="audioLevels"></div>
         </div>
 
@@ -1210,7 +1217,7 @@
         <dt>Aids</dt><dd id="sAids"><span class="off">none</span></dd>
         <dt>Throttle</dt><dd id="sEtc"><span class="off">-</span></dd>
         <dt>Controls</dt><dd id="sControls"><b>-</b></dd>
-        <dt>Pad</dt><dd><span id="padStatus">not detected</span></dd>
+        <dt>Input device</dt><dd><span id="padStatus">not detected</span></dd>
         <dt>Driver</dt><dd id="sDriver"><span class="driver-pick"><input id="sDriverInput" type="text" maxlength="64" placeholder="Your name" autocomplete="off" aria-label="Driver name"><select id="sDriverRecent" aria-label="Recent drivers" hidden></select></span><span class="driver-notes"></span></dd>
         <dt>Logging</dt><dd id="sRecording"><b>on</b></dd>
       </dl>
