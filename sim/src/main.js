@@ -985,6 +985,32 @@ class Game {
     return d;
   }
 
+  /**
+   * Is the wheel's force feedback expected and not happening? Polled from
+   * the shell every ~2 s while driving (desktop only), so a base that drops
+   * out mid-run -- a Pit House click stealing it, a USB hiccup -- says so on
+   * the HUD instead of just going limp. Null when all is well or when there
+   * is nothing to expect (a pad, FFB switched off, a browser).
+   */
+  pollRigHealth() {
+    if (!isDesktop || !this.useNative) { this.rigAlert = null; return; }
+    const prof = this.input.profile;
+    if (prof.kind !== "wheel" || !prof.forceFeedback?.enabled) { this.rigAlert = null; return; }
+    const now = performance.now();
+    if (!this._rigPollAt || now - this._rigPollAt > 2000) {
+      this._rigPollAt = now;
+      rigNative.status().then((st) => {
+        this.rigState = st;
+        const why = !st.running ? "rig stopped"
+          : !st.ffbSupported ? "not supported here"
+          : !st.wheelPresent ? (st.wheelError || "no wheel")
+          : st.ffbActive === false ? (st.wheelError || "effect not running")
+          : null;
+        this.rigAlert = why ? `FFB OFF: ${String(why).slice(0, 60).toUpperCase()}` : null;
+      }).catch(() => {});
+    }
+  }
+
   update(dt) {
     this.lastDt = dt;
     // Before any of the early returns below: pausing, opening the throttle-map
@@ -1591,6 +1617,7 @@ class Game {
     const last = t.laps.length ? t.laps[t.laps.length - 1] : null;
     // The chip stays until the driver is away on the next run.
     if (this.notSaved && t.state === "running" && !this.paused) this.notSaved = null;
+    if (!this.paused) this.pollRigHealth();
     // Which dash the driver is actually looking at.
     //
     // From the cockpit the real one is on the scuttle in front of them, and a
@@ -1642,6 +1669,7 @@ class Game {
       lapInvalid: t.state === "running" && t.lapInvalid,
       hold: this.holdProgress(),
       notSaved: this.notSaved,
+      rigAlert: this.rigAlert ?? null,
       paused: this.paused,
       tractionControl: this.assists.traction,
       sectors: this.liveSectors(),
@@ -4374,6 +4402,9 @@ async function boot() {
         console.error("frame error", err);
         dom.loadNote.textContent = `Something went wrong in the game loop: ${err.message ?? err}`;
         dom.loadNote.classList.add("error");
+        // The load note lives on the home screen, which is hidden while
+        // driving -- the one time this matters. Say it where it is seen.
+        toast(`Something went wrong in the game loop: ${err.message ?? err}`, { error: true, ms: 12000 });
       }
       if (frameErrors > 300) return; // hopeless; stop burning the CPU
     }

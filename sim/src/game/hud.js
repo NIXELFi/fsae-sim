@@ -1357,11 +1357,13 @@ export class Hud {
   /**
    * Persistent red chips at the top centre: LAP INVALID from the excursion
    * until the lap ends, NOT SAVED from a run that was not filed until the
-   * next one leaves the line. Beside the delta when it is up (invalid to its
+   * next one leaves the line, FFB OFF while the rig reports the wheel's
+   * force feedback down. Beside the delta when it is up (invalid to its
    * right, not-saved to its left), otherwise in a row where it would be.
    */
   statusChips(ctx, W, s, besideDelta) {
     const chips = [];
+    if (s.rigAlert) chips.push({ text: s.rigAlert, side: -1 });
     if (s.notSaved) chips.push({ text: s.notSaved, side: -1 });
     if (s.lapInvalid) chips.push({ text: "LAP INVALID", side: 1 });
     if (!chips.length) return;
@@ -1370,12 +1372,16 @@ export class Hud {
     for (const c of chips) c.w = ctx.measureText(c.text).width + padX * 2;
     const deltaHalf = 95, gap = 8;
     let rowX = W / 2 - (chips.reduce((a, c) => a + c.w, 0) + gap * (chips.length - 1)) / 2;
+    // Beside the delta: left chips stack outward to the left, right ones to the right.
+    let leftX = W / 2 - deltaHalf - gap, rightX = W / 2 + deltaHalf + gap;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     for (const c of chips) {
       let x;
-      if (besideDelta) x = c.side < 0 ? W / 2 - deltaHalf - gap - c.w : W / 2 + deltaHalf + gap;
-      else { x = rowX; rowX += c.w + gap; }
+      if (besideDelta) {
+        if (c.side < 0) { x = leftX - c.w; leftX = x - gap; }
+        else { x = rightX; rightX += c.w + gap; }
+      } else { x = rowX; rowX += c.w + gap; }
       ctx.fillStyle = "rgba(120,14,10,0.82)";
       roundRect(ctx, x, y, c.w, h, 8);
       ctx.fill();
