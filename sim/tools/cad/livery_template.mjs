@@ -27,7 +27,7 @@ for (const mesh of doc.getRoot().listMeshes()) for (const p of mesh.listPrimitiv
 console.log("livery triangles", segs.length, "views", Object.keys(views).join(","));
 const b = await chromium.launch();
 const page = await b.newPage();
-const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, topLineV, layout }) => {
+const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, topLineV, topLine, layout }) => {
   const c = document.createElement("canvas"); c.width = c.height = SIZE;
   const g = c.getContext("2d");
   const S = SIZE;
@@ -74,7 +74,14 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
     g.stroke();
   }
   if (mode === "template") {
-    if (unwrap && topLineV != null) {
+    if (unwrap && topLine && topLine.length > 1) {
+      // The body's top centreline, where the relaxed unwrap put it.
+      g.save(); g.setLineDash([S / 150, S / 250]); g.strokeStyle = "#e8371a"; g.lineWidth = Math.max(2, S / 1500);
+      g.beginPath(); topLine.forEach(([u, v], i) => (i ? g.lineTo(u * S, v * S) : g.moveTo(u * S, v * S))); g.stroke(); g.restore();
+      const [u, v] = topLine.at(-1);
+      g.fillStyle = "#e8371a"; g.font = `bold ${Math.round(S / 140)}px sans-serif`;
+      g.fillText("TOP CENTRELINE", u * S - S / 9, v * S - S / 300);
+    } else if (unwrap && topLineV != null) {
       const [bx, , bw] = views["body skin"];
       g.save(); g.setLineDash([S / 150, S / 250]); g.strokeStyle = "#e8371a"; g.lineWidth = Math.max(2, S / 1500);
       g.beginPath(); g.moveTo(bx * S, topLineV * S); g.lineTo((bx + bw) * S, topLineV * S); g.stroke(); g.restore();
@@ -100,11 +107,11 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
       "there, so text reads correctly on both sides.",
       "",
       ...(unwrap ? [
-        "The body is unrolled: across the image is along",
-        "the car, down the image is round it, measured on",
-        "the surface. A stripe drawn straight down runs",
-        "over the car unbroken, side to top to side.",
-        "The cut is along the underside.",
+        "The body is unrolled round the car and relaxed so",
+        "every face keeps its true shape: across is roughly",
+        "along the car, down is round it (right side upside",
+        "down above the dashed top centreline, left side",
+        "below). The cut is along the underside.",
         "",
         "Every wing element has its own UPPER and LOWER",
         "piece, flattened on that element's own plane, span",
@@ -122,7 +129,7 @@ const draw = async (mode) => page.evaluate(({ SIZE, views, segs, mode, meters, t
     lines.forEach((t, i) => g.fillText(t, fx * S, fy * S + S / 30 + i * S / 95));
   }
   return c.toDataURL("image/png");
-}, { SIZE, views, segs, mode, meters: extras.livery.size, topLineV: extras.livery.topLineV ?? null, layout: extras.livery.layout ?? "views" });
+}, { SIZE, views, segs, mode, meters: extras.livery.size, topLineV: extras.livery.topLineV ?? null, topLine: extras.livery.topLine ?? null, layout: extras.livery.layout ?? "views" });
 for (const [mode, name] of [["template", "livery_template.png"], ["blank", "livery_blank.png"], ["test", "livery_test.png"]]) {
   const url = await draw(mode);
   fs.writeFileSync(`${outDir}/${name}`, Buffer.from(url.split(",")[1], "base64"));

@@ -49,11 +49,16 @@ Sources live in the team vault (Helios, `SDM27/Helios/Sim`):
 `build.mjs` UNWRAPS the painted bodywork onto one square texture (layout in
 the scene extras, `livery`):
 
-- the body skin -- nose, side panels, cowl -- as one piece: across the image
-  is along the car (nose left), down the image is round it, measured along
-  the surface, cut along the underside. The right side sits above the top
-  centreline, upside down; the left side below it, upright. A stripe drawn
-  straight down the image runs over the car unbroken.
+- the body skin -- nose, side panels, cowl -- as one piece: first unrolled
+  (across the image is along the car, nose left; down is round it, measured
+  along the surface, cut along the underside; the right side above the top
+  centreline, upside down, the left below it, upright), then relaxed
+  as-rigid-as-possible so every face keeps its true shape -- a sidepod's
+  leading face or the step from the cockpit side onto the sidepod is no
+  longer squashed -- with a term that keeps the sides level (text painted
+  level on the template sits level on the car). The report's
+  `bodySideTiltDeg_p50_p90` says how level. The template draws the top
+  centreline where it lands.
 - every wing element (front wing, rear wing, the small body wings) as an
   UPPER and a LOWER piece, each flattened on that element's own best-fit
   plane, span across, leading edge up: upper as seen from behind, lower as
@@ -90,6 +95,11 @@ Checking and moving a livery between layouts:
   `python livery_rebake.py old_livery.png out/pairs.bin new_livery.png 4096`
   re-projects a painted livery onto a new layout, triangle by triangle, so
   it lands on the car where it was.
+- `livery_stickers.py` does the same but carries compact artwork (logos,
+  text) as flat stickers: same spot on the car and physical size, laid level
+  on the new layout, nudged onto side-facing panel (`--side`, from
+  `livery_sidemask.mjs`) -- so a logo drawn on a distorted old layout comes
+  out undistorted. Stripes that follow the bodywork are re-projected.
 - `make_paint_blend.py` takes an optional 5th argument, a livery to start
   the paint file from.
 

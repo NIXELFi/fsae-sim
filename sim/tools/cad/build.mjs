@@ -807,6 +807,145 @@ const plateLayers = new Map();
     plateLayers.set(k, layers);
   }
 }
+// -- relax the body skin: as-rigid-as-possible -----------------------------------
+// The station-by-station unroll is exact only where the skin runs along the
+// car. A face that looks forward or back (a sidepod's leading face, the step
+// from the cockpit side down onto the sidepod) has almost no length along x,
+// so the unroll squashes it to a sliver and shears its neighbours. Starting
+// from the unroll (so the layout stays where it was), let every triangle
+// take back its true shape: alternate fitting each face's best rotation
+// (local) and a least-squares solve for the vertices (global), with a faint
+// pull to the start so the piece doesn't drift. Vertices are shared across a
+// face edge only where the unroll gave them the same place: the underside
+// cut stays cut.
+let bodySideTilt = null;
+const ARAP_ITERS = +(process.env.ARAP_ITERS ?? 30);
+function relaxBody(faceUV, faceQ, faceN) {
+  const vid = new Map(), U = [], V = [], faces = [];
+  const idOf = (p, uv) => {
+    const k = p.map((x) => Math.round(x * 1e4)).join(",") + "|" + uv.map((x) => Math.round(x * 500)).join(",");
+    if (!vid.has(k)) { vid.set(k, U.length); U.push(uv[0]); V.push(uv[1]); }
+    return vid.get(k);
+  };
+  // The unroll's handedness: seen from outside, is a face's UV copy turned
+  // the same way or mirrored? (It is one or the other for the whole skin;
+  // take the majority, as squashed faces can come out either way.)
+  const areaUV = (uv) => (uv[1][0] - uv[0][0]) * (uv[2][1] - uv[0][1]) - (uv[2][0] - uv[0][0]) * (uv[1][1] - uv[0][1]);
+  const outwardCCW = (q, f) => Math.sign(dot3(cross3(q[1].map((x, a) => x - q[0][a]), q[2].map((x, a) => x - q[0][a])), faceN.get(f)));
+  let vote = 0;
+  for (const [f, uv] of faceUV) vote += Math.sign(areaUV(uv)) * outwardCCW(faceQ.get(f), f);
+  const hand = vote >= 0 ? 1 : -1;
+  for (const [f, uv] of faceUV) {
+    const q = faceQ.get(f), ids = [0, 1, 2].map((k) => idOf(q[k], uv[k]));
+    const mirror = hand * outwardCCW(q, f) < 0 ? -1 : 1;
+    // The face in its own plane: p0 at the origin, p1 on the x axis.
+    const e1 = q[1].map((x, a) => x - q[0][a]), e2 = q[2].map((x, a) => x - q[0][a]);
+    const l1 = Math.hypot(...e1), cr = Math.hypot(...cross3(e1, e2));
+    if (l1 < 1e-7 || cr < 1e-10) continue;
+    const P = [[0, 0], [l1, 0], [dot3(e1, e2) / l1, mirror * cr / l1]];
+    // Cotangent weights, one per edge (i, j), from the angle opposite it.
+    const cot = (a, b, c) => { const u = [P[b][0] - P[a][0], P[b][1] - P[a][1]], v = [P[c][0] - P[a][0], P[c][1] - P[a][1]]; return (u[0] * v[0] + u[1] * v[1]) / Math.abs(u[0] * v[1] - u[1] * v[0]); };
+    const E = [[0, 1, cot(2, 0, 1)], [1, 2, cot(0, 1, 2)], [2, 0, cot(1, 2, 0)]].map(([i, j, w]) => [i, j, Math.min(10, Math.max(0.01, w))]);
+    faces.push({ f, ids, P, E });
+  }
+  const n = U.length;
+  // The system matrix doesn't change between iterations: build it once.
+  const rows = Array.from({ length: n }, () => new Map());
+  let diagMean = 0;
+  for (const { ids, E } of faces) for (const [i, j, w] of E) {
+    const a = ids[i], b = ids[j];
+    rows[a].set(a, (rows[a].get(a) ?? 0) + w); rows[b].set(b, (rows[b].get(b) ?? 0) + w);
+    rows[a].set(b, (rows[a].get(b) ?? 0) - w); rows[b].set(a, (rows[b].get(a) ?? 0) - w);
+  }
+  for (let i = 0; i < n; i++) diagMean += rows[i].get(i) ?? 0;
+  const PULL = +(process.env.ARAP_PULL ?? 1e-2) * (diagMean / n);
+  const U0 = U.slice(), V0 = V.slice();
+  for (let i = 0; i < n; i++) rows[i].set(i, (rows[i].get(i) ?? 0) + PULL);
+  // Keep the sides level: on a face that looks sideways, the car's x axis
+  // should run straight across the image (no change in v along it), so a
+  // line of text painted level on the template sits level on the car. A
+  // soft term, only in the v solve.
+  const LEVEL = +(process.env.ARAP_LEVEL ?? 1) * (diagMean / n);
+  const rowsV = rows.map((m) => new Map(m));
+  let areaMean = 0; for (const { f } of faces) { const q = faceQ.get(f); areaMean += Math.hypot(...cross3(q[1].map((v, a) => v - q[0][a]), q[2].map((v, a) => v - q[0][a]))) / 2; }
+  areaMean /= faces.length || 1;
+  for (const { f, ids } of faces) {
+    const q = faceQ.get(f), nn = unit(faceN.get(f)), side = nn[1] * nn[1];
+    if (side < 0.25) continue;
+    const e1 = q[1].map((v, a) => v - q[0][a]), e2 = q[2].map((v, a) => v - q[0][a]);
+    const g11 = dot3(e1, e1), g12 = dot3(e1, e2), g22 = dot3(e2, e2), det = g11 * g22 - g12 * g12;
+    if (det < 1e-14) continue;
+    const a = (g22 * e1[0] - g12 * e2[0]) / det, b = (g11 * e2[0] - g12 * e1[0]) / det;
+    const len = Math.hypot(a, b) || 1;
+    const coef = [(-a - b) / len, a / len, b / len], w = LEVEL * side * (Math.sqrt(det) / 2) / areaMean;
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      const m = rowsV[ids[r]]; m.set(ids[c], (m.get(ids[c]) ?? 0) + w * coef[r] * coef[c]);
+    }
+  }
+  const pack = (rs) => rs.map((m) => [Int32Array.from(m.keys()), Float64Array.from(m.values())]);
+  const RU = pack(rows), RV = pack(rowsV);
+  let R = RU;
+  const mul = (x, y) => { for (let i = 0; i < n; i++) { const [c, w] = R[i]; let s = 0; for (let k = 0; k < c.length; k++) s += w[k] * x[c[k]]; y[i] = s; } };
+  const cg = (x, b) => {   // conjugate gradients, warm-started
+    const r = new Float64Array(n), p = new Float64Array(n), Ap = new Float64Array(n);
+    mul(x, Ap); let rr = 0;
+    for (let i = 0; i < n; i++) { r[i] = b[i] - Ap[i]; p[i] = r[i]; rr += r[i] * r[i]; }
+    const tol = 1e-20 * n;
+    for (let it = 0; it < 400 && rr > tol; it++) {
+      mul(p, Ap); let pAp = 0; for (let i = 0; i < n; i++) pAp += p[i] * Ap[i];
+      const a = rr / pAp; let rr2 = 0;
+      for (let i = 0; i < n; i++) { x[i] += a * p[i]; r[i] -= a * Ap[i]; rr2 += r[i] * r[i]; }
+      const beta = rr2 / rr; rr = rr2;
+      for (let i = 0; i < n; i++) p[i] = r[i] + beta * p[i];
+    }
+  };
+  const x = Float64Array.from(U), y = Float64Array.from(V);
+  for (let iter = 0; iter < ARAP_ITERS; iter++) {
+    const bx = Float64Array.from(U0, (u) => u * PULL), by = Float64Array.from(V0, (v) => v * PULL);
+    for (const { ids, P, E } of faces) {
+      // Local: the rotation that best maps the face's true edges onto its
+      // current UV edges (never a reflection).
+      let s00 = 0, s01 = 0, s10 = 0, s11 = 0;
+      for (const [i, j, w] of E) {
+        const du = x[ids[i]] - x[ids[j]], dv = y[ids[i]] - y[ids[j]], px = P[i][0] - P[j][0], py = P[i][1] - P[j][1];
+        s00 += w * du * px; s01 += w * du * py; s10 += w * dv * px; s11 += w * dv * py;
+      }
+      const th = Math.atan2(s10 - s01, s00 + s11), c = Math.cos(th), s = Math.sin(th);
+      for (const [i, j, w] of E) {
+        const px = P[i][0] - P[j][0], py = P[i][1] - P[j][1], rx = c * px - s * py, ry = s * px + c * py;
+        bx[ids[i]] += w * rx; by[ids[i]] += w * ry; bx[ids[j]] -= w * rx; by[ids[j]] -= w * ry;
+      }
+    }
+    R = RU; cg(x, bx); R = RV; cg(y, by);   // global
+  }
+  for (const { f, ids } of faces) faceUV.set(f, ids.map((i) => [x[i], y[i]]));
+  // How level the sides stay: on faces that look sideways, the angle the
+  // car's x axis makes with the image's across. Text painted level on the
+  // template tilts on the car by this much.
+  const tilts = [];
+  for (const { f } of faces) {
+    const q = faceQ.get(f), nn = unit(faceN.get(f)); if (Math.abs(nn[1]) < 0.8) continue;
+    const uv = faceUV.get(f), e1 = q[1].map((v, a) => v - q[0][a]), e2 = q[2].map((v, a) => v - q[0][a]);
+    // Solve [e1 e2] [a b]^T ~ x-hat in the face plane (least squares), carry to UV.
+    const g11 = dot3(e1, e1), g12 = dot3(e1, e2), g22 = dot3(e2, e2), r1 = e1[0], r2 = e2[0], det = g11 * g22 - g12 * g12;
+    if (det < 1e-14) continue;
+    const a = (g22 * r1 - g12 * r2) / det, b = (g11 * r2 - g12 * r1) / det;
+    const du = a * (uv[1][0] - uv[0][0]) + b * (uv[2][0] - uv[0][0]), dv = a * (uv[1][1] - uv[0][1]) + b * (uv[2][1] - uv[0][1]);
+    tilts.push([Math.abs(Math.atan2(dv, -du)) * 180 / Math.PI, Math.sqrt(det) / 2]);
+  }
+  tilts.sort((p, q) => p[0] - q[0]);
+  const tot = tilts.reduce((s, t) => s + t[1], 0), pct = (fr) => { let acc = 0; for (const [d, w] of tilts) { acc += w; if (acc >= fr * tot) return +d.toFixed(1); } return 0; };
+  bodySideTilt = [pct(0.5), pct(0.9)];
+  // The top centreline, where it lands: the relaxed spots of the skin's
+  // vertices on y = 0, on top.
+  const top = [];
+  for (const [f, uv] of faceUV) faceQ.get(f).forEach((p, k) => {
+    if (Math.abs(p[1]) < 0.002 && arcAt(p[0], p[1], p[2]).phi > -Math.PI / 2 && arcAt(p[0], p[1], p[2]).phi < Math.PI / 2) top.push(uv[k]);
+  });
+  top.sort((a, b) => a[0] - b[0]);
+  return top;
+}
+const bodyFaceUV = new Map(), bodyFaceQ = new Map(), bodyFaceN = new Map();
 const pieces = new Map();   // key -> { key, lo:[u,v], hi:[u,v], map(p) -> [u, v] in metres }
 const faceInfo = [], faceVis = [];        // per livery face, in forEachTri order: { key | null }
 function pieceFor(key, map) {
@@ -861,10 +1000,17 @@ forEachTri((kind, mesh, prim, t, q, fn) => {
   let uvs;
   if (key === "body skin") {
     const hint = arcAt(c[0], c[1], c[2]).phi;
-    uvs = q.map((p) => [BX1 - p[0], arcAt(p[0], p[1], p[2], hint).s - sMin]);
+    bodyFaceUV.set(faceInfo.length - 1, q.map((p) => [BX1 - p[0], arcAt(p[0], p[1], p[2], hint).s - sMin]));
+    bodyFaceQ.set(faceInfo.length - 1, q); bodyFaceN.set(faceInfo.length - 1, fn);
+    return;   // bounds after the relaxation
   } else uvs = q.map(pc.map);
   for (const [u, v] of uvs) { pc.lo[0] = Math.min(pc.lo[0], u); pc.lo[1] = Math.min(pc.lo[1], v); pc.hi[0] = Math.max(pc.hi[0], u); pc.hi[1] = Math.max(pc.hi[1], v); }
 });
+const bodyTopLine = relaxBody(bodyFaceUV, bodyFaceQ, bodyFaceN);
+{
+  const pc = pieces.get("body skin");
+  for (const uv of bodyFaceUV.values()) for (const [u, v] of uv) { pc.lo[0] = Math.min(pc.lo[0], u); pc.lo[1] = Math.min(pc.lo[1], v); pc.hi[0] = Math.max(pc.hi[0], u); pc.hi[1] = Math.max(pc.hi[1], v); }
+}
 // Drop slivers: a piece under 2 cm^2 is a CAD edge, not a paintable surface.
 for (const [k, pc] of pieces) if (pc.area3 < 2e-4) { pieces.delete(k); }
 
@@ -933,10 +1079,8 @@ for (const mesh of liveryMeshes) {
       if (!pc) { uvs = [[-TEX_M, -TEX_M], [-TEX_M, -TEX_M], [-TEX_M, -TEX_M]]; inward++; }
       else {
         let raw;
-        if (key === "body skin") {
-          const c = triCentroid(q), hint = arcAt(c[0], c[1], c[2]).phi;
-          raw = q.map((p) => [BX1 - p[0], arcAt(p[0], p[1], p[2], hint).s - sMin]);
-        } else raw = q.map(pc.map);
+        if (key === "body skin") raw = bodyFaceUV.get(fi - 1);
+        else raw = q.map(pc.map);
         uvs = raw.map(([a, b]) => [pc.x + (a - pc.lo[0]), pc.y + (b - pc.lo[1])]);
         const e1 = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]], e2 = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
         const a3 = Math.hypot(...cross3(e1, e2)) / 2;
@@ -974,14 +1118,14 @@ for (const [k, arr] of stretch) {
 }
 const used = [...pieces.values()].reduce((s, pc) => s + pc.w * pc.h, 0) / (TEX_M * TEX_M);
 if (process.env.VISCHK) (await import("node:fs")).writeFileSync("out/vis.bin", Buffer.from(new Float32Array(visUV).buffer));
-report.livery = { tris: liveryTris, inwardNoLivery: inward, innerSkin: hiddenFaces, pieces: pieces.size, textureMetres: +TEX_M.toFixed(3),
+report.livery = { bodySideTiltDeg_p50_p90: bodySideTilt, tris: liveryTris, inwardNoLivery: inward, innerSkin: hiddenFaces, pieces: pieces.size, textureMetres: +TEX_M.toFixed(3),
   mmPerPx4096: +(TEX_M * 1000 / 4096).toFixed(2), boxFill: +used.toFixed(2), stretch_p5_p50_p95: stretchReport };
 const frac = (pc) => [pc.x / TEX_M, pc.y / TEX_M, pc.w / TEX_M, pc.h / TEX_M];
 const bodyPc = pieces.get("body skin");
 outScene.setExtras({ ...outScene.getExtras(), livery: {
   size: TEX_M,
-  layout: "unwrap-v2",
-  topLineV: (bodyPc.y + (0 - sMin) - 0) / TEX_M,
+  layout: "unwrap-v3",
+  topLine: bodyTopLine.map(([u, v]) => [+((bodyPc.x + u - bodyPc.lo[0]) / TEX_M).toFixed(5), +((bodyPc.y + v - bodyPc.lo[1]) / TEX_M).toFixed(5)]),
   views: Object.fromEntries([...pieces.values()].map((pc) => [pc.key, frac(pc)])),
 } });
 
