@@ -68,7 +68,7 @@ function desktopInvoke() {
  * Where the bytes go. Desktop: streamed to disk through the shell, positional
  * writes in order. Browser: kept in memory and downloaded at the end.
  */
-async function openSink(name) {
+export async function openSink(name) {
   const invoke = desktopInvoke();
   if (!invoke) {
     const target = new ArrayBufferTarget();
@@ -117,7 +117,7 @@ async function openSink(name) {
  * graph the replay plays live, fed the same `replayAudioState()` the live
  * replay feeds it, at the times the samples belong to.
  */
-async function renderAudio(game, from, to, cameraName, onProgress, fadeFrom = null) {
+export async function renderAudio(game, from, to, cameraName, onProgress, fadeFrom = null) {
   const replay = game.replay;
   const length = Math.ceil((to - from) * SAMPLE_RATE);
   const ctx = new OfflineAudioContext({ numberOfChannels: 2, length, sampleRate: SAMPLE_RATE });
@@ -151,7 +151,7 @@ async function renderAudio(game, from, to, cameraName, onProgress, fadeFrom = nu
 }
 
 /** Encode an AudioBuffer as AAC into the muxer. */
-async function encodeAudio(buffer, muxer) {
+export async function encodeAudio(buffer, muxer) {
   let error = null;
   const enc = new AudioEncoder({
     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
@@ -191,48 +191,74 @@ function roundRect(g, x, y, w, h, r) {
   g.closePath();
 }
 
+/** The course as this run drove it, for the map: positions every 0.1 s. */
+function trackMap(replay) {
+  if (replay._map) return replay._map;
+  const pts = [];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let t = 0; t <= replay.duration; t += 0.1) {
+    const x = replay.value("sim.pos_x", t);
+    const y = replay.value("sim.pos_y", t);
+    pts.push([x, y]);
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  }
+  replay._map = { pts, minX, maxX, minY, maxY };
+  return replay._map;
+}
+
 /**
- * Telemetry burned into the frame: who, where, the lap clock and sector
- * splits, speed / gear / revs, the pedals and the g-g. Scaled to the frame
- * height so 1080p and 4K read the same.
+ * Telemetry burned into the frame. Laid out for the cockpit camera, whose
+ * middle-bottom is the car's own dash and wheel, so everything sits at the
+ * edges: who and the lap clock (top left) with sector splits, the course map
+ * with the car on it (top right), a live readout column (left), speed / gear
+ * / revs (bottom left), and the last six seconds of throttle, brake and steer
+ * beside the g-g (bottom right). Scaled to the frame height, so 1080p and 4K
+ * read the same. `info.gap()` (optional) is a live gap to another driver.
  */
-function drawOverlay(g, W, H, game, info) {
+export function drawOverlay(g, W, H, game, info) {
   const r = game.replay;
   const s = H / 1080;
-  const panel = "rgba(8, 10, 14, 0.62)";
+  const panel = "rgba(8, 10, 14, 0.64)";
   const text = "#f3f4f6";
   const dim = "rgba(243, 244, 246, 0.62)";
+  const green = "#22c55e", red = "#ef4444", blue = "#60a5fa", amber = "#f59e0b";
   const font = (px, w = 600) => `${w} ${Math.round(px * s)}px "Segoe UI", system-ui, sans-serif`;
   const mono = (px, w = 700) => `${w} ${Math.round(px * s)}px "Cascadia Mono", Consolas, ui-monospace, monospace`;
+  const card = (x, y, w, h) => { g.fillStyle = panel; roundRect(g, x, y, w, h, 14 * s); g.fill(); };
+  const v = (id) => r.value(id);
 
-  // Top left: the driver, the course, the lap clock.
+  // ---- who, and the lap clock ----
   const lap = r.lapAt();
   const inLap = lap && r.t >= (lap.startedAtS ?? 0);
   const lapT = inLap ? Math.min(r.t - lap.startedAtS, lap.raw ?? lap.spanS ?? Infinity) : 0;
   const done = inLap && r.t >= lap.endedAtS - 1e-3;
-  g.fillStyle = panel;
-  roundRect(g, 32 * s, 28 * s, 470 * s, 150 * s, 14 * s);
-  g.fill();
-  g.fillStyle = text;
-  g.font = font(26, 700);
+  const gap = info.gap?.();
+  const topH = info.gap ? 196 : 150;
+  card(32 * s, 28 * s, 470 * s, topH * s);
+  g.fillStyle = text; g.font = font(26, 700);
   g.fillText(info.driver, 54 * s, 68 * s);
-  g.fillStyle = dim;
-  g.font = font(19, 500);
+  g.fillStyle = dim; g.font = font(19, 500);
   g.fillText(info.subtitle, 54 * s, 98 * s);
-  g.fillStyle = done ? "#a7f3d0" : text;
-  g.font = mono(40);
+  g.fillStyle = done ? "#a7f3d0" : text; g.font = mono(40);
   g.fillText(lap ? `L${lap.lap}  ${fmt(done ? lap.total : lapT)}` : "--", 54 * s, 152 * s);
-
-  // Sector splits as they happen.
+  if (info.gap) {
+    g.font = mono(26);
+    if (gap == null) {
+      g.fillStyle = dim;
+      g.fillText(`--  vs ${info.compareName}`, 54 * s, 196 * s);
+    } else {
+      g.fillStyle = gap > 0 ? "#fca5a5" : "#a7f3d0";
+      g.fillText(`${gap >= 0 ? "+" : "-"}${Math.abs(gap).toFixed(3)}  vs ${info.compareName}`, 54 * s, 196 * s);
+    }
+  }
   if (lap?.sectors?.length) {
     let acc = 0;
     let x = 520 * s;
     lap.sectors.forEach((sec, i) => {
       acc += sec;
-      if (!inLap || lapT < acc) return;
-      g.fillStyle = panel;
-      roundRect(g, x, 28 * s, 150 * s, 64 * s, 12 * s);
-      g.fill();
+      if (!inLap || lapT < acc - 1e-3) return;
+      card(x, 28 * s, 150 * s, 64 * s);
       g.fillStyle = dim; g.font = font(16, 600);
       g.fillText(`S${i + 1}`, x + 16 * s, 54 * s);
       g.fillStyle = text; g.font = mono(24);
@@ -241,76 +267,145 @@ function drawOverlay(g, W, H, game, info) {
     });
   }
 
-  // Bottom left: speed, gear, revs.
-  const kmh = r.value("drivetrain.vehicle_speed");
+  // ---- the course map ----
+  {
+    const m = trackMap(r);
+    const size = 300 * s, mx = W - size - 32 * s, my = 28 * s, pad = 22 * s;
+    card(mx, my, size, size);
+    const span = Math.max(m.maxX - m.minX, m.maxY - m.minY, 1);
+    const k = (size - 2 * pad) / span;
+    const ox = mx + pad + ((size - 2 * pad) - (m.maxX - m.minX) * k) / 2;
+    const oy = my + pad + ((size - 2 * pad) - (m.maxY - m.minY) * k) / 2;
+    const P = (x, y) => [ox + (x - m.minX) * k, oy + (m.maxY - y) * k];
+    g.lineJoin = "round"; g.lineCap = "round";
+    g.strokeStyle = "rgba(255,255,255,0.28)"; g.lineWidth = 5 * s;
+    g.beginPath();
+    m.pts.forEach(([x, y], i) => { const [px, py] = P(x, y); if (i) g.lineTo(px, py); else g.moveTo(px, py); });
+    g.stroke();
+    // Where this lap has been, then the car.
+    if (inLap) {
+      g.strokeStyle = blue; g.lineWidth = 3 * s;
+      g.beginPath();
+      let first = true;
+      for (let t = lap.startedAtS; t <= r.t; t += 0.1) {
+        const [px, py] = P(r.value("sim.pos_x", t), r.value("sim.pos_y", t));
+        if (first) { g.moveTo(px, py); first = false; } else g.lineTo(px, py);
+      }
+      g.stroke();
+    }
+    const [cx, cy] = P(v("sim.pos_x"), v("sim.pos_y"));
+    g.fillStyle = "#fff"; g.beginPath(); g.arc(cx, cy, 7 * s, 0, Math.PI * 2); g.fill();
+    g.fillStyle = blue; g.beginPath(); g.arc(cx, cy, 4.5 * s, 0, Math.PI * 2); g.fill();
+  }
+
+  // ---- the readout column ----
+  {
+    const rows = [
+      ["RPM", Math.round(v("engine.rpm")).toLocaleString("en-US"), ""],
+      ["Steering", v("chassis.steering_angle").toFixed(0), "deg"],
+      ["Lateral", Math.abs(v("imu.lat_g")).toFixed(2), "g"],
+      ["Long", v("imu.long_g").toFixed(2), "g"],
+      ["Yaw rate", Math.abs(v("imu.yaw_rate")).toFixed(0), "deg/s"],
+      ["Body slip", v("sim.body_slip_deg").toFixed(1), "deg"],
+      ["Slip F / R", `${Math.abs(v("sim.slip_front_deg")).toFixed(1)} / ${Math.abs(v("sim.slip_rear_deg")).toFixed(1)}`, "deg"],
+      ["Grip F / R", `${v("sim.util_front").toFixed(2)} / ${v("sim.util_rear").toFixed(2)}`, ""],
+      ["Throttle", v("engine.aps").toFixed(0), "%"],
+      ["Brake", v("brake.driver_load").toFixed(0), "%"],
+    ];
+    const x = 32 * s, y = (topH + 44) * s, w = 380 * s, lh = 34 * s;
+    card(x, y, w, (rows.length * 34 + 24) * s);
+    rows.forEach(([label, val, unit], i) => {
+      const yy = y + 36 * s + i * lh;
+      g.fillStyle = dim; g.font = font(17, 600); g.textAlign = "left";
+      g.fillText(label, x + 18 * s, yy);
+      g.fillStyle = text; g.font = mono(21); g.textAlign = "right";
+      g.fillText(val, x + w - 72 * s, yy);
+      g.fillStyle = dim; g.font = font(15, 600); g.textAlign = "left";
+      g.fillText(unit, x + w - 64 * s, yy);
+    });
+    g.textAlign = "left";
+  }
+
+  // ---- speed, gear, revs ----
+  const kmh = v("drivetrain.vehicle_speed");
   const gear = Math.round(r.valueAt("engine.gear"));
-  const rpm = r.value("engine.rpm");
+  const rpm = v("engine.rpm");
   const bx = 32 * s, by = H - 190 * s;
-  g.fillStyle = panel;
-  roundRect(g, bx, by, 420 * s, 160 * s, 14 * s);
-  g.fill();
-  g.fillStyle = text;
-  g.font = mono(84);
-  g.textAlign = "right";
+  card(bx, by, 420 * s, 160 * s);
+  g.fillStyle = text; g.font = mono(84); g.textAlign = "right";
   g.fillText(String(Math.round(kmh)), bx + 230 * s, by + 98 * s);
   g.textAlign = "left";
   g.fillStyle = dim; g.font = font(20, 600);
   g.fillText("km/h", bx + 240 * s, by + 96 * s);
   g.fillStyle = text; g.font = mono(64);
   g.fillText(gear > 0 ? String(gear) : "N", bx + 336 * s, by + 96 * s);
-  // Rev bar, green to amber to red toward the limiter.
   const frac = Math.max(0, Math.min(1, rpm / 14500));
   const rx = bx + 22 * s, ry = by + 122 * s, rw = 376 * s, rh = 18 * s;
   g.fillStyle = "rgba(255,255,255,0.12)";
   roundRect(g, rx, ry, rw, rh, 6 * s); g.fill();
-  g.fillStyle = frac > 0.9 ? "#ef4444" : frac > 0.78 ? "#f59e0b" : "#22c55e";
+  g.fillStyle = frac > 0.9 ? red : frac > 0.78 ? amber : green;
   roundRect(g, rx, ry, Math.max(rh, rw * frac), rh, 6 * s); g.fill();
 
-  // Bottom centre: throttle and brake.
-  const thr = Math.max(0, Math.min(1, r.value("engine.aps") / 100));
-  const brk = Math.max(0, Math.min(1, r.value("brake.driver_load") / 100));
-  const px = W / 2 - 170 * s, py = H - 118 * s;
-  g.fillStyle = panel;
-  roundRect(g, px, py, 340 * s, 88 * s, 14 * s); g.fill();
-  const bar = (y, v, col, label) => {
-    g.fillStyle = dim; g.font = font(16, 700);
-    g.fillText(label, px + 16 * s, y + 15 * s);
-    g.fillStyle = "rgba(255,255,255,0.12)";
-    roundRect(g, px + 64 * s, y, 256 * s, 20 * s, 6 * s); g.fill();
-    if (v > 0.005) {
-      g.fillStyle = col;
-      roundRect(g, px + 64 * s, y, Math.max(12 * s, 256 * s * v), 20 * s, 6 * s); g.fill();
+  // ---- the last six seconds: throttle, brake, steer ----
+  {
+    const cw = 470 * s, ch = 190 * s, cx0 = W - 260 * s - cw - 16 * s, cy0 = H - ch - 30 * s;
+    card(cx0, cy0, cw, ch);
+    const px = cx0 + 16 * s, pw = cw - 70 * s, py = cy0 + 30 * s, ph = ch - 48 * s;
+    const key = (label, col, x) => {
+      g.fillStyle = dim; g.font = font(14, 700);
+      g.fillText(label, x, cy0 + 22 * s);
+      const tw = g.measureText(label).width;
+      g.fillStyle = col; g.fillRect(x + tw + 6 * s, cy0 + 13 * s, 14 * s, 4 * s);
+    };
+    key("THR", green, px);
+    key("BRK", red, px + 64 * s);
+    key("STEER", "#e5e7eb", px + 128 * s);
+    g.fillStyle = dim; g.textAlign = "right"; g.fillText("last 6 s", px + pw, cy0 + 22 * s); g.textAlign = "left";
+    g.strokeStyle = "rgba(255,255,255,0.12)"; g.lineWidth = 1 * s;
+    g.beginPath(); g.moveTo(px, py + ph / 2); g.lineTo(px + pw, py + ph / 2); g.stroke();
+    const WIN = 6, N = 120;
+    const trace = (fn, col, width) => {
+      g.strokeStyle = col; g.lineWidth = width * s; g.beginPath();
+      for (let i = 0; i <= N; i++) {
+        const tt = Math.max(0, r.t - WIN + (WIN * i) / N);
+        const X = px + (pw * i) / N;
+        const Y = py + ph * (1 - Math.max(0, Math.min(1, fn(tt))));
+        if (i === 0) g.moveTo(X, Y); else g.lineTo(X, Y);
+      }
+      g.stroke();
+    };
+    trace((t) => r.value("brake.driver_load", t) / 100, red, 3);
+    trace((t) => r.value("engine.aps", t) / 100, green, 3);
+    // Steering: centre line is straight ahead, full height is 180 deg of rim.
+    trace((t) => 0.5 - r.value("chassis.steering_angle", t) / 360, "rgba(229,231,235,0.9)", 2);
+    const bxx = px + pw + 14 * s, bw = 14 * s;
+    for (const [val, col, off] of [[v("engine.aps") / 100, green, 0], [v("brake.driver_load") / 100, red, bw + 6 * s]]) {
+      g.fillStyle = "rgba(255,255,255,0.12)"; g.fillRect(bxx + off, py, bw, ph);
+      const hh = ph * Math.max(0, Math.min(1, val));
+      g.fillStyle = col; g.fillRect(bxx + off, py + ph - hh, bw, hh);
     }
-  };
-  bar(py + 16 * s, thr, "#22c55e", "THR");
-  bar(py + 50 * s, brk, "#ef4444", "BRK");
+  }
 
-  // Bottom right: the g-g, with the last second as a trail.
+  // ---- the g-g, with the last second as a trail ----
   const cx = W - 130 * s, cy = H - 130 * s, R = 92 * s, gMax = 2.0;
   g.fillStyle = panel;
   g.beginPath(); g.arc(cx, cy, R + 14 * s, 0, Math.PI * 2); g.fill();
   g.strokeStyle = "rgba(255,255,255,0.18)"; g.lineWidth = 1.5 * s;
   for (const k of [0.5, 1, 1.5, 2]) { g.beginPath(); g.arc(cx, cy, (R * k) / gMax, 0, Math.PI * 2); g.stroke(); }
   g.beginPath(); g.moveTo(cx - R, cy); g.lineTo(cx + R, cy); g.moveTo(cx, cy - R); g.lineTo(cx, cy + R); g.stroke();
-  const at = (tt) => {
-    const ay = r.value("imu.lat_g", tt);
-    const ax = r.value("imu.long_g", tt);
-    return [cx + (ay / gMax) * R, cy - (ax / gMax) * R];
-  };
+  const at = (tt) => [cx + (r.value("imu.lat_g", tt) / gMax) * R, cy - (r.value("imu.long_g", tt) / gMax) * R];
   g.strokeStyle = "rgba(96,165,250,0.7)"; g.lineWidth = 3 * s;
   g.beginPath();
   for (let k = 20; k >= 0; k--) {
-    const tt = Math.max(0, r.t - k * 0.05);
-    const [x, y] = at(tt);
+    const [x, y] = at(Math.max(0, r.t - k * 0.05));
     if (k === 20) g.moveTo(x, y); else g.lineTo(x, y);
   }
   g.stroke();
   const [dx, dy] = at(r.t);
-  g.fillStyle = "#60a5fa";
+  g.fillStyle = blue;
   g.beginPath(); g.arc(dx, dy, 8 * s, 0, Math.PI * 2); g.fill();
   g.fillStyle = dim; g.font = font(15, 700); g.textAlign = "center";
-  const gt = Math.hypot(r.value("imu.lat_g"), r.value("imu.long_g"));
-  g.fillText(`${gt.toFixed(2)} g`, cx, cy + R + 2 * s);
+  g.fillText(`${Math.hypot(v("imu.lat_g"), v("imu.long_g")).toFixed(2)} g`, cx, cy + R + 2 * s);
   g.textAlign = "left";
 }
 
