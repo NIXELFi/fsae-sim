@@ -62,6 +62,15 @@ class EngineProcessor extends AudioWorkletProcessor {
         case "reset":
           this.engine.reset();
           break;
+        case "timeline":
+          // Offline rendering (a replay exported to video): every operating
+          // point up front, each applied once the render clock reaches its
+          // `at`. Live messages would race the renderer, which runs as fast
+          // as it can.
+          this.timeline = m.points || [];
+          this.timelineAt = 0;
+          this.port.postMessage({ type: "timeline-ready" });
+          break;
         default:
           break;
       }
@@ -73,6 +82,14 @@ class EngineProcessor extends AudioWorkletProcessor {
     if (!out || out.length === 0) return true;
 
     const channel = out[0];
+    const tl = this.timeline;
+    if (tl) {
+      // `currentTime` is the start of this render quantum (128 samples).
+      while (this.timelineAt < tl.length && tl[this.timelineAt].at <= currentTime) {
+        const m = tl[this.timelineAt++];
+        this.engine.setOperatingPoint(m.rpm, m.throttle, m.torqueNm, !!m.cut, !!m.overrun);
+      }
+    }
     this.engine.render(channel);
 
     if (this.gain !== 1) {

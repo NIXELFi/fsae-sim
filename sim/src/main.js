@@ -68,6 +68,7 @@ import { DeltaTimer, referenceFromRun, referenceLapOf } from "./game/delta.js";
 import { newRunId, saveRun, checkpointRun, runsDirectory, listRuns, loadRun, parseTelemetry } from "./game/runStore.js";
 import { Replay } from "./game/replay.js";
 import { ReplayPanel, ghostGap } from "./game/replayPanel.js";
+import { openExportDialog, exportReplayVideo } from "./game/videoExport.js";
 
 // Chassis footprint used for cone strikes, and the wheel hub positions, both
 // derived from the LIVE geometry. Hardcoding them meant stretching the
@@ -1978,6 +1979,10 @@ class Game {
         this.replayPanel?.setCameraName(CAMERAS[this.cameraIndex].name);
       },
       onGhost: (id) => { if (id) void this.loadGhost(id); else this.clearGhost(); },
+      onExport: () => {
+        this.replay?.pause();
+        void openExportDialog(this);
+      },
     });
     this.replayPanel.setCameraName(CAMERAS[this.cameraIndex].name);
 
@@ -2181,6 +2186,9 @@ class Game {
 
   /** True while a recorded run is on screen. */
   get replaying() { return !!this.replay; }
+
+  /** The camera the replay is being watched from, by name. */
+  cameraName() { return CAMERAS[this.cameraIndex].name; }
 
   /**
    * One replay frame: advance the playback clock, then write the sampled
@@ -4342,6 +4350,7 @@ async function boot() {
   // Debug handle: lets you poke at the model from the console, e.g.
   //   __sim.car.telemetry, __sim.powertrain.wotTorque(9000)
   window.__sim = game;
+  window.__exportReplayVideo = (opts) => exportReplayVideo(game, opts);
 
   let last = performance.now();
   let frameErrors = 0;
@@ -4349,6 +4358,9 @@ async function boot() {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     try {
+      // A video export owns the replay clock and the renderer; it draws its
+      // own frames (videoExport.js). The loop just keeps ticking.
+      if (game.exporting) { requestAnimationFrame(frame); return; }
       if (game.replaying) {
         // A replay steps the playback clock, not the physics. The rig is held
         // so the wheel stays quiet and the native model does not run away

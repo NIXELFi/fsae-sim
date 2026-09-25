@@ -147,7 +147,7 @@ export class ReplayPanel {
   /**
    * @param root     a container element that lives over the canvas
    * @param replay   the Replay being watched
-   * @param actions  { onExit, onGhost, onCamera }
+   * @param actions  { onExit, onGhost, onCamera, onExport }
    */
   constructor(root, replay, actions = {}) {
     this.root = root;
@@ -255,6 +255,7 @@ export class ReplayPanel {
           </div>
           <div class="rp-headbtns">
             <button data-act="camera" class="secondary" title="Change camera (C)">Camera</button>
+            <button data-act="export" class="secondary" title="Save this replay as an MP4 video, with sound">Export video</button>
             <button data-act="exit" class="secondary" title="Back to the launch screen (Esc)">Close</button>
           </div>
         </header>
@@ -781,6 +782,7 @@ export class ReplayPanel {
       if (act === "fwd") { r.nudge(1); this.paint(0, true); return; }
       if (act === "exit") { this.actions.onExit?.(); return; }
       if (act === "camera") { this.actions.onCamera?.(); return; }
+      if (act === "export") { this.actions.onExport?.(); return; }
       if (act === "traces") { this.toggleTraces(); return; }
       if (act === "bare") { this.toggleBare(); return; }
       const roll = e.target.closest("[data-roll]")?.dataset.roll;

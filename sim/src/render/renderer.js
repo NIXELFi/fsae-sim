@@ -1816,8 +1816,11 @@ export class Renderer {
     // the whole frame silently vanishes, so fall back to a sane default.
     const cw = this.canvas.clientWidth > 0 ? this.canvas.clientWidth : 1280;
     const ch = this.canvas.clientHeight > 0 ? this.canvas.clientHeight : 720;
-    const w = Math.max(1, Math.floor(cw * dpr));
-    const h = Math.max(1, Math.floor(ch * dpr));
+    // A video export renders at the file's size, not the window's
+    // (videoExport.js); the window just shows it stretched meanwhile.
+    const fixed = this.fixedSize;
+    const w = fixed ? fixed.w : Math.max(1, Math.floor(cw * dpr));
+    const h = fixed ? fixed.h : Math.max(1, Math.floor(ch * dpr));
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w; this.canvas.height = h;
     }

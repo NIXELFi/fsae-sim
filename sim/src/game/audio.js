@@ -113,16 +113,26 @@ export class EngineAudio {
     this.modelError = null;
   }
 
-  /** Must be called from a user gesture -- browsers block audio otherwise. */
-  start() {
+  /**
+   * Must be called from a user gesture -- browsers block audio otherwise.
+   *
+   * `context` builds the same graph on a context the caller made -- an
+   * OfflineAudioContext, for rendering a replay's sound into a video file
+   * (videoExport.js). Offline, `update` takes the time each operating point
+   * belongs at, and the engine model gets them as one timeline before
+   * rendering starts (`sendTimeline`) instead of as live messages.
+   */
+  start(context = null) {
     if (this.ctx) {
       if (this.ctx.state === "suspended") this.ctx.resume();
       return;
     }
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return;
-    const ctx = new Ctx();
+    if (!context && !Ctx) return;
+    const ctx = context ?? new Ctx();
     this.ctx = ctx;
+    this.offline = !!context;
+    this._timeline = [];
 
     this.master = ctx.createGain();
     // Honour the sound toggle: it is applied before the context exists.
@@ -282,7 +292,27 @@ export class EngineAudio {
     // Bring up the physical model asynchronously. `start()` is called from a
     // user gesture and must stay synchronous, so the fallback plays until the
     // worklet is live -- typically a frame or two, and inaudible.
-    this.startModel();
+    this.modelReady = this.startModel();
+  }
+
+  /**
+   * Offline only: hand the engine model every operating point `update`
+   * collected, with the time it applies from, and wait until it has them.
+   * Rendering must not start before, or the first stretch is a silent engine.
+   */
+  sendTimeline() {
+    const node = this.modelNode;
+    if (!node) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = (e) => {
+        if (e.data?.type !== "timeline-ready") return;
+        node.port.removeEventListener("message", done);
+        resolve();
+      };
+      node.port.addEventListener("message", done);
+      node.port.start();
+      node.port.postMessage({ type: "timeline", points: this._timeline });
+    });
   }
 
   async startModel() {
@@ -439,10 +469,11 @@ export class EngineAudio {
    *   shifting bool; and per axle, when available: utilF/utilR, kappaF/
    *   kappaR, slipFDeg/slipRDeg, and driveForceN (the chain's load)
    */
-  update(s, dt) {
+  update(s, dt, at = null) {
     if (!this.ready || !this.enabled) return;
     const ctx = this.ctx;
-    const now = ctx.currentTime;
+    // Offline the caller says when this state belongs; live it is now.
+    const now = at ?? ctx.currentTime;
 
     // The dogs engaging. Voiced when the gear actually changes -- the end of
     // the 100 ms cut -- which is also the only moment both the JS model, the
@@ -450,7 +481,7 @@ export class EngineAudio {
     // blip on top. Above the rate cap below: a gear change is an edge and
     // must never fall in a skipped frame.
     if (s.gear != null) {
-      if (this._lastGear != null && s.gear !== this._lastGear) this.shiftClunk(s.gear < this._lastGear);
+      if (this._lastGear != null && s.gear !== this._lastGear) this.shiftClunk(s.gear < this._lastGear, now);
       this._lastGear = s.gear;
     }
 
@@ -482,7 +513,7 @@ export class EngineAudio {
       // pressure trace that does the validated amount of work. During a shift
       // the ignition really is cut, and passing zero torque is what makes that
       // audible rather than a scripted effect.
-      this.modelNode.port.postMessage({
+      const point = {
         type: "operating-point",
         rpm: s.rpm,
         // The plate position, not the pedal: at idle the pedal is at rest but
@@ -493,7 +524,13 @@ export class EngineAudio {
         cut,
         // Closed throttle at speed: the overrun, where a CBR pops.
         overrun: !shifting && (s.throttlePlate ?? s.throttle) < 0.08 && s.rpm > 6000 && s.speed > 6,
-      });
+      };
+      if (this.offline) {
+        point.at = now;
+        this._timeline.push(point);
+      } else {
+        this.modelNode.port.postMessage(point);
+      }
     } else {
       for (const { osc, mult } of this.oscs) {
         osc.frequency.setTargetAtTime(firing * mult, now, glide);
@@ -691,9 +728,9 @@ export class EngineAudio {
   }
 
   /** The gearbox: dog ring clunk, and the blip's exhaust chuff on the way down. */
-  shiftClunk(down) {
+  shiftClunk(down, at = null) {
     if (!this.ready || !this.enabled) return;
-    const now = this.ctx.currentTime;
+    const now = at ?? this.ctx.currentTime;
     // Louder the harder the dogs go in: the load through the chain just
     // before the shift. Inside the car it comes through the seat.
     const cam = this.camera ?? { inside: true };

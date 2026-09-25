@@ -13,6 +13,7 @@ use tauri::{Emitter, Manager};
 
 mod rig;
 mod runs;
+mod video;
 mod wheel;
 
 /// What a launcher (Helios, a shortcut, a script) can ask for on the command
@@ -282,6 +283,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(options)
+        .manage(video::VideoFiles::default())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Already running: focus the window and hand it the new request.
             let opts = parse_args(argv.into_iter().skip(1));
@@ -319,6 +321,10 @@ fn main() {
             runs::load_run,
             runs::list_runs,
             runs::runs_directory,
+            video::video_begin,
+            video::video_write,
+            video::video_end,
+            video::video_reveal,
             rig::rig_status,
             rig::rig_start,
             rig::rig_stop,
