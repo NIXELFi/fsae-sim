@@ -42,6 +42,15 @@ const KAPPA_H: f64 = 1e-4;
 
 // Grip calibration (`SuspensionParams::front_grip_scale` / `rear_grip_scale`).
 //
+// 2026-09-24 (fifth pass): front 1.06 -> 1.08, rear 1.00. The tyres'
+// aligning moment now reaches the yaw equation (-Fy.t at every wheel), which
+// is real understeer the grip scale had been standing in for: +0.2 deg/g of
+// understeer gradient and ~3 % off the peak. Re-pinned to this model's own
+// fourth-pass peaks (steer ramp 1.441 / 1.608 / 1.832 g at 10 / 15 / 20 m/s,
+// examples/reality.rs `grip`): now 1.437 / 1.598 / 1.816, and the front's
+// fudge shrinks (0.80 x 1.08 = 0.864, was 0.848). The car pushes more at
+// 20 m/s than before (K 0.90 against 0.77 deg/g), all of it from physics.
+//
 // 2026-09-23 (fourth pass): pinned to the bicycle's PEAK on the steer ramp at
 // skidpad speed (11 m/s, examples/dt_ramp_fit.rs), front 1.06 / rear 1.00.
 // The steady circle below was the wrong yardstick: its robot settles past
@@ -171,6 +180,13 @@ impl DoubleTrackSolver {
             if t.peak_alpha_scale_at.is_none() {
                 t.peak_alpha_scale_at = Some(crate::tyre::MagicFormulaTyre::PEAK_ALPHA_SCALE_SDM26);
             }
+        }
+        // And the engine with the logged ignition cut and a lock that keeps
+        // the crank's momentum (see `GearedEngine::full_cut_drag`); the
+        // bicycle keeps its own.
+        if let Some(e) = c.powertrain.as_any_mut().and_then(|a| a.downcast_mut::<crate::powertrain::GearedEngine>()) {
+            e.full_cut_drag = true;
+            e.conserve_engagement = true;
         }
         Self {
             c,
@@ -571,6 +587,14 @@ impl DoubleTrackSolver {
             fy_body += fyb;
             // Lateral force about the CG, longitudinal through its offset.
             mz += arm[i] * fyb - half_t[i] * fxb[i];
+            // The tyre's own aligning moment: its lateral force acts a
+            // pneumatic trail BEHIND the patch centre, which is a pure moment
+            // -Fy.t about the vertical at every wheel, front and rear. It
+            // was computed for the steering and never reached the car: the
+            // yaw equation had each Fy at the patch centre, which made the
+            // car ~0.2 deg/g too eager and let it rotate on the brakes at
+            // the limit (fidelity audit 2026-09-24, P2).
+            mz -= fy[i] * trail[i];
         }
 
         let fz_sum: f64 = fz.iter().sum();
@@ -743,6 +767,7 @@ impl DoubleTrackSolver {
             camber_deg: [gamma[0].to_degrees(), gamma[1].to_degrees(), gamma[2].to_degrees(), gamma[3].to_degrees()],
             aero_front_frac: if downforce > 1e-9 { df_front / downforce } else { p.aero.front_frac },
             ride_height_mm: [rh_f * 1000.0, rh_r * 1000.0],
+            wheel_omega: self.w,
         };
     }
 }

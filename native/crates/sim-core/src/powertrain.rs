@@ -301,6 +301,24 @@ pub struct GearedEngine {
     /// Mirrors 2 x VehicleParams::wheel_inertia_rear_kg_m2; the rig keeps it
     /// in step when that parameter is edited.
     pub wheel_side_inertia_kg_m2: f64,
+    /// The ignition cut drags the crank with ALL of its friction, as a real
+    /// cut does, instead of half. Off: the frozen bicycle's engine, bit for
+    /// bit. The double track switches it on (`DoubleTrackSolver::new`).
+    ///
+    /// Why half was wrong: the 5/3 accel logs (ECU, 1 kHz, 11 clean shifts)
+    /// show the crank free-falling at 10,000-14,300 rpm/s through the cut,
+    /// which is the full motoring torque on the 0.011 kg.m^2 crank; at half
+    /// it fell at half that and always met the new gear well above sync.
+    pub full_cut_drag: bool,
+    /// When the clutch (or the dogs, after an upshift) locks with the crank
+    /// still turning faster than the gearbox side, that difference in the
+    /// crank's angular momentum goes into the driveline instead of being
+    /// deleted. Off: the frozen bicycle's engine, bit for bit.
+    ///
+    /// The lock used to set the crank to the gearbox speed and pass only the
+    /// engine's torque: ~300 rpm, ~370 J, vanished on every 2->3 upshift
+    /// (fidelity audit 2026-09-24, bug 1).
+    pub conserve_engagement: bool,
 
     gear: usize,
     engine_rpm: f64,
@@ -344,6 +362,8 @@ impl GearedEngine {
             gearbox_inertia_kg_m2: 0.006,
             clutch_capacity_nm: 220.0,
             wheel_side_inertia_kg_m2: 2.0 * 0.152,
+            full_cut_drag: false,
+            conserve_engagement: false,
             gear: 0,
             engine_rpm: 1600.0,
             shift_timer: 0.0,
@@ -510,9 +530,19 @@ impl GearedEngine {
         x * x * (3.0 - 2.0 * x)
     }
 
+    /// Crank torque with the ignition cut: the friction, all of it or (the
+    /// frozen bicycle's engine) half.
+    fn cut_torque(&self, rpm: f64) -> f64 {
+        if self.full_cut_drag {
+            -self.motoring_torque(rpm)
+        } else {
+            -self.motoring_torque(rpm) * 0.5
+        }
+    }
+
     fn engine_torque(&mut self, rpm: f64, throttle: f64) -> f64 {
         if self.shift_timer > 0.0 {
-            return -self.motoring_torque(rpm) * 0.5; // ignition cut
+            return self.cut_torque(rpm); // ignition cut
         }
         let wot = self.wot_torque(rpm);
         let drag = self.motoring_torque(rpm);
@@ -539,7 +569,7 @@ impl GearedEngine {
         // Coming back from a shift: blend from the cut's value to the full one.
         let f = self.reintro_fraction();
         if f < 1.0 {
-            let cut = -self.motoring_torque(rpm) * 0.5;
+            let cut = self.cut_torque(rpm);
             t = cut + (t - cut) * f;
         }
         t
@@ -738,13 +768,26 @@ impl PowertrainModel for GearedEngine {
             && (slip.abs() < 8.0 || stick.abs() <= cap)
             && clutch_side * RADS_TO_RPM >= self.idle_rpm * 0.95;
         if lockable && te.abs() <= cap {
+            // Only the step that ENGAGES carries a speed difference to hand
+            // over; once locked, the crank's inertia rides on the wheel as
+            // `added_wheel_inertia`, and handing over its speed change again
+            // would count it twice.
+            let engaging = self.slipping;
             self.slipping = false;
             // Floor at idle, not below it: a running engine cannot be dragged
             // under its governed idle speed -- the clutch gives up first.
-            self.engine_rpm = (clutch_side * RADS_TO_RPM).max(self.idle_rpm);
+            let locked_rpm = (clutch_side * RADS_TO_RPM).max(self.idle_rpm);
+            // The crank's excess momentum, handed to the driveline as this
+            // step's impulse rather than deleted (`conserve_engagement`).
+            let landing = if self.conserve_engagement && engaging {
+                self.crank_inertia_kg_m2 * (omega_e - locked_rpm * RPM_TO_RADS) / dt
+            } else {
+                0.0
+            };
+            self.engine_rpm = locked_rpm;
             let n_gbox = n / self.primary;
             return DriveOutput {
-                wheel_torque_nm: to_wheel(te, n, self.efficiency),
+                wheel_torque_nm: to_wheel(te + landing, n, self.efficiency),
                 added_wheel_inertia: self.crank_inertia_kg_m2 * n * n
                     + self.gearbox_inertia_kg_m2 * n_gbox * n_gbox,
                 locked: true,

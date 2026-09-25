@@ -393,8 +393,9 @@ export const SDM26 = {
     /** EST: road-wheel deg per 100 N.m about each kingpin. 0 = rigid. */
     steerComplianceDegPer100Nm: 0.5,
     /** Grip calibration: the bicycle's steer-ramp peak at skidpad speed
-     *  (see double_track.rs, fourth pass). Mirrors vehicle.rs. */
-    frontGripScale: 1.06,
+     *  (see double_track.rs, fifth pass: 1.08 once the tyres' aligning
+     *  moment reached the yaw equation). Mirrors vehicle.rs. */
+    frontGripScale: 1.08,
     rearGripScale: 1.00,
     /** 1 = aero follows ride height (2026 CFD map), 0 = fixed split. */
     aeroRideMap: 1,

@@ -108,8 +108,8 @@ const COLUMNS = [
   { id: "imu.yaw_rate", dp: 3, get: (c) => c.t.yawRateDegS },
   { id: "imu.roll_rate", dp: 3, get: (c) => c.rollRateDegS },
   { id: "imu.pitch_rate", dp: 3, get: (c) => c.pitchRateDegS },
-  { id: "drivetrain.wheel_speed_fl", dp: 1, get: (c) => radsToRpm(c.car.wF) },
-  { id: "drivetrain.wheel_speed_fr", dp: 1, get: (c) => radsToRpm(c.car.wF) },
+  { id: "drivetrain.wheel_speed_fl", dp: 1, get: (c) => radsToRpm(c.car.wFL ?? c.car.wF) },
+  { id: "drivetrain.wheel_speed_fr", dp: 1, get: (c) => radsToRpm(c.car.wFR ?? c.car.wF) },
   { id: "drivetrain.wheel_speed_rl", dp: 1, get: (c) => radsToRpm(c.wRL) },
   { id: "drivetrain.wheel_speed_rr", dp: 1, get: (c) => radsToRpm(c.wRR) },
   { id: "transmission.gear_ratio", dp: 4, get: (c) => c.gearRatio },
@@ -249,8 +249,8 @@ export const DERIVED_CHANNELS = {
   "gps.lon": "projected from course XY onto the venue datum",
   "brake.front_pressure": `pedal x bias x ${BRAKE_FULL_KPA} kPa; the model has no hydraulics`,
   "brake.rear_pressure": `pedal x bias x ${BRAKE_FULL_KPA} kPa; the model has no hydraulics`,
-  "drivetrain.wheel_speed_fl": "single-track front: FL and FR are the same wheel",
-  "drivetrain.wheel_speed_fr": "single-track front: FL and FR are the same wheel",
+  "drivetrain.wheel_speed_fl": "bicycle model: single-track front, FL and FR are the same wheel (4-wheel: its own)",
+  "drivetrain.wheel_speed_fr": "bicycle model: single-track front, FL and FR are the same wheel (4-wheel: its own)",
   "imu.roll_rate":
     "differentiated from a roll ANGLE that is itself lateral g times a fixed " +
     "gradient -- there is no suspension dynamics behind it, so treat the " +

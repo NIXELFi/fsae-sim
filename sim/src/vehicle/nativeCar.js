@@ -330,6 +330,13 @@ export class NativeCar {
     this.u = st.u; this.v = st.v; this.r = st.r;
     this.appliedAt = performance.now();
     this.wF = st.wF; this.wR = st.wR;
+    // The 4-wheel model's own wheel speeds, FL FR RL RR; the bicycle sends
+    // null (one front rotor) and the recorder falls back to the axles.
+    if (Array.isArray(st.wheels)) {
+      [this.wFL, this.wFR, this.wRL, this.wRR] = st.wheels;
+    } else {
+      delete this.wFL; delete this.wFR; delete this.wRL; delete this.wRR;
+    }
     this.delta = st.delta;
     this.ax = t.axG * 9.81; this.ay = t.ayG * 9.81;
     const tel = this.telemetry;

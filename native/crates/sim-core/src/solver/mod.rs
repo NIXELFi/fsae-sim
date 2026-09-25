@@ -160,6 +160,10 @@ pub struct Telemetry {
     /// with ride height; solvers without a suspension leave both at zero.
     pub aero_front_frac: f64,
     pub ride_height_mm: [f64; 2],
+    /// Each wheel's spin (rad/s), FL FR RL RR, from solvers that carry four
+    /// wheel states. All zero from the bicycle, whose front is one rotor and
+    /// which reports its axles through `wheel_omega_front` / `_rear`.
+    pub wheel_omega: [f64; 4],
 }
 
 /// `Send + Sync` so a solver can live in an ECS resource or be shared across

@@ -32,11 +32,15 @@
 //!                   still +2.8 % peak at skidpad speed, ~0.1 s round it)
 //!                3  front grip 1.08 -> 1.06: the bicycle's steer-ramp peak
 //!                   at skidpad speed
+//!                4  2026-09-24 fidelity pass: the tyres' aligning moment in
+//!                   the yaw equation (+0.2 deg/g understeer), front grip
+//!                   re-pinned 1.06 -> 1.08, full friction through the
+//!                   ignition cut and a lock that keeps the crank's momentum
 
 /// Revision of the bicycle's physics.
 pub const PHYSICS_REV_BICYCLE: u32 = 1;
 /// Revision of the double track's physics.
-pub const PHYSICS_REV_DOUBLE_TRACK: u32 = 3;
+pub const PHYSICS_REV_DOUBLE_TRACK: u32 = 4;
 
 /// The revision for a `vehicleModel` number (2 bicycle, 3 double track).
 pub fn physics_rev(vehicle_model: u8) -> u32 {

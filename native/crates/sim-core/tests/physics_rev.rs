@@ -24,7 +24,7 @@ const BICYCLE_LIMITS: (u32, [f64; 5]) = (1, [1.4477, 1.5737, 1.7665, 4.7500, 19.
 /// ramp10/15/20 peak g, standing 75 m s, stop from 25 m/s m. Compared within
 /// `DT_TOLERANCE`, not rounded: a value near its rounding edge trips on
 /// noise, and one mid-step lets a real change through.
-const DOUBLE_TRACK: (u32, [f64; 5]) = (3, [1.4380, 1.6060, 1.8283, 4.7680, 19.4100]);
+const DOUBLE_TRACK: (u32, [f64; 5]) = (4, [1.4336, 1.5957, 1.8124, 4.7720, 19.4098]);
 /// What a driver would feel: 0.01 g, 0.01 s, 0.1 m.
 const DT_TOLERANCE: [f64; 5] = [0.01, 0.01, 0.01, 0.01, 0.1];
 

@@ -539,6 +539,9 @@ pub struct StateOut {
     pub w_f: f64,
     pub w_r: f64,
     pub delta: f64,
+    /// Each wheel's spin (rad/s), FL FR RL RR, from the 4-wheel model; null
+    /// from the bicycle, which has one front rotor.
+    pub wheels: Option<[f64; 4]>,
 }
 
 /// The JS `telemetry` object, name for name.
@@ -1603,10 +1606,22 @@ impl Loop {
 
         let fz_f = tel.fz[FL] + tel.fz[FR];
         let fz_r = tel.fz[RL] + tel.fz[RR];
+        // The per-axle tyre channels. The bicycle's two patches per axle share
+        // a slip angle (and its fronts a slip ratio), so the left one IS the
+        // axle and stays exactly what it always logged. The 4-wheel's four
+        // corners differ, and reading only the left made the front slip swing
+        // with the turn's direction (3.4 deg in left turns, 5.8 in rights at
+        // 1.2 g): each axle is its two wheels, load-weighted, as `balance` is.
+        let four = self.car.fidelity() == Fidelity::DoubleTrack;
+        let axle = |v: &[f64; 4], l: usize, r: usize| {
+            let fz = tel.fz[l] + tel.fz[r];
+            if four && fz > 1.0 { (v[l] * tel.fz[l] + v[r] * tel.fz[r]) / fz } else { v[l] }
+        };
         Snapshot {
             state: StateOut {
                 x: s.x, y: s.y, psi: s.psi, u: s.u, v: s.v, r: s.r,
                 w_f: tel.wheel_omega_front, w_r: tel.wheel_omega_rear, delta: tel.steer_rad,
+                wheels: if four { Some(tel.wheel_omega) } else { None },
             },
             tel: TelemetryOut {
                 speed: tel.speed,
@@ -1618,14 +1633,14 @@ impl Loop {
                 fz_r,
                 d_fz_lat_f: (tel.fz[FR] - tel.fz[FL]).abs() / 2.0,
                 d_fz_lat_r: (tel.fz[RR] - tel.fz[RL]).abs() / 2.0,
-                slip_f: tel.slip_deg[FL],
-                slip_r: tel.slip_deg[RL],
-                kappa_f: tel.kappa[FL],
-                kappa_r: tel.kappa[RL],
+                slip_f: axle(&tel.slip_deg, FL, FR),
+                slip_r: axle(&tel.slip_deg, RL, RR),
+                kappa_f: axle(&tel.kappa, FL, FR),
+                kappa_r: axle(&tel.kappa, RL, RR),
                 kappa_rl: tel.kappa[RL],
                 kappa_rr: tel.kappa[RR],
-                util_f: tel.utilisation[FL],
-                util_r: tel.utilisation[RL],
+                util_f: axle(&tel.utilisation, FL, FR),
+                util_r: axle(&tel.utilisation, RL, RR),
                 util_rl: tel.utilisation[RL],
                 util_rr: tel.utilisation[RR],
                 diff_nm: tel.diff_nm,
