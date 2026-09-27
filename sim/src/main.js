@@ -11,9 +11,11 @@ const cadUrl = (key, dflt) => {
   return v && /^[\w.-]+\.glb$/.test(v) ? `./data/${v}` : dflt;
 };
 const EXPQ = new URLSearchParams(location.search);
-// ?carbon=1 weave, ?pbr=1 per-part roughness/metal (both need the loader's
-// per-vertex materials), ?cadidx=1 indexed meshes (needed for the 8M-tri car).
-setCadExperiment({ indexed: EXPQ.get("cadidx") === "1", materials: EXPQ.get("carbon") === "1" || EXPQ.get("pbr") === "1" });
+// Per-vertex materials are always read (harmless unless the renderer's HD
+// look uses them). ?cadidx=1 reads a ?cadcar= override indexed.
+setCadExperiment({ materials: true });
+/** A query override of an HD-look switch: "1" forces on, "0" off, else `dflt`. */
+const lookFlag = (key, dflt) => (EXPQ.get(key) === "1" ? 1 : EXPQ.get(key) === "0" ? 0 : dflt);
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
@@ -173,7 +175,7 @@ class Game {
     this.gpuName = probeGpuName();
     this.graphicsChoice = loadGraphicsChoice();
     this.renderer = new Renderer(dom.gl, resolvePreset(this.graphicsChoice, this.gpuName));
-    this.renderer.exp = { carbon: EXPQ.get("carbon") === "1" ? 1 : 0, pbr: EXPQ.get("pbr") === "1" ? 1 : 0 };
+    this.syncCarLook();
     // Pads the GPU frame out so a laptop card holds its clocks; see gpuHold.js.
     // Desktop only by default: in a browser tab the page shares the GPU with
     // everything else and should not be the one keeping it awake.
@@ -436,7 +438,7 @@ class Game {
       // Optional CAD bodywork. Absent is the normal case, not an error, so
       // this resolves to null rather than rejecting and taking the load with
       // it.
-      this.cadCar !== undefined ? Promise.resolve(this.cadCar) : loadCarModel(cadUrl("cadcar", "./data/car.glb")),
+      this.cadCar !== undefined ? Promise.resolve(this.cadCar) : this.loadCadCar(),
       // A wheel on its own, which is a much easier thing to supply than a
       // whole car and is four of the biggest objects on screen.
       this.cadWheel !== undefined
@@ -476,6 +478,7 @@ class Game {
 
     // Remembered across track changes so the file is fetched once.
     this.cadCar = cadCar ?? null;
+    this.syncCarLook();
     if (this.cadCar?.error) {
       this.cadStatus = `data/car.glb could not be read: ${this.cadCar.error}`;
       console.warn(this.cadStatus);
@@ -830,6 +833,53 @@ class Game {
    * on it (tools/test_visual_car.mjs drives the same inputs under both and
    * compares). A rig preference, kept per machine; not a setup parameter.
    */
+  /**
+   * The team car for the current graphics preset: High draws the
+   * full-resolution car (data/car-hd.glb, every fastener, 1.26M triangles)
+   * with the shipped car.glb casting its shadows; Medium and Low draw
+   * car.glb as it always was. No car-hd.glb (a build without it) falls back
+   * to car.glb on High too. `?cadcar=` overrides the file for experiments.
+   */
+  async loadCadCar() {
+    const override = EXPQ.get("cadcar") ? cadUrl("cadcar", null) : null;
+    const wantHd = !override && !!this.renderer?.quality?.hdCar;
+    let car = null;
+    if (override) car = await loadCarModel(override, { indexed: EXPQ.get("cadidx") === "1" });
+    else if (wantHd) car = await loadCarModel("./data/car-hd.glb", { indexed: true });
+    if (car && !car.error && (override || wantHd)) {
+      car.hd = true;
+      const low = await loadCarModel("./data/car.glb");
+      if (low && !low.error) {
+        car.shadowBody = low.body;
+        car.shadowRig = new Map([
+          ...(low.rig?.parts ?? []).map((p) => [`rig:${p.corner}:${p.role}`, p.mesh]),
+          ...(low.controls ?? []).map((c) => [`ctl:${c.name}`, c.mesh]),
+        ]);
+      }
+      return car;
+    }
+    return loadCarModel("./data/car.glb");
+  }
+
+  /** Carbon, metals, cockpit culling and light shadows go with the HD car. */
+  syncCarLook() {
+    const r = this.renderer;
+    if (!r) return;
+    const hd = this.cadCar?.hd ? 1 : 0;
+    r.exp = { carbon: lookFlag("carbon", hd), pbr: lookFlag("pbr", hd), pvs: lookFlag("pvs", hd), shadowLod: lookFlag("shadowlod", hd) };
+  }
+
+  /** The preset changed: swap the car if High's HD car came or went. */
+  async refreshCadCarForQuality() {
+    if (this.cadCar === undefined || EXPQ.get("cadcar")) return;
+    const wantHd = !!this.renderer?.quality?.hdCar;
+    if (!!this.cadCar?.hd === wantHd) return;
+    const car = await this.loadCadCar();
+    this.cadCar = car && !car.error ? car : null;
+    this.syncCarLook();
+    this.applyVisualCar();
+  }
+
   applyVisualCar() {
     const r = this.renderer;
     if (!r) return;
@@ -4150,6 +4200,7 @@ async function boot() {
     game.graphicsChoice = PRESET_ORDER[(i + 1) % PRESET_ORDER.length];
     saveGraphicsChoice(game.graphicsChoice);
     game.renderer.setQuality(resolvePreset(game.graphicsChoice, game.gpuName));
+    void game.refreshCadCarForQuality();
     refreshPauseCard();
   });
   pauseEl("pauseVolume").addEventListener("input", () => {

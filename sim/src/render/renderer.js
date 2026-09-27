@@ -31,6 +31,7 @@ import { SuspensionRig } from "./suspensionRig.js";
 import { buildVenueMesh } from "./venuemesh.js";
 import { buildEnvironmentMesh } from "./envmesh.js";
 import { PRESETS } from "./quality.js";
+import { bakeCockpitPvs, visibleIndex } from "./cockpitPvs.js";
 
 // Far enough that a cone arrives out of the fog rather than popping in on
 // the endurance straights; the instance buffer holds 4096, plenty.
@@ -1154,7 +1155,7 @@ export class Renderer {
     // mesh with an index draws with drawElements through `drawArrays`.
     this._idxVaos = new WeakSet();
     this._curIdx = false;
-    this.exp = { carbon: 0, pbr: 0 };
+    this.exp = { carbon: 0, pbr: 0, pvs: 0, shadowLod: 0 };
     {
       const bind = gl.bindVertexArray.bind(gl);
       gl.bindVertexArray = (v) => { this._curIdx = !!v && this._idxVaos.has(v); bind(v); };
@@ -1310,7 +1311,7 @@ export class Renderer {
     this.rigParts = null;
     this.susp = null;
     if (car?.rig) {
-      this.rigParts = car.rig.parts.map((p) => ({ corner: p.corner, role: p.role, mesh: this.makeMesh(p.mesh), model: mat4() }));
+      this.rigParts = car.rig.parts.map((p) => ({ corner: p.corner, role: p.role, mesh: this.makeMesh(p.mesh), cpu: p.mesh, model: mat4() }));
       this.susp = new SuspensionRig(car.rig.corners);
       this._rigInv = mat4();
     }
@@ -1319,7 +1320,7 @@ export class Renderer {
     if (car?.controls) {
       this.rigParts = (this.rigParts ?? []).concat(car.controls.map((c) => ({
         control: c.name, pivot: c.pivot, axis: normalize([...c.axis]), curve: c.curve,
-        mesh: this.makeMesh(c.mesh), model: mat4(),
+        mesh: this.makeMesh(c.mesh), cpu: c.mesh, model: mat4(),
       })));
     }
     for (const mesh of Object.values(this.car)) {
@@ -1332,7 +1333,18 @@ export class Renderer {
     // model was loaded.
     const meshes = buildCarMeshes(car?.cockpit ? this.cadDriverParams() : this.carParams ?? null);
     if (car) {
+      // EXPERIMENT: CPU copies for the cockpit visibility bake; the light
+      // body for the shadow pass.
+      this._cpu = { body: car.body, tire: car.tire };
+      // Light twins of the moving parts, for the shadow pass.
+      for (const rp of this.rigParts ?? []) {
+        const tw = car.shadowRig?.get(rp.control ? `ctl:${rp.control}` : `rig:${rp.corner}:${rp.role}`);
+        if (tw) rp.shadowMesh = this.makeMesh(tw);
+      }
+      this._pvs = null;
+      this._tyreHidden = null;
       this.car = {
+        shadowBody: car.shadowBody ? this.makeMesh(car.shadowBody) : null,
         body: this.makeMesh(car.body),
         tire: this.makeMesh(car.tire),
         rim: this.makeMesh(car.rim),
@@ -1554,6 +1566,52 @@ export class Renderer {
     if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, 8);
     gl.activeTexture(gl.TEXTURE0);
     this.liveryTex = tex;
+  }
+
+  /**
+   * EXPERIMENT: bake what the driver can see (cockpitPvs.js) from the eye
+   * as it is right now, over head motion and the eye-height slider, and make
+   * the cockpit-only body: the same vertex buffers, a shorter index.
+   */
+  bakePvs() {
+    const gl = this.gl;
+    const body = this._cpu.body;
+    this._pvs = { skipped: true };
+    if (!body.index) return;
+    const inv = invertRigid(mat4(), this.chassis);
+    const local = (m) => multiply(mat4(), inv, m);
+    const items = [{ mesh: body, model: identity(mat4()) }];
+    const rig = (this.rigParts ?? []).filter((rp) => rp.cpu);
+    for (const rp of rig) items.push({ mesh: rp.cpu, model: local(rp.model) });
+    for (let k = 0; k < 4; k++) items.push({ mesh: this._cpu.tire, model: local(this._wheelMats[k]) });
+    const offsets = [];
+    for (const dx of [-0.06, 0, 0.06]) for (const dy of [-0.07, 0, 0.07, 0.14]) for (const dz of [-0.05, 0, 0.05]) offsets.push([dx, dy, dz]);
+    const saved = { vp: gl.getParameter(gl.VIEWPORT), fb: gl.getParameter(gl.FRAMEBUFFER_BINDING), prog: gl.getParameter(gl.CURRENT_PROGRAM),
+      depth: gl.isEnabled(gl.DEPTH_TEST), cull: gl.isEnabled(gl.CULL_FACE), blend: gl.isEnabled(gl.BLEND), clear: gl.getParameter(gl.COLOR_CLEAR_VALUE) };
+    const r = bakeCockpitPvs(gl, items, multiply(mat4(), this.view, this.chassis), offsets);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, saved.fb);
+    gl.viewport(...saved.vp);
+    gl.useProgram(saved.prog);
+    for (const [cap, on] of [[gl.DEPTH_TEST, saved.depth], [gl.CULL_FACE, saved.cull], [gl.BLEND, saved.blend]]) on ? gl.enable(cap) : gl.disable(cap);
+    gl.clearColor(...saved.clear);
+    const idx = visibleIndex(body, r.vis[0], 2);
+    const b = this.car.body;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const bind = (buf, loc, size) => { if (!buf) return; gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0); };
+    bind(b.buffers.position, A_POS, 3); bind(b.buffers.normal, A_NORMAL, 3); bind(b.buffers.color, A_COLOR, 3);
+    bind(b.buffers.uv, A_UV, 2); bind(b.buffers.mat, A_MAT, 3);
+    const eb = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, eb);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+    this._idxVaos.add(vao);
+    gl.bindVertexArray(null);
+    this.car.cockpitBody = { vao, count: idx.length, buffers: { index: eb } };
+    rig.forEach((rp, i) => { rp.cockpitHidden = !r.vis[1 + i].some((v) => v); });
+    this._tyreHidden = [0, 1, 2, 3].map((k) => !r.vis[1 + rig.length + k].some((v) => v));
+    this._pvs = { ms: r.ms, views: r.views, bodyTris: body.index.length / 3, keptTris: idx.length / 3,
+      rigHidden: rig.filter((rp) => rp.cockpitHidden).length, rigParts: rig.length, tyreHidden: this._tyreHidden };
+    console.info("cockpit PVS", this._pvs);
   }
 
   /** Static mesh drawn with its own model matrix (the car parts, scenery). */
@@ -2061,6 +2119,8 @@ export class Renderer {
     this.placeGhost(s);
     this.placeCockpit(s);
     if (s.skid) this.addSkids(s.skid);
+
+    if (this.exp.pvs && s.hideDriver && this._cpu && !this._pvs) this.bakePvs();
 
     // ---- shadow pass ----
     this.drawShadowMap(s, cam);
@@ -2605,12 +2665,14 @@ export class Renderer {
       const ud = this.u.depthCar;
       gl.uniformMatrix4fv(ud.uViewProj, false, this.lightViewProj[i]);
       gl.uniformMatrix4fv(ud.uModel, false, this.chassis);
-      gl.bindVertexArray(this.car.body.vao);
-      this.drawArrays(gl.TRIANGLES, 0, this.car.body.count);
+      const sb = (this.exp.shadowLod && this.car.shadowBody) || this.car.body;
+      gl.bindVertexArray(sb.vao);
+      this.drawArrays(gl.TRIANGLES, 0, sb.count);
       for (const rp of this.rigParts ?? []) {
+        const m = (this.exp.shadowLod && rp.shadowMesh) || rp.mesh;
         gl.uniformMatrix4fv(ud.uModel, false, rp.model);
-        gl.bindVertexArray(rp.mesh.vao);
-        this.drawArrays(gl.TRIANGLES, 0, rp.mesh.count);
+        gl.bindVertexArray(m.vao);
+        this.drawArrays(gl.TRIANGLES, 0, m.count);
       }
       for (let k = 0; k < 4; k++) {
         gl.uniformMatrix4fv(ud.uModel, false, this._wheelMats[k]);
@@ -2706,9 +2768,10 @@ export class Renderer {
     };
 
     if (this.liveryTex) gl.uniform1f(uc.uLiveryOn, 1);
-    part(this.car.body, this.chassis, null, MAT.paint);
+    const inCockpit = s.hideDriver && this.exp.pvs && this.car.cockpitBody;
+    part(inCockpit ? this.car.cockpitBody : this.car.body, this.chassis, null, MAT.paint);
     gl.uniform1f(uc.uLiveryOn, 0);
-    for (const rp of this.rigParts ?? []) part(rp.mesh, rp.model, null, MAT.paint);
+    for (const rp of this.rigParts ?? []) if (!(inCockpit && rp.cockpitHidden)) part(rp.mesh, rp.model, null, MAT.paint);
     // The driver rides on the chassis frame. Not from the cockpit camera:
     // that eye is inside the helmet, and a helmet lining is not a view.
     if (!s.hideDriver) {
@@ -2728,6 +2791,7 @@ export class Renderer {
 
     const w = s.wheels;
     for (let i = 0; i < 4; i++) {
+      if (inCockpit && this._tyreHidden?.[i]) continue;
       gl.frontFace(this._wheelMirrored[i] ? gl.CW : gl.CCW);
       part(this.car.tire, this._wheelMats[i], null, MAT.tyre);
       // Fade the gold spokes toward the tyre as the wheel speeds up. Five

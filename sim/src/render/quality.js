@@ -30,7 +30,9 @@
 // Medium measured 76 there, and it was dropped for that reason.
 
 export const PRESETS = {
-  high:   { label: "High",   scale: 1.0,  maxDpr: 2, msaa: true,  shadows: 2, shadowSize: 2048, detail: 1 },
+  // hdCar: the full-resolution team car (data/car-hd.glb) with carbon and
+  // real metals, culled to what the driver can see from the seat.
+  high:   { label: "High",   scale: 1.0,  maxDpr: 2, msaa: true,  shadows: 2, shadowSize: 2048, detail: 1, hdCar: true },
   medium: { label: "Medium", scale: 1.0,  maxDpr: 1, msaa: false, shadows: 1, shadowSize: 1024, detail: 0 },
   low:    { label: "Low",    scale: 0.75, maxDpr: 1, msaa: false, shadows: 0, shadowSize: 1024, detail: 0 },
 };

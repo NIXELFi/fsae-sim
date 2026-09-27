@@ -33,6 +33,13 @@ Sources live in the team vault (Helios, `SDM27/Helios/Sim`):
    their pivots and travel curves in the extras (`controls`); the renderer
    turns them by the driver's inputs (src/vehicle/clutchLever.js for the
    clutch, which has no control of its own in the sim).
+3b. `KEEP_HW=1 node build.mjs 0.0001 0 out/car-hd.glb` -- the High preset's
+   car (`data/car-hd.glb`): every part and fastener kept, 0.1 mm
+   simplification, ~1.26M triangles, ~30 MB. The renderer reads it indexed,
+   shades its carbon with a weave and its metals as metal, draws from the
+   cockpit only what the seat can see (src/render/cockpitPvs.js), and lets
+   car.glb cast its shadows -- so car.glb is still needed beside it. Medium
+   and Low draw car.glb. (0.3 mm = 802k triangles; lossless = 7.9M, too heavy.)
 4. `node build_sw.mjs 0.0002` -- steering wheel, 0.2 mm.
 5. `node step2glb.mjs <sha> out/strada.glb` then `node build_dash.mjs` -- the
    Strada from its STEP (single-part GLB exports from SolidWorks come out

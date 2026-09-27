@@ -727,7 +727,7 @@ export function buildCarFromGlb(buffer, geo = null) {
  * @returns the car, or null when there is no model, or `{error}` when there is
  *   one and it is unusable -- which the caller should show rather than swallow.
  */
-export async function loadCarModel(url) {
+export async function loadCarModel(url, opts = {}) {
   let buffer;
   try {
     const res = await fetch(url, { cache: "no-cache" });
@@ -742,10 +742,15 @@ export async function loadCarModel(url) {
   if (buffer.byteLength < 12) return null;
   if (new DataView(buffer).getUint32(0, true) !== MAGIC) return null;
 
+  // Options for this load only (the HD car is read indexed).
+  const prev = { ...EXP };
+  Object.assign(EXP, opts);
   try {
     return buildCarFromGlb(buffer);
   } catch (err) {
     return { error: String(err?.message ?? err) };
+  } finally {
+    Object.assign(EXP, prev);
   }
 }
 

@@ -12,6 +12,9 @@
 # the desktop build pick it up; without it the procedural SDM26 body is drawn.
 # Not committed: it is your model, it is large, and it is not the default.
 /data/car.glb
+# The full-resolution car the High preset draws (tools/cad/README.md, step 3b).
+/data/car-hd.glb
+/data/car_hd*.glb
 /data/steering-wheel.glb
 /data/dash.glb
 /reference-car.glb

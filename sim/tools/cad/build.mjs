@@ -307,7 +307,7 @@ const coarse = new WeakSet();
 // everything else is untextured.
 const LIVERY = /STRU-Hood|STRU-Body-Panels|STRU-Cowl|Aero-Body-Wing|Endplate|Rear-Wing-E_1|Rear-Wing-018-E\d-Shell|FW-013-E\d/i;
 const livery = new WeakSet();
-async function ingest(file, { fromAero, skip, finishes = true, hardware = true, mounts = false, errScale = 1 }) {
+async function ingest(file, { fromAero, skip, finishes = true, hardware = !process.env.KEEP_HW, mounts = false, errScale = 1 }) {
   const src = await io.read(file);
   tame = !finishes;
   curFile = file;
