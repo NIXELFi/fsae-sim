@@ -30,6 +30,7 @@ import { SDM26, CAD_EYE_AHEAD_OF_CG_M } from "../vehicle/params.js";
 import { SuspensionRig } from "./suspensionRig.js";
 import { buildVenueMesh } from "./venuemesh.js";
 import { buildEnvironmentMesh } from "./envmesh.js";
+import { buildSiteMeshes } from "./sitemesh.js";
 import { PRESETS } from "./quality.js";
 import { bakeCockpitPvs, visibleIndex } from "./cockpitPvs.js";
 
@@ -59,6 +60,7 @@ const SHADOW_DEPTH = 90;      // m, half depth range of each cascade along the s
 const A_UV = 3;
 const A_MAT = 4;  // EXPERIMENT: car program only (props use 4 for iDown)
 const LIVERY_UNIT = 2;
+const SITE_ORTHO_UNIT = 5, SITE_CLASS_UNIT = 6;
 const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_CONE = 5, I_DIR = 6;
 /** Floats per prop instance: offset(3), down(1), cone(1), dir(1). The cone
  *  flag tells PROP_FS which props get the reflective collar; it used to be a
@@ -577,9 +579,32 @@ float contactAO(vec2 p) {
   return 1.0 - body * 0.22 - tyre * 0.45;
 }`;
 
+// The real site's terrain (render/sitemesh.js): world position plus the
+// site UV that the ortho and class rasters are laid on.
+const SITE_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 3) in vec2 aUV;
+uniform mat4 uViewProj;
+out vec3 vWorld;
+out vec2 vUV;
+out vec3 vNormal;
+void main() {
+  vWorld = aPos;
+  vUV = aUV;
+  vNormal = aNormal;
+  gl_Position = uViewProj * vec4(aPos, 1.0);
+}`;
+
 const GROUND_FS = `#version 300 es
 precision highp float;
 in vec3 vWorld;
+#ifdef SITE
+in vec2 vUV;
+in vec3 vNormal;
+uniform sampler2D uOrtho;   // display-space albedo, calibrated (tools/mis_site/build.py)
+uniform sampler2D uClass;   // 0 grass, 80 pavement, 160 tree, 240 structure (/255)
+#endif
 uniform vec2 uLotCentre;
 uniform vec2 uLotHalf;
 ${COMMON_FS}
@@ -614,6 +639,20 @@ void main() {
   asphalt *= 0.97 + 0.06 * smoothstep(0.55, 0.62, seam);
   asphalt += (fine - 0.5) * 0.14;
 
+#ifdef SITE
+  // The real site: the ortho is the colour, the procedural surfaces only add
+  // the detail a 0.5 m texel cannot -- as a ratio to their own mean, which
+  // their footprint fades already converge to, so far away it is the photo.
+  vec3 orthoC = texture(uOrtho, vUV).rgb;
+  float cls = texture(uClass, vUV).r;
+  float paveW = smoothstep(0.18, 0.28, cls) * (1.0 - smoothstep(0.45, 0.55, cls));
+  float grassN = afbm(p, 0.35, px) * 0.6 + anoise(p, 6.0, px) * 0.4;
+  vec3 grassP = mix(vec3(0.27, 0.36, 0.17), vec3(0.42, 0.50, 0.22), grassN);
+  vec3 ratioA = asphalt / vec3(0.2485, 0.2525, 0.2625);
+  vec3 ratioG = grassP / vec3(0.345, 0.43, 0.195);
+  vec3 albedo = orthoC * mix(ratioG, ratioA, paveW);
+  float rough = mix(0.95, 0.78, paveW);
+#else
   // Faded parking-stall lines. Real lot markings, and the main optical-flow
   // cue at speed: 2.75 m bays, 5.5 m deep, in double rows (two bays nose to
   // nose) with a 7 m drive aisle between the rows -- an 18 m module. The
@@ -648,6 +687,7 @@ void main() {
     albedo = mix(albedo, grass, grassAmt);
     rough = mix(rough, 0.95, grassAmt);
   }
+#endif
 
   // ---- lighting ----
   // Worn asphalt goes glossier where the aggregate is polished, which is why
@@ -659,6 +699,12 @@ void main() {
   rough -= 0.10 * smoothstep(0.55, 0.62, seam) + 0.06 * wear;
   vec3 up = vec3(0.0, 1.0, 0.0);
   vec3 n = lotNormal(p, px, seam);
+#ifdef SITE
+  // The terrain's own slope (banking, grades), the lot relief on pavement only.
+  vec3 tn = normalize(vNormal);
+  n = normalize(tn + (n - up) * paveW);
+  up = tn;
+#endif
   float sh = shadowAt(vWorld, up);
   // Contact darkening once, on the whole result: the sun under the car is
   // already the shadow map's job, and applying the AO to the direct term as
@@ -1806,10 +1852,13 @@ export class Renderer {
       };
       const built = {};
       for (const [name, [vs, fs]] of Object.entries(progs)) built[name] = program(gl, vs, withDefines(fs, defs));
+      // The real site's terrain: the ground shader, reading the site rasters.
+      built.site = program(gl, SITE_VS, withDefines(GROUND_FS, defs + "#define SITE 1\n"));
       // Only once every program has compiled: a failure above leaves the
       // previous set drawing rather than half of each.
       for (const p of [this.progSky, this.progGround, this.progRibbon, this.progSkid, this.progProp,
-        this.progCar, this.progScreen, this.progDepthCar, this.progDepthProp]) if (p) gl.deleteProgram(p);
+        this.progCar, this.progScreen, this.progDepthCar, this.progDepthProp, this.progSite]) if (p) gl.deleteProgram(p);
+      this.progSite = built.site;
       this.progSky = built.sky; this.progGround = built.ground; this.progRibbon = built.ribbon;
       this.progSkid = built.skid; this.progProp = built.prop; this.progCar = built.car;
       this.progScreen = built.screen; this.progDepthCar = built.depthCar; this.progDepthProp = built.depthProp;
@@ -1821,7 +1870,7 @@ export class Renderer {
       for (const [name, prog] of Object.entries({
         sky: this.progSky, ground: this.progGround, ribbon: this.progRibbon,
         prop: this.progProp, car: this.progCar, depthCar: this.progDepthCar, depthProp: this.progDepthProp,
-        skid: this.progSkid,
+        skid: this.progSkid, site: this.progSite,
       })) {
         const map = {};
         const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
@@ -1881,9 +1930,13 @@ export class Renderer {
     this.track = track;
     if (this.venue) this.deleteMesh(this.venue);
     if (this.env) this.deleteMesh(this.env);
+    if (this.siteTerrain) this.deleteMesh(this.siteTerrain);
+    if (this.siteStands) this.deleteMesh(this.siteStands);
     if (this.ribbon) { gl.deleteVertexArray(this.ribbon.vao); }
     this.venue = null;
     this.env = null;
+    this.siteTerrain = null;
+    this.siteStands = null;
     this.ribbon = null;
 
     // A venue supplies its own surfaces -- banking, apron, infield, wall and
@@ -1967,6 +2020,48 @@ export class Renderer {
       hx: (b.maxX - b.minX) / 2 + 110, hz: (b.maxY - b.minY) / 2 + 110,
     };
     this.env = this.makeMesh(buildEnvironmentMesh(b, "course"));
+    if (track.site) this.setSite(track);
+  }
+
+  /**
+   * The real venue around a course (render/sitemesh.js): lidar terrain laid
+   * with the ortho, the buildings, stands and trees where they are. Replaces
+   * the procedural lot, its poles and the generic scenery; keeps the horizon
+   * rings, pushed out past the edge of the site.
+   */
+  setSite(track) {
+    const gl = this.gl;
+    const { site, place } = track.site;
+    const t0 = performance.now();
+    const m = buildSiteMeshes(site, place, track);
+    this.siteTerrain = this.makeMesh(m.terrain);
+    this.siteStands = this.makeMesh(m.stands);
+    if (this.env) this.deleteMesh(this.env);
+    this.env = this.makeMesh(buildEnvironmentMesh(m.bounds, "venue"));
+    this.poles = [];
+    this.lot = { cx: 0, cz: 0, hx: 0, hz: 0 };
+    if (this._siteTexFor !== site) {
+      for (const t of [this.siteOrtho, this.siteClass]) if (t) gl.deleteTexture(t);
+      const upload = (bmp) => {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        const an = gl.getExtension("EXT_texture_filter_anisotropic");
+        if (an) gl.texParameterf(gl.TEXTURE_2D, an.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+        return tex;
+      };
+      this.siteOrtho = upload(site.ortho);
+      this.siteClass = upload(site.cls);
+      this._siteTexFor = site;
+    }
+    this.siteStats = { ...m.stats, buildMs: Math.round(performance.now() - t0) };
+    console.info("site", this.siteStats);
   }
 
   deleteMesh(mesh) {
@@ -2163,7 +2258,7 @@ export class Renderer {
     // i.e. all of it); at 900 m the edge was 9 % unfogged and drew a line.
     gl.uniform1f(ug.uExtent, 3000);
     // The venue paves its own ground; sink the procedural lot below it.
-    gl.uniform1f(ug.uDrop, this.venue ? 0.35 : 0.0);
+    gl.uniform1f(ug.uDrop, this.venue || this.siteTerrain ? 0.35 : 0.0);
     gl.uniform2f(ug.uLotCentre, this.lot.cx, this.lot.cz);
     gl.uniform2f(ug.uLotHalf, this.lot.hx, this.lot.hz);
     gl.bindVertexArray(this.groundQuad);
@@ -2172,6 +2267,22 @@ export class Renderer {
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(1.0, 2.0);
     this.drawArrays(gl.TRIANGLES, 0, 6);
+    if (this.siteTerrain) {
+      gl.useProgram(this.progSite);
+      const us = this.u.site;
+      this.setCommon(us, eye);
+      this.setContact(us, cam);
+      gl.uniformMatrix4fv(us.uViewProj, false, this.viewProj);
+      gl.activeTexture(gl.TEXTURE0 + SITE_ORTHO_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.siteOrtho);
+      gl.activeTexture(gl.TEXTURE0 + SITE_CLASS_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.siteClass);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(us.uOrtho, SITE_ORTHO_UNIT);
+      gl.uniform1i(us.uClass, SITE_CLASS_UNIT);
+      gl.bindVertexArray(this.siteTerrain.vao);
+      this.drawArrays(gl.TRIANGLES, 0, this.siteTerrain.count);
+    }
     gl.disable(gl.POLYGON_OFFSET_FILL);
 
     // --- venue surfaces and the distant environment (matte, static) ---
@@ -2194,6 +2305,10 @@ export class Renderer {
         gl.bindVertexArray(this.env.vao);
         this.drawArrays(gl.TRIANGLES, 0, this.env.count);
         gl.disable(gl.CULL_FACE);
+      }
+      if (this.siteStands) {
+        gl.bindVertexArray(this.siteStands.vao);
+        this.drawArrays(gl.TRIANGLES, 0, this.siteStands.count);
       }
     }
 

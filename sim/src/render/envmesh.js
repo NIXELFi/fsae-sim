@@ -593,6 +593,10 @@ const SHAPES = [garage, office, shed];
  * @param bounds {minX, maxX, minY, maxY} of the driveable geometry, world (x, y)
  * @param kind   "course" or "venue"
  */
+/** A tree mesh builder for other scenery (render/sitemesh.js): a Builder, a
+ *  seeded random source, and `tree(b, x, z, h, rand, coniferBias)`. */
+export const sceneryKit = { Builder, rng, tree };
+
 export function buildEnvironmentMesh(bounds, kind = "course") {
   const b = new Builder();
   const venue = kind === "venue";

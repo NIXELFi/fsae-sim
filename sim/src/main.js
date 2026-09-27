@@ -3,6 +3,7 @@
 import { SDM26, CAD_EYE_AHEAD_OF_CG_M } from "./vehicle/params.js";
 import { TIRE_INFO } from "./vehicle/tire.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
+import { loadSite, coursePlacement } from "./render/sitemesh.js";
 import { loadCarModel, loadWheelModel, loadBodyModel, loadSteeringWheelModel, loadDashModel, setCadExperiment } from "./render/glbcar.js";
 // EXPERIMENT (exp/hd-cockpit): ?cadcar=car_hd0.glb / ?cadsw=... pick another
 // file out of data/ for A/B'ing a full-resolution CAD car.
@@ -474,6 +475,16 @@ class Game {
     // autocross means nothing on the endurance loop.
     this.deltaTimer = new DeltaTimer(track.length);
     this.chasingRunId = null;
+    // The real venue around the course, where there is one (?site=0 draws
+    // the generic lot instead). Loaded once; drawing only.
+    if (EXPQ.get("site") !== "0" && ["autocross", "endurance", "skidpad", "accel"].includes(spec.id)) {
+      if (this.site === undefined) {
+        this.site = await loadSite();
+        if (this.site?.error) { console.warn("MIS site:", this.site.error); this.site = null; }
+      }
+      const place = coursePlacement(this.site, spec.id);
+      if (place) track.site = { site: this.site, place };
+    }
     this.renderer.setTrack(track);
 
     // Remembered across track changes so the file is fetched once.

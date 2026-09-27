@@ -245,7 +245,7 @@ export const CHANNEL_IDS = COLUMNS.map((c) => c.id);
 /** Channels whose values are derived rather than modelled, called out in the
  *  manifest so nobody mistakes a plausible trace for a measured one. */
 export const DERIVED_CHANNELS = {
-  "gps.lat": "projected from course XY onto the venue datum",
+  "gps.lat": "projected from course XY onto the venue datum (registered to the site for the 2026 courses)",
   "gps.lon": "projected from course XY onto the venue datum",
   "brake.front_pressure": `pedal x bias x ${BRAKE_FULL_KPA} kPa; the model has no hydraulics`,
   "brake.rear_pressure": `pedal x bias x ${BRAKE_FULL_KPA} kPa; the model has no hydraulics`,
@@ -287,7 +287,8 @@ export function makeGeoProjection(datum) {
   const mPerDegLat = (Math.PI / 180) * EARTH_R;
   const mPerDegLon = mPerDegLat * Math.cos(lat0);
   const rot = ((datum.bearingDeg ?? 0) * Math.PI) / 180;
-  const cr = Math.cos(rot), sr = Math.sin(rot);
+  const k = datum.scale ?? 1;
+  const cr = Math.cos(rot) * k, sr = Math.sin(rot) * k;
   return (x, y) => {
     // Course +X is east and +Y is north once the datum's bearing is applied.
     const e = x * cr - y * sr;
@@ -300,13 +301,16 @@ export function makeGeoProjection(datum) {
  *  2026 FSAE Michigan layouts at Michigan International Speedway; `mis` is the
  *  speedway itself. */
 export const TRACK_DATUMS = {
-  autocross: { lat: 42.07152, lon: -84.24089, bearingDeg: 0, name: "FSAE Michigan autocross pad" },
-  endurance: { lat: 42.06985, lon: -84.24515, bearingDeg: 0, name: "FSAE Michigan endurance pad" },
+  // Registered on the 2022 NAIP ortho from the 2026 course maps (tools/mis_site,
+  // data/mis-site.json): the course origin's real fix, the bearing its +X runs
+  // at (anticlockwise from east) and the map-to-ground scale.
+  autocross: { lat: 42.066137, lon: -84.237841, bearingDeg: -102.949, scale: 1.007288, name: "FSAE Michigan 2026 autocross, MIS back straight" },
+  endurance: { lat: 42.067010, lon: -84.238858, bearingDeg: 77.049, scale: 1.005016, name: "FSAE Michigan 2026 endurance, MIS infield + back straight" },
   mis: { lat: 42.06556, lon: -84.24139, bearingDeg: 0, name: "Michigan International Speedway" },
   // The skidpad is built from the rulebook, not traced from a site; it sits
   // on the same nominal MIS infield fix as a generated course.
-  skidpad: { lat: 42.06700, lon: -84.24300, bearingDeg: 0, name: "Skidpad (rulebook layout, nominal datum, MIS infield)" },
-  accel: { lat: 42.06700, lon: -84.24300, bearingDeg: 0, name: "Acceleration (rulebook layout, nominal datum, MIS infield)" },
+  skidpad: { lat: 42.069588, lon: -84.236857, bearingDeg: 18.069, name: "Skidpad (rulebook layout) where the 2026 maps draw it, MIS back-straight apron" },
+  accel: { lat: 42.069618, lon: -84.243241, bearingDeg: -103.556, name: "Acceleration (rulebook layout), MIS front-straight pit road" },
   // A generated course exists nowhere. It is placed on the MIS infield so the
   // GPS channels stay plausible for anything that maps them, and named so
   // nobody mistakes the fix for a survey.
