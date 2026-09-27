@@ -56,6 +56,7 @@ const SHADOW_DEPTH = 90;      // m, half depth range of each cascade along the s
 // A_UV shares slot 3 with I_OFFSET: different programs, and the car's is
 // fed from a buffer only on a mesh that has one (the CAD body's livery).
 const A_UV = 3;
+const A_MAT = 4;  // EXPERIMENT: car program only (props use 4 for iDown)
 const LIVERY_UNIT = 2;
 const A_POS = 0, A_NORMAL = 1, A_COLOR = 2, I_OFFSET = 3, I_DOWN = 4, I_CONE = 5, I_DIR = 6;
 /** Floats per prop instance: offset(3), down(1), cone(1), dir(1). The cone
@@ -865,15 +866,22 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec3 aColor;
 layout(location = 3) in vec2 aUV;   // livery; (-1, -1) where there is none
+layout(location = 4) in vec3 aMat;  // EXPERIMENT: roughness, metalness, kind (x < 0: none)
 uniform mat4 uViewProj;
 uniform mat4 uModel;
 out vec3 vColor;
 out vec3 vNormal;
 out vec3 vWorld;
 out vec2 vUV;
+out vec3 vMat;
+out vec3 vLocal;
+out vec3 vLocalN;
 void main() {
   vec4 w = uModel * vec4(aPos, 1.0);
   vWorld = w.xyz;
+  vMat = aMat;
+  vLocal = aPos;
+  vLocalN = aNormal;
   vNormal = mat3(uModel) * aNormal;
   vColor = aColor;
   vUV = aUV;
@@ -891,8 +899,85 @@ uniform float uLiveryOn;  // 1 while the livery-carrying body is drawn
 uniform vec4 uOverride;   // rgb to blend toward, alpha = how much
 uniform vec3 uMaterial;   // roughness, metalness, clearcoat
 uniform float uAlpha;     // 1 for the car; less for a ghost, which is blended
+uniform mat4 uModel;
+uniform vec2 uExp;        // EXPERIMENT: x = carbon weave, y = per-vertex PBR
+in vec3 vMat;
+in vec3 vLocal;
+in vec3 vLocalN;
 ${COMMON_FS}
 out vec4 frag;
+
+// EXPERIMENT (exp/hd-cockpit): 2x2 twill carbon, 3K tows about 2.2 mm wide,
+// projected on the part's dominant local plane. Each tow is a tiny cylinder:
+// an anisotropic (Kajiya-Kay) highlight along its fibres and a crowned
+// normal across it, so the checker flips light/dark as the view moves --
+// which is what makes carbon read as carbon. Faded to its average where a
+// tow gets narrower than a pixel or two.
+vec3 carbonShade(vec3 n, float sh, float paint) {
+  const float TOW = 0.0022;
+  vec3 an = abs(vLocalN);
+  vec2 uv; vec3 ax, ay;
+  if (an.x > an.y && an.x > an.z) { uv = vLocal.zy; ax = vec3(0, 0, 1); ay = vec3(0, 1, 0); }
+  else if (an.y > an.z) { uv = vLocal.xz; ax = vec3(1, 0, 0); ay = vec3(0, 0, 1); }
+  else { uv = vLocal.xy; ax = vec3(1, 0, 0); ay = vec3(0, 1, 0); }
+  vec2 g = uv / TOW;
+  vec2 cell = floor(g), f = fract(g);
+  bool warp = mod(cell.x - cell.y, 4.0) < 2.0;
+  vec3 Tl = warp ? ax : ay;
+  float across = warp ? f.y : f.x;
+  float fw = max(length(fwidth(g)), 1e-4);
+  float detail = (1.0 - smoothstep(0.25, 0.9, fw)) * (1.0 - paint);
+  vec3 T = normalize(mat3(uModel) * Tl);
+  T = normalize(T - n * dot(T, n) + 1e-5);
+  vec3 B = cross(n, T);
+  // Crowned tow: the normal tilts across it; gaps between tows in shadow.
+  float xc = across * 2.0 - 1.0;
+  vec3 nb = normalize(n + B * xc * 0.7 * detail);
+  float gap = mix(1.0, smoothstep(1.0, 0.8, abs(xc)), detail);
+
+  vec3 v = normalize(uCam - vWorld);
+  vec3 h = normalize(v + uSun);
+  float ndl = max(dot(nb, uSun), 0.0);
+  // Resin + clearcoat: a near-black dielectric, glossy.
+  vec3 albedo = vec3(0.012, 0.013, 0.015);
+  vec3 c = vec3(0.0);
+  {
+    float rough = 0.18;
+    float a = rough * rough, a2 = a * a;
+    float ndh = max(dot(n, h), 0.0);
+    float dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    float D = a2 / (PI * dd * dd);
+    float ndv = max(dot(n, v), 1e-3);
+    float nl0 = max(dot(n, uSun), 0.0);
+    float F = 0.04 + 0.96 * pow(1.0 - max(dot(v, h), 0.0), 5.0);
+    c += (albedo * nl0 + D * F * 0.25 * nl0 / max(ndv, 0.2)) * uSunCol * sh;
+    c += albedo * ambientFor(n);
+    vec3 r = reflect(-v, n);
+    float fv = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+#if Q_DETAIL == 0
+    c += skyGradient(r) * fv;
+#else
+    c += skyRadiance(r) * fv;
+#endif
+  }
+  // Fibres: Kajiya-Kay along T for the sun, and the sky seen along the
+  // fibre for the ambient sheen that makes the checker.
+  float th = dot(T, h);
+  float kk = pow(max(1.0 - th * th, 0.0), 48.0);
+  float tv = dot(T, v);
+  float sheen = pow(max(1.0 - tv * tv, 0.0), 6.0);
+  vec3 fibreCol = vec3(0.30, 0.31, 0.33);
+  // Each tow is a cylinder: the sky it mirrors is smeared ACROSS the tow,
+  // so a tow running one way sees horizon and zenith and its neighbour the
+  // other way sees one band of sky. That difference is the checker.
+  vec3 skyT = skyGradient(reflect(-v, nb));
+  vec3 fib = fibreCol * kk * ndl * uSunCol * sh * 0.22 + skyT * (0.05 + 0.10 * sheen);
+  // Where the weave is below a pixel, its average: half the tows face each way.
+  vec3 avg = fibreCol * 0.06 * max(dot(n, uSun), 0.0) * uSunCol * sh + skyGradient(reflect(-v, n)) * 0.08;
+  c += mix(avg * (1.0 - paint), fib * gap, detail);
+  return c;
+}
+
 void main() {
   // Two-sided: inside a cockpit you are looking at the back of half the
   // bodywork, and an unlit black shell there ruins the whole effect.
@@ -910,7 +995,17 @@ void main() {
     base = mix(base, toLinear(t.rgb), t.a);
   }
   float sh = shadowAt(vWorld, n);
-  vec3 c = shade(base, n, vWorld, sh, uMaterial.x, uMaterial.y, uMaterial.z);
+  vec3 mtl = uMaterial;
+  if (uExp.y > 0.5 && vMat.x >= 0.0) mtl = vec3(vMat.x, vMat.y, uMaterial.z);
+  vec3 c;
+  if (uExp.x > 0.5 && vMat.z > 0.5 && uOverride.a < 0.01) {
+    float paint = 0.0;
+    if (uLiveryOn > 0.5 && vUV.x >= 0.0) paint = texture(uLivery, vUV).a;
+    c = carbonShade(n, sh, paint);
+    if (paint > 0.0) c = mix(c, shade(base, n, vWorld, sh, 0.3, 0.0, 1.0), paint);
+  } else {
+    c = shade(base, n, vWorld, sh, mtl.x, mtl.y, mtl.z);
+  }
   frag = finish(applyFog(c, vWorld));
   frag.a = uAlpha;
 }`;
@@ -1055,6 +1150,15 @@ export class Renderer {
     });
     if (!gl) throw new Error("WebGL2 is required and is not available in this browser.");
     this.gl = gl;
+    // EXPERIMENT (exp/hd-cockpit): indexed car meshes. A VAO made from a
+    // mesh with an index draws with drawElements through `drawArrays`.
+    this._idxVaos = new WeakSet();
+    this._curIdx = false;
+    this.exp = { carbon: 0, pbr: 0 };
+    {
+      const bind = gl.bindVertexArray.bind(gl);
+      gl.bindVertexArray = (v) => { this._curIdx = !!v && this._idxVaos.has(v); bind(v); };
+    }
     this.canvas = canvas;
     // A GPU reset kills the context. Everything here (programs, VAOs, shadow
     // maps, the track ribbon) would need rebuilding; a reload is the honest
@@ -1471,6 +1575,13 @@ export class Renderer {
       color: attach(mesh.color, A_COLOR, 3),
     };
     if (mesh.uv) buffers.uv = attach(mesh.uv, A_UV, 2);
+    if (mesh.mat) buffers.mat = attach(mesh.mat, A_MAT, 3);
+    if (mesh.index) {
+      buffers.index = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.index);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.index, gl.STATIC_DRAW);
+      this._idxVaos.add(vao);
+    }
     gl.bindVertexArray(null);
     return { vao, count: mesh.count, buffers };
   }
@@ -2574,6 +2685,8 @@ export class Renderer {
     gl.uniform1f(uc.uAlpha, 1);
     // Meshes without a UV buffer read this constant: "no livery".
     gl.vertexAttrib2f(A_UV, -1, -1);
+    gl.vertexAttrib3f(A_MAT, -1, 0, 0);
+    gl.uniform2f(uc.uExp, this.exp.carbon, this.exp.pbr);
     gl.uniform1i(uc.uLivery, LIVERY_UNIT);
     gl.uniform1f(uc.uLiveryOn, 0);
     if (this.liveryTex) {
@@ -2899,7 +3012,8 @@ export class Renderer {
   }
 
   drawArrays(mode, first, count) {
-    this.gl.drawArrays(mode, first, count);
+    if (this._curIdx) this.gl.drawElements(mode, count, this.gl.UNSIGNED_INT, first * 4);
+    else this.gl.drawArrays(mode, first, count);
     this.stats.drawCalls++;
     this.stats.triangles += mode === this.gl.TRIANGLE_STRIP ? count - 2 : count / 3;
   }

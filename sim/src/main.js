@@ -3,7 +3,17 @@
 import { SDM26, CAD_EYE_AHEAD_OF_CG_M } from "./vehicle/params.js";
 import { TIRE_INFO } from "./vehicle/tire.js";
 import { ControlsPanel } from "./game/controlsPanel.js";
-import { loadCarModel, loadWheelModel, loadBodyModel, loadSteeringWheelModel, loadDashModel } from "./render/glbcar.js";
+import { loadCarModel, loadWheelModel, loadBodyModel, loadSteeringWheelModel, loadDashModel, setCadExperiment } from "./render/glbcar.js";
+// EXPERIMENT (exp/hd-cockpit): ?cadcar=car_hd0.glb / ?cadsw=... pick another
+// file out of data/ for A/B'ing a full-resolution CAD car.
+const cadUrl = (key, dflt) => {
+  const v = new URLSearchParams(location.search).get(key);
+  return v && /^[\w.-]+\.glb$/.test(v) ? `./data/${v}` : dflt;
+};
+const EXPQ = new URLSearchParams(location.search);
+// ?carbon=1 weave, ?pbr=1 per-part roughness/metal (both need the loader's
+// per-vertex materials), ?cadidx=1 indexed meshes (needed for the 8M-tri car).
+setCadExperiment({ indexed: EXPQ.get("cadidx") === "1", materials: EXPQ.get("carbon") === "1" || EXPQ.get("pbr") === "1" });
 import { AudioPanel } from "./game/audioPanel.js";
 import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
@@ -163,6 +173,7 @@ class Game {
     this.gpuName = probeGpuName();
     this.graphicsChoice = loadGraphicsChoice();
     this.renderer = new Renderer(dom.gl, resolvePreset(this.graphicsChoice, this.gpuName));
+    this.renderer.exp = { carbon: EXPQ.get("carbon") === "1" ? 1 : 0, pbr: EXPQ.get("pbr") === "1" ? 1 : 0 };
     // Pads the GPU frame out so a laptop card holds its clocks; see gpuHold.js.
     // Desktop only by default: in a browser tab the page shares the GPU with
     // everything else and should not be the one keeping it awake.
@@ -425,7 +436,7 @@ class Game {
       // Optional CAD bodywork. Absent is the normal case, not an error, so
       // this resolves to null rather than rejecting and taking the load with
       // it.
-      this.cadCar !== undefined ? Promise.resolve(this.cadCar) : loadCarModel("./data/car.glb"),
+      this.cadCar !== undefined ? Promise.resolve(this.cadCar) : loadCarModel(cadUrl("cadcar", "./data/car.glb")),
       // A wheel on its own, which is a much easier thing to supply than a
       // whole car and is four of the biggest objects on screen.
       this.cadWheel !== undefined
@@ -481,7 +492,7 @@ class Game {
     }
     // The team's own steering wheel, on whatever body is drawn. Fetched once.
     if (this.cadSteer === undefined) {
-      this.cadSteer = await loadSteeringWheelModel("./data/steering-wheel.glb");
+      this.cadSteer = await loadSteeringWheelModel(cadUrl("cadsw", "./data/steering-wheel.glb"));
       if (this.cadSteer?.error) {
         console.warn(`data/steering-wheel.glb could not be read: ${this.cadSteer.error}`);
         this.cadSteer = null;

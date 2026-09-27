@@ -151,6 +151,25 @@ function materialColour(doc, index) {
   return c ? [c[0], c[1], c[2]].map((v) => Math.pow(Math.max(0, v), 1 / 2.2)) : [0.55, 0.56, 0.58];
 }
 
+// EXPERIMENT (exp/hd-cockpit): per-vertex material [roughness, metalness,
+// kind] from the file, kind 1 = the car's carbon (drawn with a weave), 0 =
+// anything else. Off unless `setCadExperiment` asks for it; the renderer
+// then falls back on its one material per part.
+const EXP = { indexed: false, materials: false };
+export function setCadExperiment(opts) { Object.assign(EXP, opts); }
+function materialClass(doc, index) {
+  const m = doc.materials?.[index];
+  const c = m?.pbrMetallicRoughness?.baseColorFactor ?? [0.5, 0.5, 0.5];
+  const rough = m?.pbrMetallicRoughness?.roughnessFactor ?? 0.5;
+  const metal = m?.pbrMetallicRoughness?.metallicFactor ?? 0;
+  const name = (m?.name ?? "").toLowerCase();
+  // build.mjs's CARBON (0.045, 0.046, 0.05) and the exports' own carbon
+  // appearance (0.04, 0.04, 0.06), unmetallic.
+  const near = (t) => Math.abs(c[0] - t[0]) < 0.012 && Math.abs(c[1] - t[1]) < 0.012 && Math.abs(c[2] - t[2]) < 0.012;
+  const carbon = name.includes("carbon") || (metal < 0.1 && (near([0.045, 0.046, 0.05]) || near([0.04, 0.04, 0.06])));
+  return [rough, metal, carbon ? 1 : 0];
+}
+
 /**
  * De-index one primitive into flat arrays, offset into place and coloured.
  *
@@ -175,6 +194,7 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
     : null;
   if (uv) out.hasUv = true;
   const colour = materialColour(doc, prim.material);
+  const mcls = materialClass(doc, prim.material);
 
   const vertexCount = pos.length / 3;
   const count = idx ? idx.length : vertexCount;
@@ -200,6 +220,25 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
   // points came out as spikes with nothing said.
   if ((prim.mode ?? 4) !== 4) {
     problems?.push(`a mesh uses primitive mode ${prim.mode}; export as triangle lists`);
+    return;
+  }
+
+  if (EXP.indexed && idx && nrm) {
+    const base = out.position.length / 3;
+    out.index ??= [];
+    for (let v = 0; v < vertexCount; v++) {
+      out.position.push(pos[v * 3] + offset[0], pos[v * 3 + 1] + offset[1], pos[v * 3 + 2] + offset[2]);
+      out.normal.push(nrm[v * 3], nrm[v * 3 + 1], nrm[v * 3 + 2]);
+      out.color.push(colour[0], colour[1], colour[2]);
+      out.mat.push(mcls[0], mcls[1], mcls[2]);
+      if (uv) out.uv.push(uv[v * 2], uv[v * 2 + 1]);
+      else out.uv.push(-1, -1);
+    }
+    for (let i = 0; i < count; i++) out.index.push(idx[i] + base);
+    return;
+  }
+  if (EXP.indexed && out.index) {
+    problems?.push("indexed load met an unindexed primitive; dropped");
     return;
   }
 
@@ -241,22 +280,25 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
       if (nrm) out.normal.push(nrm[v * 3], nrm[v * 3 + 1], nrm[v * 3 + 2]);
       else out.normal.push(fnx, fny, fnz);
       out.color.push(colour[0], colour[1], colour[2]);
+      out.mat.push(mcls[0], mcls[1], mcls[2]);
       if (uv) out.uv.push(uv[v * 2], uv[v * 2 + 1]);
       else out.uv.push(-1, -1);
     }
   }
 }
 
-const empty = () => ({ position: [], normal: [], color: [], uv: [], hasUv: false });
+const empty = () => ({ position: [], normal: [], color: [], uv: [], mat: [], hasUv: false });
 
 function finish(acc) {
   const m = {
     position: new Float32Array(acc.position),
     normal: new Float32Array(acc.normal),
     color: new Float32Array(acc.color),
-    count: acc.position.length / 3,
+    count: acc.index ? acc.index.length : acc.position.length / 3,
   };
   if (acc.hasUv) m.uv = new Float32Array(acc.uv);
+  if (acc.index) m.index = new Uint32Array(acc.index);
+  if (EXP.materials && acc.mat.length) m.mat = new Float32Array(acc.mat);
   return m;
 }
 
@@ -662,9 +704,8 @@ export function buildCarFromGlb(buffer, geo = null) {
     frame,
     stats: {
       fit: frame ? frame.describe() : "not fitted",
-      triangles: (bodyAcc.position.length + wheelAcc.position.length +
-                  steerAcc.position.length +
-                  [...rigAccs.values(), ...ctlAccs.values()].reduce((n, a) => n + a.position.length, 0)) / 9,
+      triangles: [bodyAcc, wheelAcc, steerAcc, ...rigAccs.values(), ...ctlAccs.values()]
+        .reduce((n, a) => n + (a.index ? a.index.length : a.position.length / 3), 0) / 3,
       rigParts: rig ? rig.parts.length : 0,
       nodes: (doc.nodes ?? []).length,
       materials: (doc.materials ?? []).length,
