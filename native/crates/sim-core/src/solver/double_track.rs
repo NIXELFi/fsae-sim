@@ -122,6 +122,9 @@ pub struct DoubleTrackSolver {
     /// Each front tyre's moment about its kingpin last substep (N.m, left-
     /// positive), which the steering compliance gives way to.
     kingpin_prev: [f64; 2],
+    /// Off-course surfaces (grass), and each wheel's nearest-node hint.
+    surface: Option<std::sync::Arc<crate::surface::SurfaceMap>>,
+    surf_hint: [usize; 4],
     t_lock_last: f64,
     tel: Telemetry,
 }
@@ -204,6 +207,8 @@ impl DoubleTrackSolver {
             heave: 0.0,
             heave_rate: 0.0,
             kingpin_prev: [0.0; 2],
+            surface: None,
+            surf_hint: [0; 4],
             t_lock_last: 0.0,
             tel: Telemetry::default(),
         }
@@ -380,6 +385,11 @@ impl Solver for DoubleTrackSolver {
         self.c.tyre.as_ref()
     }
 
+    fn set_surface(&mut self, surface: Option<std::sync::Arc<crate::surface::SurfaceMap>>) {
+        self.surface = surface;
+        self.surf_hint = [0; 4];
+    }
+
     fn tyre_mut(&mut self) -> &mut dyn TyreModel {
         self.c.tyre.as_mut()
     }
@@ -542,6 +552,17 @@ impl DoubleTrackSolver {
         let relax_len = self.c.tyre.relaxation_length();
         let blend = if relax_len > 0.0 { ((speed / relax_len) * dt).min(1.0) } else { 1.0 };
 
+        // What each patch stands on: asphalt unless a venue's map says grass
+        // (and never on the course itself -- see surface.rs).
+        let mut surf = [crate::surface::Surface::ASPHALT; 4];
+        if let Some(map) = self.surface.as_ref() {
+            let (c, s) = (self.s.psi.cos(), self.s.psi.sin());
+            for i in 0..4 {
+                let (bx, by) = (arm[i], half_t[i]);
+                surf[i] = map.at(self.s.x + c * bx - s * by, self.s.y + s * bx + c * by, &mut self.surf_hint[i]);
+            }
+        }
+
         let mut kappa = [0.0f64; 4];
         let mut stiff = [0.0f64; 4];
         // Each patch's speed along its wheel, for the implicit term's chassis
@@ -570,8 +591,10 @@ impl DoubleTrackSolver {
             let f2 = self.c.tyre.forces_cambered(Slip { kappa: kappa[i] + KAPPA_H, ..slip }, fz[i], gamma[i]);
             stiff[i] = dt * radius * radius * ((f2.fx - f.fx) / KAPPA_H).max(0.0) / k_den;
             let grip = if i == FL || i == FR { (p.front_grip_factor * sp.front_grip_scale).min(1.0) } else { sp.rear_grip_scale };
-            fx[i] = f.fx;
-            fy[i] = f.fy * low_speed * grip;
+            let mu = surf[i].mu;
+            stiff[i] *= mu;
+            fx[i] = f.fx * mu;
+            fy[i] = f.fy * low_speed * grip * mu;
             util[i] = f.utilisation;
             trail[i] = f.trail;
         }
@@ -598,7 +621,8 @@ impl DoubleTrackSolver {
         }
 
         let fz_sum: f64 = fz.iter().sum();
-        let roll_res = p.crr * fz_sum * if u >= 0.0 { 1.0 } else { -1.0 };
+        let crr_extra: f64 = (0..4).map(|i| surf[i].crr_extra * fz[i]).sum();
+        let roll_res = (p.crr * fz_sum + crr_extra) * if u >= 0.0 { 1.0 } else { -1.0 };
         // Drag against the velocity, not the nose (see bicycle.rs).
         let (drag_x, drag_y) = if speed > 1e-9 { (drag * u / speed, drag * v / speed) } else { (0.0, 0.0) };
 

@@ -208,6 +208,26 @@ export class NativeCar {
     }
   }
 
+  /**
+   * What the tyres stand on at a real venue (grass off the course; see
+   * native sim-core surface.rs). `surf` = { site, place } or null to clear.
+   * Physics, so it goes whatever the graphics preset.
+   */
+  pushSurface(track, surf) {
+    if (!track || !surf?.site?.klass || !surf.place) { rigNative.command({ kind: "clearSurface" }); return; }
+    const { site, place } = surf;
+    const bytes = site.klass;
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    // Free roam has no course: no always-asphalt corridor, the map everywhere.
+    const centre = track.freeRoam ? [] : track.center;
+    const half = centre.map((_, i) => (track.widthAt ? track.widthAt(i) : track.width) / 2);
+    rigNative.command({
+      kind: "surface", w: site.W, h: site.H, resM: site.res, clsB64: btoa(bin),
+      k: place.k, rotDeg: place.rotDeg, t: place.t, centre, halfWidth: half,
+    });
+  }
+
   /** The wheel profile and the force feedback block, to the rig. */
   pushControls(profile, etcPoints) {
     const ffb = profile.forceFeedback || {};

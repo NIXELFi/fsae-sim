@@ -40,6 +40,9 @@ Sources live in the team vault (Helios, `SDM27/Helios/Sim`):
    cockpit only what the seat can see (src/render/cockpitPvs.js), and lets
    car.glb cast its shadows -- so car.glb is still needed beside it. Medium
    and Low draw car.glb. (0.3 mm = 802k triangles; lossless = 7.9M, too heavy.)
+   Then `node meshopt_pack.mjs out/car-hd.glb data/car-hd.glb` -- EXT_meshopt_compression
+   (lossless attribute mode, 30 -> 13 MB; the loader decodes it with the vendored
+   src/vendor/meshopt_decoder.mjs in ~30 ms). The exe reads a 30 MB asset in ~0.35 s.
 4. `node build_sw.mjs 0.0002` -- steering wheel, 0.2 mm.
 5. `node step2glb.mjs <sha> out/strada.glb` then `node build_dash.mjs` -- the
    Strada from its STEP (single-part GLB exports from SolidWorks come out

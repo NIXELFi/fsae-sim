@@ -61,6 +61,32 @@ export function parseGlb(buffer) {
   return { doc, bin: bin ?? new Uint8Array(0) };
 }
 
+/**
+ * Undo EXT_meshopt_compression (the HD car ships compressed, 30 -> 13 MB):
+ * every compressed buffer view is decoded into one new blob and the views
+ * are pointed at it, so everything below reads plain data. Unchanged when
+ * the file does not use the extension.
+ */
+export async function decodeMeshopt(parsed) {
+  const { doc, bin } = parsed;
+  const views = (doc.bufferViews ?? []).map((v, i) => [i, v.extensions?.EXT_meshopt_compression]).filter(([, e]) => e);
+  if (!views.length) return parsed;
+  const { MeshoptDecoder } = await import("../vendor/meshopt_decoder.mjs");
+  await MeshoptDecoder.ready;
+  let total = bin.length;
+  const placed = views.map(([i, e]) => { const at = (total + 3) & ~3; total = at + e.count * e.byteStride; return [i, e, at]; });
+  const out = new Uint8Array(total);
+  out.set(bin);
+  for (const [i, e, at] of placed) {
+    const src = new Uint8Array(bin.buffer, bin.byteOffset + (e.byteOffset ?? 0), e.byteLength);
+    MeshoptDecoder.decodeGltfBuffer(new Uint8Array(out.buffer, at, e.count * e.byteStride), e.count, e.byteStride, src, e.mode, e.filter);
+    const v = doc.bufferViews[i];
+    v.byteOffset = at; v.byteLength = e.count * e.byteStride; v.byteStride = v.byteStride ?? undefined;
+    delete v.extensions.EXT_meshopt_compression;
+  }
+  return { doc, bin: out };
+}
+
 /** Read one accessor into a flat typed array. */
 export function readAccessor(doc, bin, index, asStored = false) {
   const acc = asStored ? { ...doc.accessors[index], normalized: false } : doc.accessors[index];
@@ -224,20 +250,27 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
   }
 
   if (EXP.indexed && idx && nrm) {
-    const base = out.position.length / 3;
-    out.index ??= [];
+    // Typed chunks, joined once by `materialize` -- growing JS arrays one
+    // number at a time cost ~0.3 s on the 1.26M-triangle car.
+    out.chunks ??= [];
+    out.nv ??= 0;
+    const base = out.nv;
+    const P = new Float32Array(vertexCount * 3), N = new Float32Array(vertexCount * 3), C = new Float32Array(vertexCount * 3), M = new Float32Array(vertexCount * 3), U = new Float32Array(vertexCount * 2);
     for (let v = 0; v < vertexCount; v++) {
-      out.position.push(pos[v * 3] + offset[0], pos[v * 3 + 1] + offset[1], pos[v * 3 + 2] + offset[2]);
-      out.normal.push(nrm[v * 3], nrm[v * 3 + 1], nrm[v * 3 + 2]);
-      out.color.push(colour[0], colour[1], colour[2]);
-      out.mat.push(mcls[0], mcls[1], mcls[2]);
-      if (uv) out.uv.push(uv[v * 2], uv[v * 2 + 1]);
-      else out.uv.push(-1, -1);
+      const a = v * 3;
+      P[a] = pos[a] + offset[0]; P[a + 1] = pos[a + 1] + offset[1]; P[a + 2] = pos[a + 2] + offset[2];
+      N[a] = nrm[a]; N[a + 1] = nrm[a + 1]; N[a + 2] = nrm[a + 2];
+      C[a] = colour[0]; C[a + 1] = colour[1]; C[a + 2] = colour[2];
+      M[a] = mcls[0]; M[a + 1] = mcls[1]; M[a + 2] = mcls[2];
+      U[v * 2] = uv ? uv[v * 2] : -1; U[v * 2 + 1] = uv ? uv[v * 2 + 1] : -1;
     }
-    for (let i = 0; i < count; i++) out.index.push(idx[i] + base);
+    const I = new Uint32Array(count);
+    for (let i = 0; i < count; i++) I[i] = idx[i] + base;
+    out.chunks.push({ P, N, C, M, U, I });
+    out.nv += vertexCount;
     return;
   }
-  if (EXP.indexed && out.index) {
+  if (EXP.indexed && (out.index || out.chunks)) {
     problems?.push("indexed load met an unindexed primitive; dropped");
     return;
   }
@@ -289,7 +322,23 @@ function expandPrimitive(doc, bin, prim, offset, out, problems) {
 
 const empty = () => ({ position: [], normal: [], color: [], uv: [], mat: [], hasUv: false });
 
+/** Join an indexed accumulator's typed chunks into its arrays (idempotent). */
+function materialize(acc) {
+  if (!acc.chunks) return acc;
+  const cat = (key, T) => {
+    const n = acc.chunks.reduce((s, c) => s + c[key].length, 0), out = new T(n);
+    let o = 0;
+    for (const c of acc.chunks) { out.set(c[key], o); o += c[key].length; }
+    return out;
+  };
+  acc.position = cat("P", Float32Array); acc.normal = cat("N", Float32Array); acc.color = cat("C", Float32Array);
+  acc.mat = cat("M", Float32Array); acc.uv = cat("U", Float32Array); acc.index = cat("I", Uint32Array);
+  delete acc.chunks;
+  return acc;
+}
+
 function finish(acc) {
+  materialize(acc);
   const m = {
     position: new Float32Array(acc.position),
     normal: new Float32Array(acc.normal),
@@ -534,8 +583,13 @@ function rigFromGlb(doc, rigAccs, frame, problems) {
  *   read from the file so the drawn wheels sit where the CAD puts them.
  */
 export function buildCarFromGlb(buffer, geo = null) {
+  if (buffer?.doc) return buildCarFromParsed(buffer, geo);
+  return buildCarFromParsed(parseGlb(buffer), geo);
+}
+
+function buildCarFromParsed(parsed, geo) {
   const g = geo ?? { frontAxle: 0.788, rearAxle: -0.742, tireRadius: 0.2 };
-  const { doc, bin } = parseGlb(buffer);
+  const { doc, bin } = parsed;
   const places = nodeTranslations(doc);
 
   const problems = [];
@@ -602,6 +656,7 @@ export function buildCarFromGlb(buffer, geo = null) {
   // added back to the hub position, so the wheel still appears exactly where
   // the model put it; only the point it turns about changes.
   const wheelOffset = [0, 0, 0];
+  materialize(wheelAcc);
   if (wheelAcc.position.length) {
     const lo = [Infinity, Infinity, Infinity];
     const hi = [-Infinity, -Infinity, -Infinity];
@@ -743,10 +798,16 @@ export async function loadCarModel(url, opts = {}) {
   if (new DataView(buffer).getUint32(0, true) !== MAGIC) return null;
 
   // Options for this load only (the HD car is read indexed).
+  let parsed;
+  try {
+    parsed = await decodeMeshopt(parseGlb(buffer));
+  } catch (err) {
+    return { error: String(err?.message ?? err) };
+  }
   const prev = { ...EXP };
   Object.assign(EXP, opts);
   try {
-    return buildCarFromGlb(buffer);
+    return buildCarFromGlb(parsed);
   } catch (err) {
     return { error: String(err?.message ?? err) };
   } finally {

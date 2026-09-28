@@ -22,7 +22,7 @@ import { Powertrain, loadTorqueCurve } from "./vehicle/powertrain.js";
 import { BicycleModel } from "./vehicle/bicycle.js";
 import { loadTrack, TRACKS, trackSpec, isTrackId, generatedTrack, skidpad, accel } from "./track/track.js";
 import { generatedTrackId, parseGeneratedId, randomSeed, normaliseSeed, describeGenerated, EVENTS as GEN_EVENTS } from "./track/generate.js";
-import { loadVenue } from "./track/venue.js";
+import { loadVenue, siteVenue } from "./track/venue.js";
 import { Renderer } from "./render/renderer.js";
 import { GpuHold } from "./render/gpuHold.js";
 import { PRESET_ORDER,loadGraphicsChoice, saveGraphicsChoice, probeGpuName, resolvePreset } from "./render/quality.js";
@@ -426,9 +426,27 @@ class Game {
     this.endRun("track-changed");
     const spec = trackSpec(trackId) ?? TRACKS[0];
     this.trackId = spec.id;
+    performance.mark("load:start");
+    // The venue's data, the wheel, the dash and the livery download alongside
+    // the car and the course, not one after another once the course is up.
+    if (this.site === undefined) this.sitePromise ??= loadSite();
+    if (this.cadSteer === undefined) this.cadSteerP ??= loadSteeringWheelModel(cadUrl("cadsw", "./data/steering-wheel.glb"));
+    if (this.cadDash === undefined) this.cadDashP ??= loadDashModel("./data/dash.glb");
+    if (this.livery === undefined) this.liveryP ??= fetch("./data/livery.png", { cache: "no-cache" }).then(async (res) => {
+      // The desktop asset server answers a missing file with the index page,
+      // so check it really is an image.
+      if (res.ok && (res.headers.get("content-type") ?? "").startsWith("image/")) {
+        return createImageBitmap(await res.blob(), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+      }
+      return null;
+    }).catch((e) => { console.warn(`data/livery.png could not be read: ${e?.message ?? e}`); return null; });
     const [curve, track, cadCar, cadWheel, cadBody] = await Promise.all([
       loadTorqueCurve(),
       spec.kind === "venue" ? loadVenue(spec.url)
+        : spec.kind === "site" ? (this.site !== undefined ? Promise.resolve(this.site) : (this.sitePromise ??= loadSite())).then((s) => {
+          if (this.site === undefined) this.site = s?.error ? null : s;
+          return siteVenue(this.site);
+        })
         // A procedural course is built here and now from its seed; there is
         // no file. It takes tens of milliseconds for an autocross and up to
         // half a second for an endurance lap that was hard to close.
@@ -475,8 +493,12 @@ class Game {
     // autocross means nothing on the endurance loop.
     this.deltaTimer = new DeltaTimer(track.length);
     this.chasingRunId = null;
+    performance.mark("load:assets");
     await this.attachSite(track, spec.id);
+    performance.mark("load:site");
+    if (this.useNative) this.car.pushSurface?.(track, track.surface);
     this.renderer.setTrack(track);
+    performance.mark("load:track");
 
     // Remembered across track changes so the file is fetched once.
     this.cadCar = cadCar ?? null;
@@ -497,7 +519,7 @@ class Game {
     }
     // The team's own steering wheel, on whatever body is drawn. Fetched once.
     if (this.cadSteer === undefined) {
-      this.cadSteer = await loadSteeringWheelModel(cadUrl("cadsw", "./data/steering-wheel.glb"));
+      this.cadSteer = await this.cadSteerP;
       if (this.cadSteer?.error) {
         console.warn(`data/steering-wheel.glb could not be read: ${this.cadSteer.error}`);
         this.cadSteer = null;
@@ -508,7 +530,7 @@ class Game {
 
     // And the real dash case (the AiM Strada), around the live screen.
     if (this.cadDash === undefined) {
-      this.cadDash = await loadDashModel("./data/dash.glb");
+      this.cadDash = await this.cadDashP;
       if (this.cadDash?.error) {
         console.warn(`data/dash.glb could not be read: ${this.cadDash.error}`);
         this.cadDash = null;
@@ -520,22 +542,14 @@ class Game {
     // painted on the UV map the CAD pipeline lays out (tools/cad/README.md).
     // Transparent where the carbon should show. Optional, like the rest.
     if (this.livery === undefined) {
-      this.livery = null;
-      try {
-        const res = await fetch("./data/livery.png", { cache: "no-cache" });
-        // The desktop asset server answers a missing file with the index
-        // page, so check it really is an image.
-        if (res.ok && (res.headers.get("content-type") ?? "").startsWith("image/")) {
-          this.livery = await createImageBitmap(await res.blob(), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
-          console.info(`livery: ${this.livery.width} x ${this.livery.height}`);
-        }
-      } catch (e) {
-        console.warn(`data/livery.png could not be read: ${e?.message ?? e}`);
-      }
+      this.livery = (await this.liveryP) ?? null;
+      if (this.livery) console.info(`livery: ${this.livery.width} x ${this.livery.height}`);
     }
     this.renderer.useLivery(this.livery);
     // Whichever look the driver picked (Car tab -> Car appearance).
+    performance.mark("load:parts");
     this.applyVisualCar();
+    performance.mark("load:car");
     this.cadWheel = cadWheel ?? null;
     if (this.cadWheel?.error) {
       this.wheelStatus = `data/wheel.glb could not be read: ${this.cadWheel.error}`;
@@ -846,21 +860,28 @@ class Game {
     const override = EXPQ.get("cadcar") ? cadUrl("cadcar", null) : null;
     const wantHd = !override && !!this.renderer?.quality?.hdCar;
     let car = null;
+    // The HD car and the shipped car (whose body casts the HD car's
+    // shadows) load together, not one after the other.
+    const lowP = loadCarModel("./data/car.glb", { indexed: true });
     if (override) car = await loadCarModel(override, { indexed: EXPQ.get("cadidx") === "1" });
     else if (wantHd) car = await loadCarModel("./data/car-hd.glb", { indexed: true });
     if (car && !car.error && (override || wantHd)) {
       car.hd = true;
-      const low = await loadCarModel("./data/car.glb");
-      if (low && !low.error) {
+      // The shipped car's body only casts the HD car's shadows: not worth
+      // holding the start for. It joins when it has loaded (until then the
+      // HD body casts them itself).
+      lowP.then((low) => {
+        if (!low || low.error) return;
         car.shadowBody = low.body;
         car.shadowRig = new Map([
           ...(low.rig?.parts ?? []).map((p) => [`rig:${p.corner}:${p.role}`, p.mesh]),
           ...(low.controls ?? []).map((c) => [`ctl:${c.name}`, c.mesh]),
         ]);
-      }
+        if (this.cadCar === car) this.renderer.attachShadowParts?.(car);
+      });
       return car;
     }
-    return loadCarModel("./data/car.glb");
+    return lowP;
   }
 
   /**
@@ -870,24 +891,30 @@ class Game {
    */
   async attachSite(track, id) {
     delete track.site;
-    const want = EXPQ.get("site") !== "0" && this.renderer?.quality?.id !== "low"
-      && ["autocross", "endurance", "skidpad", "accel"].includes(id);
-    if (!want) return;
+    delete track.surface;
+    if (!["autocross", "endurance", "skidpad", "accel", "mis"].includes(id)) return;
     if (this.site === undefined) {
-      this.site = await loadSite();
+      this.site = await (this.sitePromise ??= loadSite());
       if (this.site?.error) { console.warn("MIS site:", this.site.error); this.site = null; }
     }
     const place = coursePlacement(this.site, id);
-    if (place) track.site = { site: this.site, place };
+    if (!place) return;
+    // The surfaces are physics (grass is slippery) and go on every preset;
+    // the scenery is drawing and goes on Medium and High.
+    track.surface = { site: this.site, place };
+    // Free roam IS the site (its frame is the site's), so it is always drawn;
+    // Low draws it without buildings and trees.
+    if (track.freeRoam) track.site = { ...track.surface, lite: this.renderer?.quality?.id === "low" };
+    else if (EXPQ.get("site") !== "0" && this.renderer?.quality?.id !== "low") track.site = track.surface;
   }
 
   /** The preset changed: bring the venue in or take it away with Low. */
   async refreshSiteForQuality() {
     const t = this.track;
-    if (!t || t.kind === "venue") return;
-    const had = !!t.site;
+    if (!t || (t.kind === "venue" && !t.freeRoam)) return;
+    const had = t.site ? (t.site.lite ? "lite" : "full") : "none";
     await this.attachSite(t, this.trackId);
-    if (had !== !!t.site) this.renderer.setTrack(t);
+    if (had !== (t.site ? (t.site.lite ? "lite" : "full") : "none")) this.renderer.setTrack(t);
   }
 
   /** Carbon, metals, cockpit culling and light shadows go with the HD car. */

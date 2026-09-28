@@ -306,7 +306,8 @@ export const TRACK_DATUMS = {
   // at (anticlockwise from east) and the map-to-ground scale.
   autocross: { lat: 42.066137, lon: -84.237841, bearingDeg: -102.949, scale: 1.007288, name: "FSAE Michigan 2026 autocross, MIS back straight" },
   endurance: { lat: 42.067010, lon: -84.238858, bearingDeg: 77.049, scale: 1.005016, name: "FSAE Michigan 2026 endurance, MIS infield + back straight" },
-  mis: { lat: 42.06556, lon: -84.24139, bearingDeg: 0, name: "Michigan International Speedway" },
+  // Free roam is in the site frame: its origin is the NW corner of the site.
+  mis: { lat: 42.0790, lon: -84.2485, bearingDeg: 0, name: "Michigan International Speedway (site frame, NW corner)" },
   // The skidpad is built from the rulebook, not traced from a site; it sits
   // on the same nominal MIS infield fix as a generated course.
   skidpad: { lat: 42.069588, lon: -84.236857, bearingDeg: 18.069, name: "Skidpad (rulebook layout) where the 2026 maps draw it, MIS back-straight apron" },

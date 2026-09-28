@@ -174,6 +174,41 @@ export class Venue {
   conesNear() { return []; }
 }
 
+/**
+ * Free roam at the REAL Michigan International Speedway (data/mis-site.json):
+ * the site's own frame, the oval's centre line traced from the lidar banking
+ * and the walls (tools/mis_site/build.py), spawning on pit road. No barrier:
+ * the banking, the infield and the grass are all drivable -- the car is drawn
+ * on the terrain and the grass is slippery (native surface map).
+ */
+export function siteVenue(site) {
+  const fr = site?.meta?.freeRoam;
+  if (!fr?.centerline?.length) throw new Error("mis-site.json has no free-roam centre line");
+  const c = fr.centerline, n = c.length;
+  const heading = [], curvature = [], s = [0];
+  for (let i = 0; i < n; i++) {
+    const p = c[(i + n - 1) % n], q = c[(i + 1) % n];
+    heading.push(Math.atan2(q[1] - p[1], q[0] - p[0]));
+    if (i) s.push(s[i - 1] + Math.hypot(c[i][0] - c[i - 1][0], c[i][1] - c[i - 1][1]));
+  }
+  for (let i = 0; i < n; i++) {
+    let d = heading[(i + 1) % n] - heading[(i + n - 1) % n];
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    curvature.push(d / Math.max(1e-6, Math.hypot(c[(i + 1) % n][0] - c[(i + n - 1) % n][0], c[(i + 1) % n][1] - c[(i + n - 1) % n][1])));
+  }
+  const zeros = new Array(n).fill(0);
+  const v = new Venue({
+    name: site.meta.name, lengthM: fr.lengthM, widthM: 22.25, provenance: site.meta.provenance,
+    centerline: c, heading, curvature, s, bankDeg: zeros, riseM: zeros, segment: zeros,
+    apronInner: c, bankInner: c, bankOuter: c, wallLine: c, roadOuter: c, roadInner: c,
+    paddock: null, wallHeightM: 1.1, fenceHeightM: 6, apronWidthM: 0,
+    barrierOffsetM: Infinity, spawn: fr.spawn,
+  });
+  v.freeRoam = true;
+  return v;
+}
+
 export async function loadVenue(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`venue ${url}: ${res.status}`);

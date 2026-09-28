@@ -189,6 +189,10 @@ pub trait Solver: Send + Sync {
     fn powertrain_mut(&mut self) -> &mut dyn PowertrainModel;
     fn tyre(&self) -> &dyn TyreModel;
     fn tyre_mut(&mut self) -> &mut dyn TyreModel;
+
+    /// What the tyres stand on (grass off the course at a real venue). Only
+    /// the double-track model reads it; the others keep one asphalt world.
+    fn set_surface(&mut self, _surface: Option<std::sync::Arc<crate::surface::SurfaceMap>>) {}
 }
 
 /// Everything a solver is assembled from. Swapping the tyre or the powertrain

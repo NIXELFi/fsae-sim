@@ -1,0 +1,13 @@
+import { NodeIO } from "@gltf-transform/core";
+import { EXTMeshoptCompression } from "@gltf-transform/extensions";
+import { reorder } from "@gltf-transform/functions";
+import { MeshoptEncoder, MeshoptDecoder } from "meshoptimizer";
+await MeshoptEncoder.ready; await MeshoptDecoder.ready;
+const io = new NodeIO().registerExtensions([EXTMeshoptCompression]).registerDependencies({ "meshopt.encoder": MeshoptEncoder, "meshopt.decoder": MeshoptDecoder });
+const [, , src, dst] = process.argv;
+const doc = await io.read(src);
+await doc.transform(reorder({ encoder: MeshoptEncoder, target: "size" }));
+doc.createExtension(EXTMeshoptCompression).setRequired(true).setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.FILTER });
+await io.write(dst, doc);
+const fs = await import("node:fs");
+console.log(src, (fs.statSync(src).size / 1e6).toFixed(1), "MB ->", dst, (fs.statSync(dst).size / 1e6).toFixed(1), "MB");

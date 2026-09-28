@@ -37,6 +37,7 @@
 
 pub mod assists;
 pub mod boundary;
+pub mod surface;
 pub mod etc_map;
 pub mod modular;
 pub mod physics_rev;

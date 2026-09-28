@@ -1351,6 +1351,7 @@ export class Renderer {
    */
   useCarModel(car) {
     const gl = this.gl;
+    this._carSrc = car;
     // The moving suspension of the last CAD car, if any.
     for (const rp of this.rigParts ?? []) {
       if (rp.mesh?.vao) gl.deleteVertexArray(rp.mesh.vao);
@@ -1616,6 +1617,18 @@ export class Renderer {
     this.liveryTex = tex;
   }
 
+  /** The light twins of the car for the shadow pass, once they have loaded
+   *  (main.js loads them after the HD car; see useCarModel). */
+  attachShadowParts(car) {
+    if (this._carSrc !== car || !this.car) return;
+    if (car.shadowBody && !this.car.shadowBody) this.car.shadowBody = this.makeMesh(car.shadowBody);
+    for (const rp of this.rigParts ?? []) {
+      if (rp.shadowMesh) continue;
+      const tw = car.shadowRig?.get(rp.control ? `ctl:${rp.control}` : `rig:${rp.corner}:${rp.role}`);
+      if (tw) rp.shadowMesh = this.makeMesh(tw);
+    }
+  }
+
   /**
    * EXPERIMENT: bake what the driver can see (cockpitPvs.js) from the eye
    * as it is right now, over head motion and the eye-height slider, and make
@@ -1634,14 +1647,25 @@ export class Renderer {
     for (let k = 0; k < 4; k++) items.push({ mesh: this._cpu.tire, model: local(this._wheelMats[k]) });
     const offsets = [];
     for (const dx of [-0.06, 0, 0.06]) for (const dy of [-0.07, 0, 0.07, 0.14]) for (const dz of [-0.05, 0, 0.05]) offsets.push([dx, dy, dz]);
+    // The bake is the same every time for the same car (it covers the whole
+    // eye-height range), so it is kept: one bit per triangle, ~110 KB.
+    const key = `fsae.pvs.v1.${body.index.length}.${rig.length}.${rig.reduce((n, rp) => n + (rp.cpu.index?.length ?? rp.cpu.position.length), 0)}.${this._cpu.tire.index?.length ?? this._cpu.tire.position.length}`;
+    let r = null;
+    try {
+      const c = JSON.parse(localStorage.getItem(key) ?? "null");
+      if (c && c.n === items.length) r = { ms: 0, views: 0, cached: true, vis: c.vis.map((b64, i) => unpackBits(b64, c.len[i])) };
+    } catch { r = null; }
+    if (!r) {
     const saved = { vp: gl.getParameter(gl.VIEWPORT), fb: gl.getParameter(gl.FRAMEBUFFER_BINDING), prog: gl.getParameter(gl.CURRENT_PROGRAM),
       depth: gl.isEnabled(gl.DEPTH_TEST), cull: gl.isEnabled(gl.CULL_FACE), blend: gl.isEnabled(gl.BLEND), clear: gl.getParameter(gl.COLOR_CLEAR_VALUE) };
-    const r = bakeCockpitPvs(gl, items, multiply(mat4(), this.view, this.chassis), offsets);
+    r = bakeCockpitPvs(gl, items, multiply(mat4(), this.view, this.chassis), offsets);
     gl.bindFramebuffer(gl.FRAMEBUFFER, saved.fb);
     gl.viewport(...saved.vp);
     gl.useProgram(saved.prog);
     for (const [cap, on] of [[gl.DEPTH_TEST, saved.depth], [gl.CULL_FACE, saved.cull], [gl.BLEND, saved.blend]]) on ? gl.enable(cap) : gl.disable(cap);
     gl.clearColor(...saved.clear);
+      try { localStorage.setItem(key, JSON.stringify({ n: items.length, len: r.vis.map((v) => v.length), vis: r.vis.map(packBits) })); } catch { /* full or blocked: bake again next time */ }
+    }
     const idx = visibleIndex(body, r.vis[0], 2);
     const b = this.car.body;
     const vao = gl.createVertexArray();
@@ -1657,7 +1681,7 @@ export class Renderer {
     this.car.cockpitBody = { vao, count: idx.length, buffers: { index: eb } };
     rig.forEach((rp, i) => { rp.cockpitHidden = !r.vis[1 + i].some((v) => v); });
     this._tyreHidden = [0, 1, 2, 3].map((k) => !r.vis[1 + rig.length + k].some((v) => v));
-    this._pvs = { ms: r.ms, views: r.views, bodyTris: body.index.length / 3, keptTris: idx.length / 3,
+    this._pvs = { ms: r.ms, views: r.views, cached: !!r.cached, bodyTris: body.index.length / 3, keptTris: idx.length / 3,
       rigHidden: rig.filter((rp) => rp.cockpitHidden).length, rigParts: rig.length, tyreHidden: this._tyreHidden };
     console.info("cockpit PVS", this._pvs);
   }
@@ -1939,10 +1963,17 @@ export class Renderer {
     this.env = null;
     this.siteTerrain = null;
     this.siteStands = null;
+    this.siteHeight = null;
     this.ribbon = null;
 
     // A venue supplies its own surfaces -- banking, apron, infield, wall and
     // fence -- so there is no course ribbon and no gate posts to place.
+    if (track.kind === "venue" && track.site) {
+      this.gatePosts = [];
+      this.poles = [];
+      this.setSite(track);
+      return;
+    }
     if (track.kind === "venue") {
       this.venue = this.makeMesh(buildVenueMesh(track));
       this.gatePosts = [];
@@ -2035,9 +2066,20 @@ export class Renderer {
     const gl = this.gl;
     const { site, place } = track.site;
     const t0 = performance.now();
-    const m = buildSiteMeshes(site, place, track);
+    const m = buildSiteMeshes(site, place, track, { lite: !!track.site.lite });
     this.siteTerrain = this.makeMesh(m.terrain);
-    this.siteStands = this.makeMesh(m.stands);
+    this.siteHeight = m.heightAtCourse;
+    // What stands on the ground is built two frames later, off the load's
+    // critical path (the ground and the course are already drawn).
+    const token = (this._siteToken = (this._siteToken ?? 0) + 1);
+    const later = () => {
+      if (this._siteToken !== token || this.track !== track) return;
+      const t1 = performance.now();
+      this.siteStands = this.makeMesh(m.buildStands());
+      this.siteStats = { ...m.stats, buildMs: this.siteStats?.buildMs, standsMs: Math.round(performance.now() - t1) };
+    };
+    if (this.deferSiteStands === false) later();
+    else requestAnimationFrame(() => requestAnimationFrame(later));
     if (this.env) this.deleteMesh(this.env);
     this.env = this.makeMesh(buildEnvironmentMesh(m.bounds, "venue"));
     this.poles = [];
@@ -2058,9 +2100,23 @@ export class Renderer {
         if (an) gl.texParameterf(gl.TEXTURE_2D, an.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(an.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
         return tex;
       };
-      this.siteOrtho = upload(site.ortho);
-      this.siteClass = upload(site.cls);
+      // A one-pixel stand-in now (the start menu covers the view), the real
+      // 12 MB ortho and its mips a couple of frames later -- off the load.
+      const px = (r, g, b) => {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([r, g, b, 255]));
+        return tex;
+      };
+      this.siteOrtho = px(70, 74, 72);
+      this.siteClass = px(80, 80, 80);
       this._siteTexFor = site;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (this._siteTexFor !== site) return;
+        gl.deleteTexture(this.siteOrtho); gl.deleteTexture(this.siteClass);
+        this.siteOrtho = upload(site.ortho);
+        this.siteClass = upload(site.cls);
+      }));
     }
     this.siteStats = { ...m.stats, buildMs: Math.round(performance.now() - t0) };
     console.info("site", this.siteStats);
@@ -2106,6 +2162,17 @@ export class Renderer {
    *           color, tint} or null -- a second car, for replays
    *   heaveM, fovBoost
    */
+  /** The drawn ground under the car: height and the slope's pitch (+ nose
+   *  up) and roll (+ left side up) along the car's heading. Zero off-site. */
+  groundPose(cam) {
+    const H = this.siteHeight;
+    if (!H) return { z: 0, pitch: 0, roll: 0 };
+    const z = H(cam.x, cam.y);
+    const gx = (H(cam.x + 1, cam.y) - H(cam.x - 1, cam.y)) / 2, gy = (H(cam.x, cam.y + 1) - H(cam.x, cam.y - 1)) / 2;
+    const c = Math.cos(cam.psi), s = Math.sin(cam.psi);
+    return { z, pitch: Math.atan(gx * c + gy * s), roll: Math.atan(-gx * s + gy * c) };
+  }
+
   draw(s) {
     if (this.lost) return;
     const gl = this.gl;
@@ -2123,18 +2190,24 @@ export class Renderer {
     // about the ground origin put the outside tyres into the asphalt and
     // floated the inside ones at every corner, and hid the one thing a
     // rolling body shows -- the travel between the wheel and the arch.
+    // Off the course at a real venue the drawn ground is not the physics
+    // plane (banking, grass rows, grades): the car is drawn standing on it.
+    // On and near the course the ground is 0 and this is the identity.
+    const gp = this.groundPose(cam);
     const h = cam.cgHeight ?? 0;
     this.chain(this.chassis, [
-      translation(T[0], cam.x, h, -cam.y),
+      translation(T[0], cam.x, h + gp.z, -cam.y),
       rotY(T[1], cam.psi),
-      rotZ(T[2], cam.pitchRad),
-      rotX(T[3], cam.rollRad),
+      rotZ(T[2], cam.pitchRad + gp.pitch),
+      rotX(T[3], cam.rollRad + gp.roll),
       translation(T[4], 0, -h, 0),
     ]);
     // The unsprung frame the wheels hang off: position and heading only.
     this.chain(this.axleFrame, [
-      translation(T[0], cam.x, 0, -cam.y),
+      translation(T[0], cam.x, gp.z, -cam.y),
       rotY(T[1], cam.psi),
+      rotZ(T[2], gp.pitch),
+      rotX(T[3], gp.roll),
     ]);
 
     // The cockpit and nose cameras are RIGIDLY bolted to that frame. That is
@@ -2147,9 +2220,9 @@ export class Renderer {
       // and the cockpit is what tilts. The in-car views never roll.
       const h = cam.cgHeight ?? 0;
       this.chain(this.camFrame, [
-        translation(T[0], cam.x, h, -cam.y),
+        translation(T[0], cam.x, h + gp.z, -cam.y),
         rotY(T[1], cam.psi),
-        rotZ(T[2], cam.pitchRad),
+        rotZ(T[2], cam.pitchRad + gp.pitch),
         translation(T[4], 0, -h, 0),
       ]);
     } else {
@@ -2157,7 +2230,7 @@ export class Renderer {
       // in main.js), so the car can yaw inside the frame: that is how slip
       // angle is seen from behind. Welded to `cam.psi` it never could.
       this.chain(this.camFrame, [
-        translation(T[0], cam.x, 0, -cam.y),
+        translation(T[0], cam.x, gp.z, -cam.y),
         rotY(T[1], s.view.yaw ?? cam.psi),
         rotZ(T[2], cam.pitchRad * 0.30),
         rotX(T[3], cam.rollRad * 0.25),
@@ -2173,8 +2246,8 @@ export class Renderer {
       const r = s.view.radius ?? 3.4;
       const cx = cam.x;
       const cz = -cam.y;
-      const focusY = s.view.focusHeight ?? 0.45;
-      eye = [cx + Math.cos(a) * r, s.view.height, cz + Math.sin(a) * r];
+      const focusY = (s.view.focusHeight ?? 0.45) + gp.z;
+      eye = [cx + Math.cos(a) * r, s.view.height + gp.z, cz + Math.sin(a) * r];
       const to = [cx - eye[0], focusY - eye[1], cz - eye[2]];
       forward = normalize(to);
       const dotUp = forward[1];
@@ -3226,6 +3299,20 @@ function compile(gl, type, src) {
 }
 
 /** Insert `#define` lines straight after the `#version` line, which must stay first. */
+/** One bit per entry, base64 (the cockpit PVS cache). */
+function packBits(u8) {
+  const out = new Uint8Array(Math.ceil(u8.length / 8));
+  for (let i = 0; i < u8.length; i++) if (u8[i]) out[i >> 3] |= 1 << (i & 7);
+  let bin = "";
+  for (let i = 0; i < out.length; i += 0x8000) bin += String.fromCharCode.apply(null, out.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function unpackBits(b64, len) {
+  const bin = atob(b64), out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) out[i] = (bin.charCodeAt(i >> 3) >> (i & 7)) & 1;
+  return out;
+}
+
 function withDefines(src, defs) {
   const nl = src.indexOf("\n");
   return src.slice(0, nl + 1) + defs + src.slice(nl + 1);

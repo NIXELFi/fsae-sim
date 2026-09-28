@@ -395,8 +395,8 @@ export const TRACKS = [
   { id: "endurance", label: "Endurance 2026", url: "./data/track-endurance.json" },
   { id: "skidpad", label: "Skidpad (FSAE D.10)", kind: "skidpad" },
   { id: "accel", label: "Acceleration (FSAE D.9)", kind: "accel" },
-  { id: "mis", label: "Michigan International Speedway", url: "./data/venue-mis.json",
-    kind: "venue" },
+  // Free roam at the real site (render/sitemesh.js, track/venue.js siteVenue).
+  { id: "mis", label: "Michigan International Speedway", kind: "site" },
 ];
 
 /**

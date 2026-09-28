@@ -111,7 +111,8 @@ function sampler(site, arr) {
  * the ground shader), the stands (buildings, grandstands, walls and tree
  * canopy, vertex coloured) and the site's bounds in the course frame.
  */
-export function buildSiteMeshes(site, place, track) {
+export function buildSiteMeshes(site, place, track, opts = {}) {
+  const free = !!track.freeRoam, lite = !!opts.lite;
   const [SW, SH] = site.meta.sizeM;
   const groundAt = sampler(site, site.ground);
 
@@ -123,7 +124,10 @@ export function buildSiteMeshes(site, place, track) {
     sxx += x * x; sxy += x * y; syy += y * y; sx += x; sy += y; sz += z; sxz += x * z; syz += y * z;
   }
   const n = cl.length;
-  const plane = solve3([[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], [sxz, syz, sz]);
+  // Free roam has no course to sit flat under: the ground at the spawn is 0
+  // and everything else is where it really is (the car is drawn on it).
+  const plane = free ? [0, 0, groundAt(track.spawn.x, track.spawn.y)]
+    : solve3([[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], [sxz, syz, sz]);
   const planeAt = (x, y) => plane[0] * x + plane[1] * y + plane[2];
 
   // ---- distance from the course, on the terrain grid (chamfer 3-4) ----
@@ -144,7 +148,7 @@ export function buildSiteMeshes(site, place, track) {
     return dist[j * gw + i];
   };
   const heightAt = (x, y, d) => {
-    const w = smoothstep(FLAT_NEAR_M, FLAT_FAR_M, d);
+    const w = free ? 1 : smoothstep(FLAT_NEAR_M, FLAT_FAR_M, d);
     // Taper to the plane at the site's edge, where the flat grass takes over.
     const edge = Math.min(x, SW - x, -y, SH + y);
     const e = smoothstep(0, 120, edge);
@@ -186,151 +190,167 @@ export function buildSiteMeshes(site, place, track) {
   }
   const terrain = { position: tp, normal: tn, color: tc, uv: tuv, index: tidx, count: tidx.length };
 
-  // ---- stands: structures as blocks, canopy as a soft surface ---------------
-  const S = STAND_STEP_M, cw = site.cw, chh = site.ch;
-  const standAt = (x, y) => {
-    // max over the 2x2 1 m cells of this 2 m cell, and its class by majority
-    let h = 0, tree = 0, struct = 0;
-    for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
-      const ix = Math.min(site.W - 1, Math.floor(x / site.res) + dx), iy = Math.min(site.H - 1, Math.floor(-y / site.res) + dy);
-      const q = iy * site.W + ix, c = site.klass[q];
-      if (c >= 220) { struct++; h = Math.max(h, site.stand[q]); } else if (c >= 120 && c < 180) { tree++; h = Math.max(h, site.stand[q]); }
-    }
-    return { h, kind: struct >= 2 ? 2 : tree >= 2 ? 1 : 0 };
-  };
-  const cells = new Array(cw * chh);
-  for (let j = 0; j < chh; j++) for (let i = 0; i < cw; i++) cells[j * cw + i] = standAt(i * S, -j * S);
-  const gAt = (x, y) => {
-    const i = Math.min(gw - 1, Math.max(0, Math.round(x / TERRAIN_STEP_M))), j = Math.min(gh - 1, Math.max(0, Math.round(-y / TERRAIN_STEP_M)));
-    return heightAt(x, y, dist[j * gw + i]);
-  };
-  const pos = [], nor = [], col = [], mats = [];
-  const NOMAT = [-1, 0, 0];
-  const P = (x, y, h) => { const [cx, cy] = place.toCourse(x, y); return [cx, h, -cy]; };
-  const push = (a, b, c, na, colr, mat = NOMAT) => {
-    for (const v of [a, b, c]) { pos.push(v[0], v[1], v[2]); nor.push(na[0], na[1], na[2]); col.push(colr[0], colr[1], colr[2]); mats.push(mat[0], mat[1], mat[2]); }
-  };
-  const faceN = (a, b, c) => {
-    const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
-    const x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx, l = Math.hypot(x, y, z) || 1;
-    return [x / l, y / l, z / l];
-  };
-  const quad = (a, b, c, d, colr) => { const nn = faceN(a, b, c); push(a, b, c, nn, colr); push(a, c, d, nn, colr); };
-  const orthoCol = (i, j) => { const q = (Math.min(chh - 1, j) * cw + Math.min(cw - 1, i)) * 4; return [site.colour[q] / 255, site.colour[q + 1] / 255, site.colour[q + 2] / 255]; };
-  // Canopy corner heights: mean of the tree cells around a corner, 0 where none.
-  const cornerH = (i, j) => {
-    let s = 0, m = 0;
-    for (const [di, dj] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
-      const ii = i + di, jj = j + dj;
-      if (ii < 0 || jj < 0 || ii >= cw || jj >= chh) continue;
-      const c = cells[jj * cw + ii];
-      if (c.kind === 1) { s += c.h; m++; }
-    }
-    return m === 4 ? s / 4 : 0;   // the edge of a wood comes down to the ground
-  };
-  let seed = 7;
-  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-  for (let j = 0; j < chh; j++) {
-    for (let i = 0; i < cw; i++) {
-      const c = cells[j * cw + i];
-      if (!c.kind || c.h < 0.8) continue;
-      const x0 = i * S, x1 = x0 + S, y0 = -j * S, y1 = y0 - S;
-      if (c.kind === 2) continue;   // buildings come from their traced outlines (sitebuild.js)
-      if (c.kind === 1 && distAt(x0 + S / 2, y0 - S / 2) < TREE_MODEL_M) continue;
-      const g = gAt(x0 + S / 2, y0 - S / 2);
-      const oc = orthoCol(i, j);
-      if (c.kind === 2) {
-        const top = g + c.h;
-        const roof = oc;
-        quad(P(x0, y0, top), P(x0, y1, top), P(x1, y1, top), P(x1, y0, top), roof);
-        const wall = [roof[0] * 0.55 + 0.12, roof[1] * 0.55 + 0.12, roof[2] * 0.55 + 0.12];
-        // A wall on each side whose neighbour is lower (or not a structure).
-        for (const [di, dj, ax, ay, bx, by] of [[1, 0, x1, y0, x1, y1], [-1, 0, x0, y1, x0, y0], [0, 1, x1, y1, x0, y1], [0, -1, x0, y0, x1, y0]]) {
-          const ni = i + di, nj = j + dj;
-          const nb = ni >= 0 && nj >= 0 && ni < cw && nj < chh ? cells[nj * cw + ni] : null;
-          const nTop = nb && nb.kind === 2 ? g + nb.h : g - 0.3;
-          if (nTop >= top - 0.05) continue;
-          quad(P(ax, ay, top), P(ax, ay, nTop), P(bx, by, nTop), P(bx, by, top), wall);
+  // Everything standing on the ground -- walls, buildings, stands, trees --
+  // is built on demand (the renderer does it a couple of frames after the
+  // course appears, so it is not on the load's critical path).
+  const stats = { terrainTris: tidx.length / 3 };
+  const buildStands = () => {
+    // ---- stands: structures as blocks, canopy as a soft surface ---------------
+    const S = STAND_STEP_M, cw = site.cw, chh = site.ch;
+    const standAt = (x, y) => {
+      // max over the 2x2 1 m cells of this 2 m cell, and its class by majority
+      let h = 0, tree = 0, struct = 0;
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+        const ix = Math.min(site.W - 1, Math.floor(x / site.res) + dx), iy = Math.min(site.H - 1, Math.floor(-y / site.res) + dy);
+        const q = iy * site.W + ix, c = site.klass[q];
+        if (c >= 220) { struct++; h = Math.max(h, site.stand[q]); } else if (c >= 120 && c < 180) { tree++; h = Math.max(h, site.stand[q]); }
+      }
+      return { h, kind: struct >= 2 ? 2 : tree >= 2 ? 1 : 0 };
+    };
+    const cells = new Array(cw * chh);
+    for (let j = 0; j < chh; j++) for (let i = 0; i < cw; i++) cells[j * cw + i] = standAt(i * S, -j * S);
+    const gAt = (x, y) => {
+      const i = Math.min(gw - 1, Math.max(0, Math.round(x / TERRAIN_STEP_M))), j = Math.min(gh - 1, Math.max(0, Math.round(-y / TERRAIN_STEP_M)));
+      return heightAt(x, y, dist[j * gw + i]);
+    };
+    const pos = [], nor = [], col = [], mats = [];
+    const NOMAT = [-1, 0, 0];
+    const P = (x, y, h) => { const [cx, cy] = place.toCourse(x, y); return [cx, h, -cy]; };
+    const push = (a, b, c, na, colr, mat = NOMAT) => {
+      for (const v of [a, b, c]) { pos.push(v[0], v[1], v[2]); nor.push(na[0], na[1], na[2]); col.push(colr[0], colr[1], colr[2]); mats.push(mat[0], mat[1], mat[2]); }
+    };
+    const faceN = (a, b, c) => {
+      const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+      const x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx, l = Math.hypot(x, y, z) || 1;
+      return [x / l, y / l, z / l];
+    };
+    const quad = (a, b, c, d, colr) => { const nn = faceN(a, b, c); push(a, b, c, nn, colr); push(a, c, d, nn, colr); };
+    const orthoCol = (i, j) => { const q = (Math.min(chh - 1, j) * cw + Math.min(cw - 1, i)) * 4; return [site.colour[q] / 255, site.colour[q + 1] / 255, site.colour[q + 2] / 255]; };
+    // Canopy corner heights: mean of the tree cells around a corner, 0 where none.
+    const cornerH = (i, j) => {
+      let s = 0, m = 0;
+      for (const [di, dj] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
+        const ii = i + di, jj = j + dj;
+        if (ii < 0 || jj < 0 || ii >= cw || jj >= chh) continue;
+        const c = cells[jj * cw + ii];
+        if (c.kind === 1) { s += c.h; m++; }
+      }
+      return m === 4 ? s / 4 : 0;   // the edge of a wood comes down to the ground
+    };
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    for (let j = 0; j < chh; j++) {
+      for (let i = 0; i < cw; i++) {
+        const c = cells[j * cw + i];
+        if (lite || !c.kind || c.h < 0.8) continue;
+        const x0 = i * S, x1 = x0 + S, y0 = -j * S, y1 = y0 - S;
+        if (c.kind === 2) continue;   // buildings come from their traced outlines (sitebuild.js)
+        if (c.kind === 1 && distAt(x0 + S / 2, y0 - S / 2) < TREE_MODEL_M) continue;
+        const g = gAt(x0 + S / 2, y0 - S / 2);
+        const oc = orthoCol(i, j);
+        if (c.kind === 2) {
+          const top = g + c.h;
+          const roof = oc;
+          quad(P(x0, y0, top), P(x0, y1, top), P(x1, y1, top), P(x1, y0, top), roof);
+          const wall = [roof[0] * 0.55 + 0.12, roof[1] * 0.55 + 0.12, roof[2] * 0.55 + 0.12];
+          // A wall on each side whose neighbour is lower (or not a structure).
+          for (const [di, dj, ax, ay, bx, by] of [[1, 0, x1, y0, x1, y1], [-1, 0, x0, y1, x0, y0], [0, 1, x1, y1, x0, y1], [0, -1, x0, y0, x1, y0]]) {
+            const ni = i + di, nj = j + dj;
+            const nb = ni >= 0 && nj >= 0 && ni < cw && nj < chh ? cells[nj * cw + ni] : null;
+            const nTop = nb && nb.kind === 2 ? g + nb.h : g - 0.3;
+            if (nTop >= top - 0.05) continue;
+            quad(P(ax, ay, top), P(ax, ay, nTop), P(bx, by, nTop), P(bx, by, top), wall);
+          }
+        } else {
+          const h00 = g + cornerH(i, j), h10 = g + cornerH(i + 1, j), h01 = g + cornerH(i, j + 1), h11 = g + cornerH(i + 1, j + 1);
+          const v = 0.85 + 0.3 * rnd();
+          const leaf = [oc[0] * v, oc[1] * v * 1.04, oc[2] * v];
+          quad(P(x0, y0, h00), P(x0, y1, h01), P(x1, y1, h11), P(x1, y0, h10), leaf);
         }
-      } else {
-        const h00 = g + cornerH(i, j), h10 = g + cornerH(i + 1, j), h01 = g + cornerH(i, j + 1), h11 = g + cornerH(i + 1, j + 1);
-        const v = 0.85 + 0.3 * rnd();
-        const leaf = [oc[0] * v, oc[1] * v * 1.04, oc[2] * v];
-        quad(P(x0, y0, h00), P(x0, y1, h01), P(x1, y1, h11), P(x1, y0, h10), leaf);
       }
     }
-  }
-  // ---- walls: continuous concrete walls along the traced polylines, with a
-  // catch fence (posts every 3 m and a top rail) where the lidar saw one ----
-  const WALL_H = 1.1, WALL_T = 0.5, WALL = [0.62, 0.62, 0.60], POST = [0.30, 0.31, 0.33];
-  let nPosts = 0;
-  // A box along site segment a->b: half thickness t, from height z0 to z1
-  // (relative to the ground under each end).
-  const bar = (ax, ay, bx, by, t, z0, z1, colr, ext = 0) => {
-    const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
-    ax -= ux * ext; ay -= uy * ext; bx += ux * ext; by += uy * ext;
-    const nx = -uy * t, ny = ux * t;
-    const ga = gAt(ax, ay), gb = gAt(bx, by);
-    const A0 = P(ax + nx, ay + ny, ga + z0), A1 = P(ax - nx, ay - ny, ga + z0), B0 = P(bx + nx, by + ny, gb + z0), B1 = P(bx - nx, by - ny, gb + z0);
-    const A0t = P(ax + nx, ay + ny, ga + z1), A1t = P(ax - nx, ay - ny, ga + z1), B0t = P(bx + nx, by + ny, gb + z1), B1t = P(bx - nx, by - ny, gb + z1);
-    quad(A0t, B0t, B1t, A1t, colr);                                    // top
-    const side = [colr[0] * 0.92, colr[1] * 0.92, colr[2] * 0.92];
-    quad(A0, B0, B0t, A0t, side); quad(B1, A1, A1t, B1t, side);         // faces
-    quad(A1, A0, A0t, A1t, side); quad(B0, B1, B1t, B0t, side);         // ends
-  };
-  for (const w of site.meta.walls?.lines ?? []) {
-    const pts = w.p, fence = w.h > 2.2 ? Math.min(6.5, w.h) : 0;
-    let carry = 0;
-    for (let e = 1; e < pts.length; e++) {
-      const [ax, ay] = pts[e - 1], [bx, by] = pts[e];
-      bar(ax, ay, bx, by, WALL_T / 2, -0.2, WALL_H, WALL, WALL_T / 2);
-      if (!fence) continue;
-      const L = Math.hypot(bx - ax, by - ay);
-      bar(ax, ay, bx, by, 0.04, fence - 0.08, fence, POST, 0.04);
-      // The fence's horizontal cables.
-      for (const f of [0.38, 0.7]) { const z = WALL_H + (fence - WALL_H) * f; bar(ax, ay, bx, by, 0.015, z - 0.03, z, POST, 0.02); }
-      for (let d = 3 - carry; d < L; d += 3) {
-        const f = d / L, px = ax + (bx - ax) * f, py = ay + (by - ay) * f;
-        bar(px - 0.06, py, px + 0.06, py, 0.06, WALL_H, fence, POST);
-        nPosts++;
+    // ---- walls: continuous concrete walls along the traced polylines, with a
+    // catch fence (posts every 3 m and a top rail) where the lidar saw one ----
+    const WALL_H = 1.1, WALL_T = 0.5, WALL = [0.62, 0.62, 0.60], POST = [0.30, 0.31, 0.33];
+    let nPosts = 0;
+    // A box along site segment a->b: half thickness t, from height z0 to z1
+    // (relative to the ground under each end).
+    const bar = (ax, ay, bx, by, t, z0, z1, colr, ext = 0) => {
+      const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
+      ax -= ux * ext; ay -= uy * ext; bx += ux * ext; by += uy * ext;
+      const nx = -uy * t, ny = ux * t;
+      const ga = gAt(ax, ay), gb = gAt(bx, by);
+      const A0 = P(ax + nx, ay + ny, ga + z0), A1 = P(ax - nx, ay - ny, ga + z0), B0 = P(bx + nx, by + ny, gb + z0), B1 = P(bx - nx, by - ny, gb + z0);
+      const A0t = P(ax + nx, ay + ny, ga + z1), A1t = P(ax - nx, ay - ny, ga + z1), B0t = P(bx + nx, by + ny, gb + z1), B1t = P(bx - nx, by - ny, gb + z1);
+      quad(A0t, B0t, B1t, A1t, colr);                                    // top
+      const side = [colr[0] * 0.92, colr[1] * 0.92, colr[2] * 0.92];
+      quad(A0, B0, B0t, A0t, side); quad(B1, A1, A1t, B1t, side);         // faces
+      quad(A1, A0, A0t, A1t, side); quad(B0, B1, B1t, B0t, side);         // ends
+    };
+    for (const w of site.meta.walls?.lines ?? []) {
+      const pts = w.p, fence = w.h > 2.2 ? Math.min(6.5, w.h) : 0;
+      let carry = 0;
+      for (let e = 1; e < pts.length; e++) {
+        const [ax, ay] = pts[e - 1], [bx, by] = pts[e];
+        bar(ax, ay, bx, by, WALL_T / 2, -0.2, WALL_H, WALL, WALL_T / 2);
+        if (!fence) continue;
+        const L = Math.hypot(bx - ax, by - ay);
+        bar(ax, ay, bx, by, 0.04, fence - 0.08, fence, POST, 0.04);
+        // The fence's horizontal cables.
+        for (const f of [0.38, 0.7]) { const z = WALL_H + (fence - WALL_H) * f; bar(ax, ay, bx, by, 0.015, z - 0.03, z, POST, 0.02); }
+        for (let d = 3 - carry; d < L; d += 3) {
+          const f = d / L, px = ax + (bx - ax) * f, py = ay + (by - ay) * f;
+          bar(px - 0.06, py, px + 0.06, py, 0.06, WALL_H, fence, POST);
+          nPosts++;
+        }
+        carry = (carry + L) % 3;
       }
-      carry = (carry + L) % 3;
     }
-  }
 
-  // ---- buildings, grandstands, the scoring pylon, light poles --------------
-  const putAbs = (a, b, c, colr, mat) => {
-    const A = P(a[0], a[1], a[2]), B = P(b[0], b[1], b[2]), C = P(c[0], c[1], c[2]);
-    push(A, B, C, faceN(A, B, C), colr, mat ?? NOMAT);
+    // ---- buildings, grandstands, the scoring pylon, light poles --------------
+    const putAbs = (a, b, c, colr, mat) => {
+      const A = P(a[0], a[1], a[2]), B = P(b[0], b[1], b[2]), C = P(c[0], c[1], c[2]);
+      push(A, B, C, faceN(A, B, C), colr, mat ?? NOMAT);
+    };
+    const structStats = lite ? {} : buildStructures(site.meta, putAbs, (x, y) => gAt(x, y), rnd);
+
+    // ---- trees near the course, one model per lidar canopy top --------------
+    const { Builder, rng, tree } = sceneryKit;
+    const tb = new Builder(), rand = rng(4242);
+    let nTrees = 0;
+    for (const [x, y, h] of lite ? [] : site.meta.trees?.xyh ?? []) {
+      if (distAt(x, y) >= TREE_MODEL_M || h < 3) continue;
+      const start = tb.p.length;
+      const [cx, cy] = place.toCourse(x, y);
+      // A canopy top in dense woods is a crown of ~6-9 m; the envmesh trees are
+      // shaped for a height, so the lidar height is what is passed.
+      tree(tb, cx, -cy, h, rand, 0.25);
+      const g = gAt(x, y);
+      for (let q = start + 1; q < tb.p.length; q += 3) tb.p[q] += g;
+      nTrees++;
+    }
+    for (let q = 0; q < tb.p.length; q++) { pos.push(tb.p[q]); nor.push(tb.n[q]); col.push(tb.c[q]); mats.push(q % 3 === 0 ? -1 : 0); }
+
+    const stands = { position: new Float32Array(pos), normal: new Float32Array(nor), color: new Float32Array(col), mat: new Float32Array(mats), count: pos.length / 3 };
+    Object.assign(stats, { standTris: pos.length / 9, trees: nTrees, posts: nPosts, ...structStats });
+    return stands;
+
   };
-  const structStats = buildStructures(site.meta, putAbs, (x, y) => gAt(x, y), rnd);
-
-  // ---- trees near the course, one model per lidar canopy top --------------
-  const { Builder, rng, tree } = sceneryKit;
-  const tb = new Builder(), rand = rng(4242);
-  let nTrees = 0;
-  for (const [x, y, h] of site.meta.trees?.xyh ?? []) {
-    if (distAt(x, y) >= TREE_MODEL_M || h < 3) continue;
-    const start = tb.p.length;
-    const [cx, cy] = place.toCourse(x, y);
-    // A canopy top in dense woods is a crown of ~6-9 m; the envmesh trees are
-    // shaped for a height, so the lidar height is what is passed.
-    tree(tb, cx, -cy, h, rand, 0.25);
-    const g = gAt(x, y);
-    for (let q = start + 1; q < tb.p.length; q += 3) tb.p[q] += g;
-    nTrees++;
-  }
-  for (let q = 0; q < tb.p.length; q++) { pos.push(tb.p[q]); nor.push(tb.n[q]); col.push(tb.c[q]); mats.push(q % 3 === 0 ? -1 : 0); }
-
-  const stands = { position: new Float32Array(pos), normal: new Float32Array(nor), color: new Float32Array(col), mat: new Float32Array(mats), count: pos.length / 3 };
-
   // The site's corners in the course frame, for the horizon scenery.
   const corners = [[0, 0], [SW, 0], [SW, -SH], [0, -SH]].map(([x, y]) => place.toCourse(x, y));
   const bounds = {
     minX: Math.min(...corners.map((c) => c[0])), maxX: Math.max(...corners.map((c) => c[0])),
     minY: Math.min(...corners.map((c) => c[1])), maxY: Math.max(...corners.map((c) => c[1])),
   };
-  return { terrain, stands, bounds, plane, stats: { terrainTris: tidx.length / 3, standTris: pos.length / 9, trees: nTrees, posts: nPosts, ...structStats } };
+  // The drawn ground's height at a COURSE point, bilinear over the terrain
+  // grid -- what the car is drawn standing on off the course.
+  const heightAtCourse = (cx, cy) => {
+    const [sx, sy] = place.toSite(cx, cy);
+    const fx = Math.min(gw - 1.001, Math.max(0, sx / TERRAIN_STEP_M)), fy = Math.min(gh - 1.001, Math.max(0, -sy / TERRAIN_STEP_M));
+    const i = Math.floor(fx), j = Math.floor(fy), ax = fx - i, ay = fy - j, k = j * gw + i;
+    return (hgrid[k] * (1 - ax) + hgrid[k + 1] * ax) * (1 - ay) + (hgrid[k + gw] * (1 - ax) + hgrid[k + gw + 1] * ax) * ay;
+  };
+  return { terrain, buildStands, bounds, plane, heightAtCourse, stats };
 }
 
 /** A site-frame direction into the course frame (rotation only). */

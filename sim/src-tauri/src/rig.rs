@@ -518,6 +518,12 @@ pub enum RigCommand {
     #[serde(rename_all = "camelCase")]
     Boundary { centre: Vec<[f64; 2]>, offset_m: f64 },
     ClearBoundary,
+    /// The real venue's surfaces (grass off the course): its 1 m class
+    /// raster (base64), the course's placement in the site, and the course
+    /// centreline with its half-widths (the always-asphalt corridor).
+    #[serde(rename_all = "camelCase")]
+    Surface { w: usize, h: usize, res_m: f64, cls_b64: String, k: f64, rot_deg: f64, t: [f64; 2], centre: Vec<[f64; 2]>, half_width: Vec<f64> },
+    ClearSurface,
     Ffb(FfbConfig),
     Wheel(Box<WheelConfig>),
     /// Re-open the wheel, steering by the named base (or the best guess).
@@ -885,6 +891,7 @@ struct Loop {
     car: Box<dyn Solver>,
     assists: Assists,
     boundary: Option<Boundary>,
+    surface: Option<std::sync::Arc<sim_core::surface::SurfaceMap>>,
     etc: EtcMap,
     wheel: Option<Wheel>,
     hwnd_raw: isize,
@@ -942,6 +949,7 @@ impl Loop {
             car,
             assists: Assists::default(),
             boundary: None,
+            surface: None,
             etc: EtcMap::linear(),
             wheel: None,
             hwnd_raw,
@@ -1198,6 +1206,20 @@ impl Loop {
                 self.boundary = Some(Boundary::new(centre, offset_m));
             }
             RigCommand::ClearBoundary => self.boundary = None,
+            RigCommand::Surface { w, h, res_m, cls_b64, k, rot_deg, t, centre, half_width } => {
+                let cls = sim_core::surface::SurfaceMap::decode_base64(&cls_b64);
+                if cls.len() == w * h {
+                    let map = std::sync::Arc::new(sim_core::surface::SurfaceMap::new(w, h, res_m, cls, k, rot_deg, t, centre, half_width));
+                    self.car.set_surface(Some(map.clone()));
+                    self.surface = Some(map);
+                } else {
+                    eprintln!("rig: surface raster is {} bytes, expected {}x{}; ignored", cls.len(), w, h);
+                }
+            }
+            RigCommand::ClearSurface => {
+                self.car.set_surface(None);
+                self.surface = None;
+            }
             RigCommand::Ffb(cfg) => self.ffb_cfg = cfg,
             RigCommand::Wheel(cfg) => {
                 let pts: Vec<(f64, f64)> = cfg.etc_points.iter().map(|p| (p[0], p[1])).collect();
@@ -1262,6 +1284,7 @@ impl Loop {
                 );
                 car.powertrain_mut().set_gear(gear);
                 car.reset(s.x, s.y, s.psi, s.speed());
+                car.set_surface(self.surface.clone());
                 self.car = car;
             }
         }

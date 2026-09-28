@@ -186,6 +186,82 @@ for i, sl in enumerate(ndimage.find_objects(lab)):
     poles.append([round(float(xx) + 0.5, 1), round(-(float(yy) + 0.5), 1), round(float(chm[yy, xx]), 1)])
 print("poles", len(poles))
 
+# ---- free roam: the oval's centre line, traced from the walls ----------------
+# Rays from the middle of the infield: the racing surface is the pavement
+# between the inner wall (the first wall a ray meets with 12+ m of pavement
+# after it) and the next wall out. The midpoint, smoothed and resampled at
+# 3 m, is the oval the free-roam HUD and minimap use.
+# The racing surface is the one big BANKED ring on the site (5 deg on the
+# back straight, 12 on the front, 18 in the turns): along each ray from the
+# infield middle, the longest run of ground rising outward at over ~3 deg.
+dtm_s = ndimage.gaussian_filter(dtm, 2.0)
+ocx, ocy = 640.0, 1250.0                         # infield middle (A frame, m)
+ths = np.linspace(0, 2 * np.pi, 1440, endpoint=False)
+wall_d = ndimage.binary_dilation(cls == 200, iterations=2)
+cands = []
+for ti, th in enumerate(ths):
+    dx, dy = np.cos(th), np.sin(th)
+    rr = np.arange(150, 900, 1.0)
+    xs = np.clip((ocx + rr * dx).astype(int), 0, Wd - 1); ys = np.clip((ocy + rr * dy).astype(int), 0, H - 1)
+    z = dtm_s[ys, xs]
+    up = np.gradient(z) > 0.05
+    edges = np.flatnonzero(np.diff(np.r_[0, up.astype(int), 0]))
+    cand = [(rr[a0] + rr[a1 - 1]) / 2 for a0, a1 in zip(edges[::2], edges[1::2])
+            if 10 <= a1 - a0 <= 45 and z[a1 - 1] - z[a0] > 0.8]
+    # ...and where the banking is too gentle to see (the 5 deg back straight),
+    # the pavement between two walls 14-45 m apart.
+    wh = wall_d[ys, xs]
+    we = np.flatnonzero(np.diff(np.r_[0, wh.astype(int), 0]))
+    wr = list(zip(we[::2], we[1::2]))
+    for (a0, a1), (b0, b1) in zip(wr, wr[1:]):
+        gap = rr[min(b0, len(rr) - 1)] - rr[a1 - 1]
+        if 14 <= gap <= 95 and (cls[ys[a1:b0], xs[a1:b0]] == 80).mean() > 0.6:
+            # the racing surface runs along the OUTER wall (a wide apron
+            # inside it on the back straight): its middle, 13 m in
+            cand.append(rr[min(b0, len(rr) - 1)] - 13.0 if gap > 40 else (rr[a1 - 1] + rr[min(b0, len(rr) - 1)]) / 2)
+    cands.append(cand)
+# A rough hand trace of the racing surface off the ortho (A-frame metres,
+# +-10 m), anticlockwise from the north turn; each ray then takes the real
+# candidate (banking or walls) nearest it within 20 m, the prior where none.
+PRIOR = [(740, 710), (600, 744), (500, 820), (410, 940), (350, 1100), (316, 1260), (300, 1420), (304, 1580),
+         (340, 1760), (420, 1900), (540, 1970), (660, 1980), (750, 1930), (810, 1840), (890, 1500), (930, 1260),
+         (970, 1040), (990, 900), (940, 780), (860, 724)]
+pa = np.array([[math.atan2(y - ocy, x - ocx) % (2 * np.pi), math.hypot(x - ocx, y - ocy)] for x, y in PRIOR])
+pa = pa[np.argsort(pa[:, 0])]
+prior_r = np.interp(ths, np.r_[pa[:, 0] - 2 * np.pi, pa[:, 0], pa[:, 0] + 2 * np.pi], np.r_[pa[:, 1], pa[:, 1], pa[:, 1]])
+mid_r = np.full(len(ths), np.nan)
+for ti in range(len(ths)):
+    near = [r for r in cands[ti] if abs(r - prior_r[ti]) < 20]
+    mid_r[ti] = min(near, key=lambda r: abs(r - prior_r[ti])) if near else np.nan
+good = ~np.isnan(mid_r)
+print("oval rays", int(good.sum()), "of", len(ths))
+mids = []
+if good.sum() > 100:
+    tt = np.r_[ths[good] - 2 * np.pi, ths[good], ths[good] + 2 * np.pi]
+    rr3 = np.r_[mid_r[good], mid_r[good], mid_r[good]]
+    rad = ndimage.median_filter(np.interp(ths, tt, rr3), 21, mode="wrap")
+    mids = [[ocx + r * np.cos(t), ocy + r * np.sin(t)] for t, r in zip(ths, rad)]
+mids = np.array(mids)
+if len(mids) > 100:
+    k = np.ones(9) / 9
+    sm_x = np.convolve(np.r_[mids[-4:, 0], mids[:, 0], mids[:4, 0]], k, "valid")
+    sm_y = np.convolve(np.r_[mids[-4:, 1], mids[:, 1], mids[:4, 1]], k, "valid")
+    P = np.stack([sm_x, sm_y], 1)
+    seg = np.r_[0, np.cumsum(np.hypot(*np.diff(np.vstack([P, P[:1]]), axis=0).T))]
+    s_new = np.arange(0, seg[-1], 3.0)
+    Pc = np.vstack([P, P[:1]])
+    oval = np.stack([np.interp(s_new, seg, Pc[:, 0]), np.interp(s_new, seg, Pc[:, 1])], 1)
+    # anticlockwise (race direction), site frame (y north)
+    oval_s = np.stack([oval[:, 0], -oval[:, 1]], 1)
+    a = 0.5 * np.sum(oval_s[:, 0] * np.roll(oval_s[:, 1], -1) - np.roll(oval_s[:, 0], -1) * oval_s[:, 1])
+    if a < 0: oval_s = oval_s[::-1]
+    freeRoam = {"centerline": np.round(oval_s, 2).tolist(), "lengthM": round(float(seg[-1]), 1),
+                "spawn": {"x": 435.0, "y": -1042.5, "headingRad": round(math.atan2(-1239.4 + 1042.5, 387.6 - 435.0), 4)}}
+    print("oval centreline", len(oval_s), "pts,", round(float(seg[-1]), 1), "m (MIS is 3219 m at the racing line)")
+else:
+    freeRoam = None
+    print("oval centreline FAILED:", len(mids), "rays")
+
 # ---- individual trees: tops of the canopy (local maxima of the smoothed
 # canopy height, at least ~5 m apart), for real tree models near the courses.
 sm = ndimage.gaussian_filter(np.where(tree, chm, 0), 1.5)
@@ -238,6 +314,7 @@ courses["skidpad"] = {"k": 1.0, "rotDeg": round(math.degrees(math.atan2(ax[1], a
 # to its centre 200 m on at (775, 2479) -- read off surface-class cross
 # sections (racing surface | grass median | pit wall | pit road).
 a0 = np.array([870 * 0.5, -2085 * 0.5]); a1 = np.array([775 * 0.5, -2479 * 0.5])
+courses["mis"] = {"k": 1.0, "rotDeg": 0.0, "t": [0.0, 0.0]}   # free roam: the site frame itself
 courses["accel"] = {"k": 1.0, "rotDeg": round(math.degrees(math.atan2(*(a1 - a0)[::-1])), 4), "t": a0.round(3).tolist()}
 
 site = {
@@ -259,6 +336,7 @@ site = {
     "buildings": {"note": "tiers: outline (site polygons) of what stands at least up to z (m above ground); extrude each from the tier below",
                   "list": buildings},
     "pylon": pylon,
+    "freeRoam": freeRoam,
     "poles": {"note": "site x, site y, height m -- lone lidar returns on open ground", "xyh": poles},
     "walls": {"note": "concrete walls, site-frame polylines; h = what the lidar saw on top (catch fence)", "lines": walls},
 }
