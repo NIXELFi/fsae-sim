@@ -164,6 +164,13 @@ pub struct Telemetry {
     /// wheel states. All zero from the bicycle, whose front is one rotor and
     /// which reports its axles through `wheel_omega_front` / `_rear`.
     pub wheel_omega: [f64; 4],
+    /// Rough ground (the grass off a real venue's course; double track only):
+    /// the road's height under each patch (mm, + = up), each wheel's own
+    /// travel over it (mm, + = up, on top of what the body does) and the
+    /// body's heave (mm, + = down). All zero on smooth ground.
+    pub road_mm: [f64; 4],
+    pub wheel_z_mm: [f64; 4],
+    pub heave_mm: f64,
 }
 
 /// `Send + Sync` so a solver can live in an ECS resource or be shared across
@@ -193,6 +200,10 @@ pub trait Solver: Send + Sync {
     /// What the tyres stand on (grass off the course at a real venue). Only
     /// the double-track model reads it; the others keep one asphalt world.
     fn set_surface(&mut self, _surface: Option<std::sync::Arc<crate::surface::SurfaceMap>>) {}
+
+    /// How rough the grass is: 1 the default bumps, 0 flat (double track
+    /// only, and only off the course -- see `surface::rough_height`).
+    fn set_roughness(&mut self, _scale: f64) {}
 }
 
 /// Everything a solver is assembled from. Swapping the tyre or the powertrain

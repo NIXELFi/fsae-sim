@@ -68,3 +68,43 @@ fn grass_is_slippery_and_draggy() {
     // A turn the car holds on asphalt is beyond grass grip: less lateral g.
     assert!(ay_g < ay_a * 0.8 && ay_g < GRASS_MU * 1.6 + 0.2, "grass {ay_g:.2} g vs asphalt {ay_a:.2} g");
 }
+
+/// Straight on at 15 m/s for 3 s; the spread of the front-left load and of
+/// the body's heave, the steering's kingpin moment, and the peak wheel travel.
+fn straight(surface: Option<Arc<SurfaceMap>>, rough: f64) -> (f64, f64, f64, f64) {
+    let mut c = car();
+    c.set_surface(surface);
+    c.set_roughness(rough);
+    c.powertrain_mut().set_gear(2);
+    c.reset(0.0, 0.0, 0.0, 15.0);
+    let (mut fz, mut hv, mut kp, mut zu) = (vec![], vec![], vec![], 0.0f64);
+    for i in 0..(3.0 / DT) as usize {
+        let throttle = if c.state().speed() < 15.0 { 0.4 } else { 0.0 };
+        c.step(DT, Controls { steer: 0.0, throttle, brake: 0.0 });
+        let t = c.telemetry();
+        assert!(t.fz.iter().all(|f| f.is_finite() && *f >= 0.0));
+        if i as f64 * DT > 0.5 {
+            fz.push(t.fz[0]);
+            hv.push(t.heave_mm);
+            kp.push(t.kingpin_torque_nm + t.scrub_moment_nm);
+            zu = t.wheel_z_mm.iter().fold(zu, |a, z| a.max(z.abs()));
+        }
+    }
+    let spread = |v: &[f64]| v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min);
+    (spread(&fz), spread(&hv), spread(&kp), zu)
+}
+
+#[test]
+fn grass_is_bumpy_and_the_bumps_reach_the_car_and_the_wheel() {
+    let (fz_a, hv_a, kp_a, zu_a) = straight(Some(site(80)), 1.0);
+    let (fz_g, hv_g, kp_g, zu_g) = straight(Some(site(0)), 1.0);
+    let (fz_0, _, _, zu_0) = straight(Some(site(0)), 0.0);
+    println!("pavement: fz {fz_a:.0} N heave {hv_a:.2} mm kingpin {kp_a:.2} N.m wheel {zu_a:.1} mm");
+    println!("grass:    fz {fz_g:.0} N heave {hv_g:.2} mm kingpin {kp_g:.2} N.m wheel {zu_g:.1} mm");
+    println!("grass, roughness 0: fz {fz_0:.0} N wheel {zu_0:.1} mm");
+    assert_eq!(zu_a, 0.0);
+    assert_eq!(zu_0, 0.0);
+    assert!(fz_g > 5.0 * fz_a.max(20.0), "grass load swing {fz_g:.0} N vs {fz_a:.0} N");
+    assert!(hv_g > 2.0 && zu_g > 3.0 && zu_g < 60.0, "heave {hv_g:.2} mm, wheel {zu_g:.1} mm");
+    assert!(kp_g > 2.0 * kp_a.max(0.05), "kingpin {kp_g:.2} vs {kp_a:.2}");
+}

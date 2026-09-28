@@ -21,6 +21,14 @@ pub const GRASS_CRR: f64 = 0.06;
 pub const CORRIDOR_MARGIN_M: f64 = 2.0;
 /// Class value that is pavement in the map (mis-class.png).
 const PAVE: u8 = 80;
+/// Grass is not flat: over this far past the always-asphalt corridor the
+/// bumps grow from nothing to full height, so leaving the course is a ramp
+/// into rough ground rather than a step.
+pub const ROUGH_RAMP_M: f64 = 1.5;
+/// The grass's height profile (m, + = up) as octaves of smooth value noise:
+/// (wavelength m, peak amplitude m). Mown infield turf: a long swell of a
+/// couple of cm, shorter lumps on top. About 8 mm RMS, peaks near 3 cm.
+const ROUGH_OCTAVES: [(f64, f64); 4] = [(7.0, 0.020), (3.0, 0.010), (1.2, 0.005), (0.5, 0.0025)];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Surface {
@@ -112,6 +120,53 @@ impl SurfaceMap {
         (bd.sqrt(), self.half_width[best])
     }
 
+    /// The surface under course point (x, y), and the ground's height there
+    /// (m, + = up): zero on the course and on pavement, the grass's bumps
+    /// (`ROUGH_OCTAVES`, times `scale`) off it. The height is continuous --
+    /// it fades in over `ROUGH_RAMP_M` past the corridor and over one map
+    /// cell at a pavement edge -- so a wheel never meets a step.
+    pub fn at_with_road(&self, x: f64, y: f64, hint: &mut usize, scale: f64) -> (Surface, f64) {
+        let (d, hw) = self.nearest(x, y, hint);
+        let edge = hw + CORRIDOR_MARGIN_M;
+        let surf = if d <= edge { Surface::ASPHALT } else { self.class_at(x, y) };
+        if d <= edge || scale <= 0.0 { return (surf, 0.0); }
+        let ramp = ((d - edge) / ROUGH_RAMP_M).min(1.0);
+        let (sx, sy) = self.to_site(x, y);
+        let g = self.grassiness(sx, sy);
+        if g <= 0.0 { return (surf, 0.0); }
+        (surf, scale * ramp * g * rough_height(sx, sy))
+    }
+
+    fn to_site(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.k * (self.cos * x - self.sin * y) + self.t[0],
+            self.k * (self.sin * x + self.cos * y) + self.t[1],
+        )
+    }
+
+    /// Off the corridor: what the map says.
+    fn class_at(&self, x: f64, y: f64) -> Surface {
+        let (sx, sy) = self.to_site(x, y);
+        let (col, row) = ((sx / self.res).floor(), (-sy / self.res).floor());
+        if col < 0.0 || row < 0.0 || col >= self.w as f64 || row >= self.h as f64 { return Surface::GRASS; }
+        if self.cls[row as usize * self.w + col as usize] == PAVE { Surface::ASPHALT } else { Surface::GRASS }
+    }
+
+    /// How much of site point (sx, sy) is grass, 0..1, bilinear between the
+    /// map's cell centres (off the map is grass).
+    fn grassiness(&self, sx: f64, sy: f64) -> f64 {
+        let (fc, fr) = (sx / self.res - 0.5, -sy / self.res - 0.5);
+        let (c0, r0) = (fc.floor(), fr.floor());
+        let (tc, tr) = (fc - c0, fr - r0);
+        let cell = |c: f64, r: f64| -> f64 {
+            if c < 0.0 || r < 0.0 || c >= self.w as f64 || r >= self.h as f64 { return 1.0; }
+            if self.cls[r as usize * self.w + c as usize] == PAVE { 0.0 } else { 1.0 }
+        };
+        let top = cell(c0, r0) * (1.0 - tc) + cell(c0 + 1.0, r0) * tc;
+        let bot = cell(c0, r0 + 1.0) * (1.0 - tc) + cell(c0 + 1.0, r0 + 1.0) * tc;
+        top * (1.0 - tr) + bot * tr
+    }
+
     /// The surface under course point (x, y).
     pub fn at(&self, x: f64, y: f64, hint: &mut usize) -> Surface {
         let (d, hw) = self.nearest(x, y, hint);
@@ -122,6 +177,38 @@ impl SurfaceMap {
         if col < 0.0 || row < 0.0 || col >= self.w as f64 || row >= self.h as f64 { return Surface::GRASS; }
         if self.cls[row as usize * self.w + col as usize] == PAVE { Surface::ASPHALT } else { Surface::GRASS }
     }
+}
+
+/// The grass's bumps at site point (sx, sy), m. Fixed to the ground, so the
+/// same patch of grass is the same shape on every course and every lap.
+pub fn rough_height(sx: f64, sy: f64) -> f64 {
+    ROUGH_OCTAVES
+        .iter()
+        .enumerate()
+        .map(|(o, &(wl, amp))| amp * value_noise(sx / wl, sy / wl, o as u32))
+        .sum()
+}
+
+/// Smooth 2-D value noise in -1..1 (quintic fade, so the slope is
+/// continuous too -- a wheel feels the lumps, not the lattice).
+fn value_noise(x: f64, y: f64, seed: u32) -> f64 {
+    let (x0, y0) = (x.floor(), y.floor());
+    let (fx, fy) = (x - x0, y - y0);
+    let fade = |t: f64| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    let (ux, uy) = (fade(fx), fade(fy));
+    let (ix, iy) = (x0 as i64, y0 as i64);
+    let h = |i: i64, j: i64| -> f64 {
+        let mut v = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (j as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ (seed as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+        v ^= v >> 33;
+        v = v.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+        v ^= v >> 33;
+        (v >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    };
+    let a = h(ix, iy) + (h(ix + 1, iy) - h(ix, iy)) * ux;
+    let b = h(ix, iy + 1) + (h(ix + 1, iy + 1) - h(ix, iy + 1)) * ux;
+    a + (b - a) * uy
 }
 
 #[cfg(test)]
@@ -153,6 +240,25 @@ mod tests {
         assert_eq!(m.at(20.0, 50.0, &mut h), Surface::ASPHALT);  // west half, pavement
         assert_eq!(m.at(95.0, 50.0, &mut h), Surface::GRASS);
         assert_eq!(m.at(500.0, 50.0, &mut h), Surface::GRASS);   // off the map
+    }
+
+    #[test]
+    fn the_road_is_flat_on_the_course_and_bumpy_off_it() {
+        let m = map();
+        let mut h = 0;
+        assert_eq!(m.at_with_road(70.0, 50.0, &mut h, 1.0).1, 0.0);
+        assert_eq!(m.at_with_road(73.9, 50.0, &mut h, 1.0).1, 0.0);
+        assert_eq!(m.at_with_road(20.0, 50.0, &mut h, 1.0).1, 0.0);    // pavement
+        assert_eq!(m.at_with_road(95.0, 50.0, &mut h, 0.0).1, 0.0);    // bumps off
+        // Out on the grass: bumps of cm, varying along the ground.
+        let z: Vec<f64> = (0..200).map(|i| m.at_with_road(85.0 + i as f64 * 0.05, 50.0, &mut h, 1.0).1).collect();
+        let (lo, hi) = z.iter().fold((1.0f64, -1.0f64), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!(hi - lo > 0.005 && hi.abs() < 0.04 && lo.abs() < 0.04, "{lo} {hi}");
+        // Continuous: no step between samples 5 cm apart.
+        assert!(z.windows(2).all(|w| (w[1] - w[0]).abs() < 0.005));
+        // And it fades in from the corridor's edge.
+        let near = m.at_with_road(74.2, 50.0, &mut h, 1.0).1.abs();
+        assert!(near < 0.01, "{near}");
     }
 
     #[test]

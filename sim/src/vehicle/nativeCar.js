@@ -247,6 +247,9 @@ export class NativeCar {
       // 1 = v1, 2 = v2, 3 = v2.1 (see `FfbConfig::model` in rig.rs).
       model: ffb.model === 2 || ffb.model === 3 ? ffb.model : 1,
     });
+    // The grass's bumps are the vehicle model's, not an effect -- but they
+    // are tuned with the feel, so they live in the same block.
+    rigNative.command({ kind: "roughness", scale: ffb.grassBumps ?? 1 });
     const isWheel = profile.kind === "wheel";
     const w = profile.wheel || {};
     const pedal = (cal) =>

@@ -2195,8 +2195,10 @@ export class Renderer {
     // On and near the course the ground is 0 and this is the identity.
     const gp = this.groundPose(cam);
     const h = cam.cgHeight ?? 0;
+    // The body's bounce over rough ground (main.js `_bump`), + = up.
+    const bz = cam.bumpZ || 0;
     this.chain(this.chassis, [
-      translation(T[0], cam.x, h + gp.z, -cam.y),
+      translation(T[0], cam.x, h + gp.z + bz, -cam.y),
       rotY(T[1], cam.psi),
       rotZ(T[2], cam.pitchRad + gp.pitch),
       rotX(T[3], cam.rollRad + gp.roll),
@@ -2220,7 +2222,7 @@ export class Renderer {
       // and the cockpit is what tilts. The in-car views never roll.
       const h = cam.cgHeight ?? 0;
       this.chain(this.camFrame, [
-        translation(T[0], cam.x, h + gp.z, -cam.y),
+        translation(T[0], cam.x, h + gp.z + bz, -cam.y),
         rotY(T[1], cam.psi),
         rotZ(T[2], cam.pitchRad + gp.pitch),
         translation(T[4], 0, -h, 0),
@@ -2486,7 +2488,8 @@ export class Renderer {
     const inv = invertRigid(this._rigInv, this.chassis);
     for (const hub of this.carModel.hubs) {
       const name = hub.name.toLowerCase();
-      const local = transformPoint(inv, transformPoint(this.axleFrame, [hub.x, hub.y, hub.z]));
+      const dz = s.wheels?.zM?.[(hub.front ? 0 : 2) + (hub.z < 0 ? 0 : 1)] ?? 0;
+      const local = transformPoint(inv, transformPoint(this.axleFrame, [hub.x, hub.y + dz, hub.z]));
       this.susp.solve(name, [local[0] - hub.x, local[1] - hub.y, local[2] - hub.z], hub.front ? (s.wheels?.steerRad ?? 0) : 0);
     }
     for (const rp of this.rigParts) {
@@ -2690,7 +2693,9 @@ export class Renderer {
       // plane so the dished rim faces outboard on both sides (see carmesh).
       const mirrored = hub.z < 0;
       const m = mats[i];
-      multiply(this._a, chassis, translation(T[0], hub.x, hub.y, hub.z));
+      // Each wheel's own travel over rough ground, FL FR RL RR (+z is right).
+      const dz = w.zM?.[(hub.front ? 0 : 2) + (hub.z < 0 ? 0 : 1)] ?? 0;
+      multiply(this._a, chassis, translation(T[0], hub.x, hub.y + dz, hub.z));
       multiply(this._b, this._a, rotY(T[1], hub.front ? w.steerRad : 0));
       multiply(this._a, this._b, rotZ(T[2], -(hub.front ? w.spinFront : w.spinRear)));
       if (mirrored) multiply(m, this._a, scale(T[3], 1, 1, -1));

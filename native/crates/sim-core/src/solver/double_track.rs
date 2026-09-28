@@ -125,6 +125,17 @@ pub struct DoubleTrackSolver {
     /// Off-course surfaces (grass), and each wheel's nearest-node hint.
     surface: Option<std::sync::Arc<crate::surface::SurfaceMap>>,
     surf_hint: [usize; 4],
+    /// Rough ground. Each wheel's unsprung mass rides its tyre over the
+    /// road's height `road` (m, + = up) and pushes the body through its
+    /// spring and damper: `zu` is its travel (m, + = up) on top of what the
+    /// body's own states already give, `zu_rate` its rate. The body is the
+    /// wheels' reference (it moves at a few Hz, they hop at ~20), so the
+    /// linear pieces add: on smooth ground all of this is zero and the
+    /// model is exactly what it was.
+    roughness: f64,
+    road: [f64; 4],
+    zu: [f64; 4],
+    zu_rate: [f64; 4],
     t_lock_last: f64,
     tel: Telemetry,
 }
@@ -209,6 +220,10 @@ impl DoubleTrackSolver {
             kingpin_prev: [0.0; 2],
             surface: None,
             surf_hint: [0; 4],
+            roughness: 1.0,
+            road: [0.0; 4],
+            zu: [0.0; 4],
+            zu_rate: [0.0; 4],
             t_lock_last: 0.0,
             tel: Telemetry::default(),
         }
@@ -354,6 +369,9 @@ impl Solver for DoubleTrackSolver {
         self.heave = 0.0;
         self.heave_rate = 0.0;
         self.kingpin_prev = [0.0; 2];
+        self.road = [0.0; 4];
+        self.zu = [0.0; 4];
+        self.zu_rate = [0.0; 4];
         let rr = self.body().ride_rate;
         let (pa, pb) = (self.c.params.a(), self.c.params.b());
         for _ in 0..20 {
@@ -388,6 +406,10 @@ impl Solver for DoubleTrackSolver {
     fn set_surface(&mut self, surface: Option<std::sync::Arc<crate::surface::SurfaceMap>>) {
         self.surface = surface;
         self.surf_hint = [0; 4];
+    }
+
+    fn set_roughness(&mut self, scale: f64) {
+        self.roughness = if scale.is_finite() { scale.clamp(0.0, 3.0) } else { 1.0 };
     }
 
     fn tyre_mut(&mut self) -> &mut dyn TyreModel {
@@ -511,7 +533,7 @@ impl DoubleTrackSolver {
         // Positive ay (a left turn) and positive roll load the RIGHT tyres.
         let lat_f = geo_lat_f + el_lat_f;
         let lat_r = geo_lat_r + el_lat_r;
-        let fz = [
+        let mut fz = [
             (stat_f + long_f - lat_f).max(0.0),
             (stat_f + long_f + lat_f).max(0.0),
             (stat_r + long_r - lat_r).max(0.0),
@@ -555,11 +577,47 @@ impl DoubleTrackSolver {
         // What each patch stands on: asphalt unless a venue's map says grass
         // (and never on the course itself -- see surface.rs).
         let mut surf = [crate::surface::Surface::ASPHALT; 4];
+        let road_prev = self.road;
         if let Some(map) = self.surface.as_ref() {
             let (c, s) = (self.s.psi.cos(), self.s.psi.sin());
             for i in 0..4 {
                 let (bx, by) = (arm[i], half_t[i]);
-                surf[i] = map.at(self.s.x + c * bx - s * by, self.s.y + s * bx + c * by, &mut self.surf_hint[i]);
+                let (px, py) = (self.s.x + c * bx - s * by, self.s.y + s * bx + c * by);
+                let (sf, z) = map.at_with_road(px, py, &mut self.surf_hint[i], self.roughness);
+                surf[i] = sf;
+                self.road[i] = z;
+            }
+        }
+        // Rough ground: each tyre's load changes by its squash over the
+        // road (never pulling -- a wheel over a crest can leave the ground),
+        // and each wheel pushes the body through its spring and damper.
+        let rough = self.road.iter().chain(self.zu.iter()).chain(self.zu_rate.iter()).any(|&z| z != 0.0);
+        let mut fz_tyre = [0.0f64; 4];
+        let mut f_body = [0.0f64; 4];
+        let mut fx_road = [0.0f64; 4];
+        let k_t = sp.tyre_rate_n_m;
+        let k_s = [sp.wheel_rate_front_n_m, sp.wheel_rate_front_n_m, sp.wheel_rate_rear_n_m, sp.wheel_rate_rear_n_m];
+        let m_u = [p.unsprung_front_kg, p.unsprung_front_kg, p.unsprung_rear_kg, p.unsprung_rear_kg];
+        let m_corner = [0.5 * body.ms * p.weight_dist_front, 0.5 * body.ms * p.weight_dist_front,
+                        0.5 * body.ms * (1.0 - p.weight_dist_front), 0.5 * body.ms * (1.0 - p.weight_dist_front)];
+        let damper = |i: usize, rate: f64| {
+            let zeta = if rate > 0.0 { sp.damping_jounce } else { sp.damping_rebound };
+            2.0 * zeta * (k_s[i] * m_corner[i]).sqrt()
+        };
+        if rough {
+            for i in 0..4 {
+                let tyre = (k_t * (self.road[i] - self.zu[i])).max(-fz[i]);
+                fz_tyre[i] = tyre;
+                fz[i] += tyre;
+                f_body[i] = k_s[i] * self.zu[i] + damper(i, self.zu_rate[i]) * self.zu_rate[i];
+                // The ground's slope along the way the patch is going tips
+                // its load backwards (climbing) or forwards (dropping): a
+                // drag and a shove at each wheel, which the scrub radius
+                // puts into the steering.
+                let vx = u - r * half_t[i];
+                let vx_safe = if vx.abs() < 1.0 { vx.signum() } else { vx };
+                let slope = ((self.road[i] - road_prev[i]) / dt / vx_safe).clamp(-0.3, 0.3);
+                fx_road[i] = -fz[i] * slope;
             }
         }
 
@@ -604,8 +662,9 @@ impl DoubleTrackSolver {
         let mut fxb = [0.0f64; 4];
         for i in 0..4 {
             let (c, s) = (steer[i].cos(), steer[i].sin());
-            fxb[i] = fx[i] * c - fy[i] * s;
-            let fyb = fx[i] * s + fy[i] * c;
+            let fxr = fx[i] + fx_road[i];
+            fxb[i] = fxr * c - fy[i] * s;
+            let fyb = fxr * s + fy[i] * c;
             fx_body += fxb[i];
             fy_body += fyb;
             // Lateral force about the CG, longitudinal through its offset.
@@ -640,7 +699,7 @@ impl DoubleTrackSolver {
         let align = kp[0] + kp[1];
         let fz_front = fz[FL] + fz[FR];
         let trail_front = if fz_front > 1.0 { (trail[FL] * fz[FL] + trail[FR] * fz[FR]) / fz_front } else { 0.0 };
-        let scrub_nm = p.steering.scrub_m * (fx[FR] - fx[FL]);
+        let scrub_nm = p.steering.scrub_m * ((fx[FR] + fx_road[FR]) - (fx[FL] + fx_road[FL]));
 
         // ---- driveline and wheels -------------------------------------------
         let w_r_mean = 0.5 * (self.w[RL] + self.w[RR]);
@@ -706,13 +765,34 @@ impl DoubleTrackSolver {
         // and dampers. Pitch about the ground: the elastic share of the
         // sprung longitudinal transfer against the pitch springs.
         let roll_drive = body.ms * ay * body.arm + body.ms * G * body.arm * self.roll;
-        let roll_acc = (roll_drive - body.k_roll * self.roll - body.c_roll * self.roll_rate) / body.i_roll;
+        let mut roll_acc = (roll_drive - body.k_roll * self.roll - body.c_roll * self.roll_rate) / body.i_roll;
         // Heave and pitch: the body on the two axle springs, loaded by the
         // downforce at each axle and by the elastic share of the sprung
         // longitudinal transfer.
         let pitch_drive = -(1.0 - anti) * body.ms * ax * body.hs;
-        let heave_acc = (df_front + df_rear - axle_f[0] - axle_f[1]) / body.ms.max(1.0);
-        let pitch_acc = (pitch_drive + p_a * (df_front - axle_f[0]) - p_b * (df_rear - axle_f[1])) / body.i_pitch;
+        let mut heave_acc = (df_front + df_rear - axle_f[0] - axle_f[1]) / body.ms.max(1.0);
+        let mut pitch_acc = (pitch_drive + p_a * (df_front - axle_f[0]) - p_b * (df_rear - axle_f[1])) / body.i_pitch;
+        if rough {
+            // The wheels pushing up at the corners (heave + = down, pitch +
+            // = nose down, roll + = right side down).
+            let fb = f_body;
+            heave_acc -= (fb[FL] + fb[FR] + fb[RL] + fb[RR]) / body.ms.max(1.0);
+            pitch_acc += (-p_a * (fb[FL] + fb[FR]) + p_b * (fb[RL] + fb[RR])) / body.i_pitch;
+            roll_acc += ((fb[FL] - fb[FR]) * tf * 0.5 + (fb[RL] - fb[RR]) * tr * 0.5) / body.i_roll;
+            // Each wheel on its tyre and spring, the damper implicit (it
+            // is stiff against 7 kg at 500 Hz).
+            for i in 0..4 {
+                let c = damper(i, self.zu_rate[i]);
+                let f = fz_tyre[i] - k_s[i] * self.zu[i];
+                self.zu_rate[i] = (self.zu_rate[i] + dt * f / m_u[i]) / (1.0 + dt * c / m_u[i]);
+                self.zu[i] += self.zu_rate[i] * dt;
+                // Settled back on smooth ground: exactly zero again.
+                if self.road[i] == 0.0 && self.zu[i].abs() < 1e-7 && self.zu_rate[i].abs() < 1e-5 {
+                    self.zu[i] = 0.0;
+                    self.zu_rate[i] = 0.0;
+                }
+            }
+        }
         self.roll_rate += roll_acc * dt;
         self.roll += self.roll_rate * dt;
         self.pitch_rate += pitch_acc * dt;
@@ -792,6 +872,9 @@ impl DoubleTrackSolver {
             aero_front_frac: if downforce > 1e-9 { df_front / downforce } else { p.aero.front_frac },
             ride_height_mm: [rh_f * 1000.0, rh_r * 1000.0],
             wheel_omega: self.w,
+            road_mm: self.road.map(|z| z * 1000.0),
+            wheel_z_mm: self.zu.map(|z| z * 1000.0),
+            heave_mm: self.heave * 1000.0,
         };
     }
 }

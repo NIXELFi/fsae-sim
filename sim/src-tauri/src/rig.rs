@@ -524,6 +524,8 @@ pub enum RigCommand {
     #[serde(rename_all = "camelCase")]
     Surface { w: usize, h: usize, res_m: f64, cls_b64: String, k: f64, rot_deg: f64, t: [f64; 2], centre: Vec<[f64; 2]>, half_width: Vec<f64> },
     ClearSurface,
+    /// How rough the grass is (1 the default bumps, 0 flat).
+    Roughness { scale: f64 },
     Ffb(FfbConfig),
     Wheel(Box<WheelConfig>),
     /// Re-open the wheel, steering by the named base (or the best guess).
@@ -609,6 +611,12 @@ pub struct TelemetryOut {
     /// aero map. Zero from the bicycle.
     pub aero_front_frac: f64,
     pub ride_height_mm: [f64; 2],
+    /// Rough ground (double track, grass): the road under each patch and
+    /// each wheel's own travel (mm, + = up), and the body's heave (mm, + =
+    /// down). Zero on smooth ground and from the bicycle.
+    pub road_mm: [f64; 4],
+    pub wheel_z_mm: [f64; 4],
+    pub heave_mm: f64,
     /// Which model produced this: 2 bicycle, 3 double track.
     pub vehicle_model: u8,
 }
@@ -892,6 +900,7 @@ struct Loop {
     assists: Assists,
     boundary: Option<Boundary>,
     surface: Option<std::sync::Arc<sim_core::surface::SurfaceMap>>,
+    roughness: f64,
     etc: EtcMap,
     wheel: Option<Wheel>,
     hwnd_raw: isize,
@@ -950,6 +959,7 @@ impl Loop {
             assists: Assists::default(),
             boundary: None,
             surface: None,
+            roughness: 1.0,
             etc: EtcMap::linear(),
             wheel: None,
             hwnd_raw,
@@ -1220,6 +1230,10 @@ impl Loop {
                 self.car.set_surface(None);
                 self.surface = None;
             }
+            RigCommand::Roughness { scale } => {
+                self.roughness = scale;
+                self.car.set_roughness(scale);
+            }
             RigCommand::Ffb(cfg) => self.ffb_cfg = cfg,
             RigCommand::Wheel(cfg) => {
                 let pts: Vec<(f64, f64)> = cfg.etc_points.iter().map(|p| (p[0], p[1])).collect();
@@ -1285,6 +1299,7 @@ impl Loop {
                 car.powertrain_mut().set_gear(gear);
                 car.reset(s.x, s.y, s.psi, s.speed());
                 car.set_surface(self.surface.clone());
+                car.set_roughness(self.roughness);
                 self.car = car;
             }
         }
@@ -1683,6 +1698,9 @@ impl Loop {
                 camber_deg: tel.camber_deg,
                 aero_front_frac: tel.aero_front_frac,
                 ride_height_mm: tel.ride_height_mm,
+                road_mm: tel.road_mm,
+                wheel_z_mm: tel.wheel_z_mm,
+                heave_mm: tel.heave_mm,
                 vehicle_model: self.car.fidelity().level(),
             },
             pt: pt_out,

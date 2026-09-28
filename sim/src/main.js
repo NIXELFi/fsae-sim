@@ -1396,6 +1396,25 @@ class Game {
     const k = Math.min(1, dt * 9);
     this.camRoll += (((tel.ayG * SDM26.rollGradientDegG) * Math.PI) / 180 - this.camRoll) * k;
     this.camPitch += (((tel.axG * SDM26.pitchGradientDegG) * Math.PI) / 180 - this.camPitch) * k;
+    // ---- rough ground (the 4-wheel model on grass) ----
+    // What the bumps do to the body is the model's heave, roll and pitch
+    // less their slow part (the cornering and braking attitude above is
+    // already drawn from the gradients), faded in only while a wheel is on
+    // rough ground so the course looks exactly as it did. The wheels carry
+    // their own travel over the lumps.
+    {
+      const bt = this._bump ??= { h: 0, r: 0, p: 0, on: 0, z: 0, roll: 0, pitch: 0, wz: [0, 0, 0, 0] };
+      const road = tel.roadMm, wz = tel.wheelZMm;
+      const rough = Array.isArray(road) && (road.some((z) => z !== 0) || (wz ?? []).some((z) => z !== 0));
+      bt.on += ((rough ? 1 : 0) - bt.on) * Math.min(1, dt * 3);
+      const H = tel.heaveMm ?? 0, R = tel.rollDeg ?? 0, P = tel.pitchDeg ?? 0;
+      const lk = Math.min(1, dt * 2.5);
+      bt.h += (H - bt.h) * lk; bt.r += (R - bt.r) * lk; bt.p += (P - bt.p) * lk;
+      bt.z = (-(H - bt.h) / 1000) * bt.on;
+      bt.roll = ((R - bt.r) * Math.PI / 180) * bt.on;
+      bt.pitch = ((P - bt.p) * Math.PI / 180) * bt.on;
+      for (let i = 0; i < 4; i++) bt.wz[i] = Array.isArray(wz) ? wz[i] / 1000 : 0;
+    }
     // ---- the driver's head: fore-and-aft only ----
     // Slower than the chassis attitude above: a body on a six-point belt
     // arrives late and settles late. Braking is negative ax and throws the
@@ -1670,8 +1689,10 @@ class Game {
     sc.x = drawn.x;
     sc.y = drawn.y;
     sc.psi = drawn.psi;
-    sc.rollRad = this.camRoll;
-    sc.pitchRad = this.camPitch;
+    const bt = this._bump;
+    sc.rollRad = this.camRoll + (bt?.roll ?? 0);
+    sc.pitchRad = this.camPitch + (bt?.pitch ?? 0);
+    sc.bumpZ = bt?.z ?? 0;
     sc.cgHeight = SDM26.cgHeightM;
     const sv = scene.view;
     // Head motion rides on the cockpit and nose views, which are bolted to
@@ -1702,6 +1723,7 @@ class Game {
     sw.spinFront = this.spinFront;
     sw.spinRear = this.spinRear;
     sw.rimFade = rimFade;
+    sw.zM = this._bump?.wz ?? null;
     this.fillPedals(scene.pedals ??= { throttle: 0, brake: 0, clutch: 0 });
     scene.ghost = this.ghost ? this.ghostPose() : null;
     scene.skid = this.skidIntensity(tel);

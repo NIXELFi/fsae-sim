@@ -620,6 +620,13 @@ export const PROFILES = {
        */
       asphaltVibration: 0.0,
       /**
+       * The grass's bumps off a real venue's course, 0 flat .. 2 twice the
+       * default (the 4-wheel model only). Physical, not synthesised: each
+       * wheel rides its tyre over the ground, the loads, the body and the
+       * steering all follow. The course itself is always smooth.
+       */
+      grassBumps: 1.0,
+      /**
        * Steering-torque model, for A/B testing. 1 = the tyres' aligning
        * moment only (lateral force through the trails). 2 = also the front
        * brake forces through the 25.5 mm scrub radius, which is how brake
@@ -967,6 +974,9 @@ export function editableSettings(profile) {
         { path: "forceFeedback.asphaltVibration", label: "Asphalt vibration", unit: "",
           min: 0, max: 1, step: 0.05,
           note: "A synthesised surface buzz through the rim, faded in with speed and off the grass. Nothing in the vehicle model produces it, so it is off by default; 0.3-0.5 makes a straight feel alive. Full effect is 8% of rated torque." },
+        { path: "forceFeedback.grassBumps", label: "Grass bumps", unit: "",
+          min: 0, max: 2, step: 0.1,
+          note: "How rough the grass off the course is (4-wheel model, real venue). The wheels ride over it, so the car bounces, grip comes and goes and the rim kicks. 0 is flat; the course itself is always smooth." },
         { path: "forceFeedback.parkFriction", label: "Standing-still friction", unit: "",
           min: 0, max: 0.4, step: 0.01,
           note: "A stationary tyre twisting against the ground. What the paddock feels like." },
