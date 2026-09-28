@@ -30,7 +30,7 @@ import { SDM26, CAD_EYE_AHEAD_OF_CG_M } from "../vehicle/params.js";
 import { SuspensionRig } from "./suspensionRig.js";
 import { buildVenueMesh } from "./venuemesh.js";
 import { buildEnvironmentMesh } from "./envmesh.js";
-import { buildSiteMeshes } from "./sitemesh.js";
+import { buildSiteMeshes, SITE_DROP_M } from "./sitemesh.js";
 import { PRESETS } from "./quality.js";
 import { bakeCockpitPvs, visibleIndex } from "./cockpitPvs.js";
 
@@ -1053,6 +1053,8 @@ void main() {
   } else {
     c = shade(base, n, vWorld, sh, mtl.x, mtl.y, mtl.z);
   }
+  // Lit panels (the scoring pylon's LEDs): their own light, not the sun's.
+  if (vMat.z > 1.5) c = base * 2.6;
   frag = finish(applyFog(c, vWorld));
   frag.a = uAlpha;
 }`;
@@ -2258,7 +2260,7 @@ export class Renderer {
     // i.e. all of it); at 900 m the edge was 9 % unfogged and drew a line.
     gl.uniform1f(ug.uExtent, 3000);
     // The venue paves its own ground; sink the procedural lot below it.
-    gl.uniform1f(ug.uDrop, this.venue || this.siteTerrain ? 0.35 : 0.0);
+    gl.uniform1f(ug.uDrop, this.siteTerrain ? SITE_DROP_M : this.venue ? 0.35 : 0.0);
     gl.uniform2f(ug.uLotCentre, this.lot.cx, this.lot.cz);
     gl.uniform2f(ug.uLotHalf, this.lot.hx, this.lot.hz);
     gl.bindVertexArray(this.groundQuad);

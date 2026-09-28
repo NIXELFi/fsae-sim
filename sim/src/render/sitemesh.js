@@ -23,6 +23,7 @@
 // Coordinates: course (x, y) -> GL (x, height, -y), like everything else.
 
 import { sceneryKit } from "./envmesh.js";
+import { buildStructures } from "./sitebuild.js";
 
 const TERRAIN_STEP_M = 4;
 /** Trees nearer the course than this are modelled one by one (lidar tops);
@@ -30,6 +31,10 @@ const TERRAIN_STEP_M = 4;
 const TREE_MODEL_M = 350;
 const STAND_STEP_M = 2;
 const FLAT_NEAR_M = 22, FLAT_FAR_M = 75;
+/** How far the procedural ground plane is sunk under a site (renderer uDrop):
+ *  the real infield sits a metre or two below some courses, and a plane just
+ *  under the course would show through it. The site's edge tapers down to it. */
+export const SITE_DROP_M = 12;
 
 /** Load the site description and its rasters. Null when there is no site. */
 export async function loadSite(url = "./data/mis-site.json") {
@@ -143,7 +148,7 @@ export function buildSiteMeshes(site, place, track) {
     // Taper to the plane at the site's edge, where the flat grass takes over.
     const edge = Math.min(x, SW - x, -y, SH + y);
     const e = smoothstep(0, 120, edge);
-    return (groundAt(x, y) - planeAt(x, y)) * w * e - 0.35 * (1 - e) * w;
+    return (groundAt(x, y) - planeAt(x, y)) * w * e - SITE_DROP_M * (1 - e) * w;
   };
 
   // ---- terrain -------------------------------------------------------------
@@ -199,10 +204,11 @@ export function buildSiteMeshes(site, place, track) {
     const i = Math.min(gw - 1, Math.max(0, Math.round(x / TERRAIN_STEP_M))), j = Math.min(gh - 1, Math.max(0, Math.round(-y / TERRAIN_STEP_M)));
     return heightAt(x, y, dist[j * gw + i]);
   };
-  const pos = [], nor = [], col = [];
+  const pos = [], nor = [], col = [], mats = [];
+  const NOMAT = [-1, 0, 0];
   const P = (x, y, h) => { const [cx, cy] = place.toCourse(x, y); return [cx, h, -cy]; };
-  const push = (a, b, c, na, colr) => {
-    for (const v of [a, b, c]) { pos.push(v[0], v[1], v[2]); nor.push(na[0], na[1], na[2]); col.push(colr[0], colr[1], colr[2]); }
+  const push = (a, b, c, na, colr, mat = NOMAT) => {
+    for (const v of [a, b, c]) { pos.push(v[0], v[1], v[2]); nor.push(na[0], na[1], na[2]); col.push(colr[0], colr[1], colr[2]); mats.push(mat[0], mat[1], mat[2]); }
   };
   const faceN = (a, b, c) => {
     const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
@@ -229,6 +235,7 @@ export function buildSiteMeshes(site, place, track) {
       const c = cells[j * cw + i];
       if (!c.kind || c.h < 0.8) continue;
       const x0 = i * S, x1 = x0 + S, y0 = -j * S, y1 = y0 - S;
+      if (c.kind === 2) continue;   // buildings come from their traced outlines (sitebuild.js)
       if (c.kind === 1 && distAt(x0 + S / 2, y0 - S / 2) < TREE_MODEL_M) continue;
       const g = gAt(x0 + S / 2, y0 - S / 2);
       const oc = orthoCol(i, j);
@@ -280,6 +287,8 @@ export function buildSiteMeshes(site, place, track) {
       if (!fence) continue;
       const L = Math.hypot(bx - ax, by - ay);
       bar(ax, ay, bx, by, 0.04, fence - 0.08, fence, POST, 0.04);
+      // The fence's horizontal cables.
+      for (const f of [0.38, 0.7]) { const z = WALL_H + (fence - WALL_H) * f; bar(ax, ay, bx, by, 0.015, z - 0.03, z, POST, 0.02); }
       for (let d = 3 - carry; d < L; d += 3) {
         const f = d / L, px = ax + (bx - ax) * f, py = ay + (by - ay) * f;
         bar(px - 0.06, py, px + 0.06, py, 0.06, WALL_H, fence, POST);
@@ -288,6 +297,13 @@ export function buildSiteMeshes(site, place, track) {
       carry = (carry + L) % 3;
     }
   }
+
+  // ---- buildings, grandstands, the scoring pylon, light poles --------------
+  const putAbs = (a, b, c, colr, mat) => {
+    const A = P(a[0], a[1], a[2]), B = P(b[0], b[1], b[2]), C = P(c[0], c[1], c[2]);
+    push(A, B, C, faceN(A, B, C), colr, mat ?? NOMAT);
+  };
+  const structStats = buildStructures(site.meta, putAbs, (x, y) => gAt(x, y), rnd);
 
   // ---- trees near the course, one model per lidar canopy top --------------
   const { Builder, rng, tree } = sceneryKit;
@@ -304,9 +320,9 @@ export function buildSiteMeshes(site, place, track) {
     for (let q = start + 1; q < tb.p.length; q += 3) tb.p[q] += g;
     nTrees++;
   }
-  for (let q = 0; q < tb.p.length; q++) { pos.push(tb.p[q]); nor.push(tb.n[q]); col.push(tb.c[q]); }
+  for (let q = 0; q < tb.p.length; q++) { pos.push(tb.p[q]); nor.push(tb.n[q]); col.push(tb.c[q]); mats.push(q % 3 === 0 ? -1 : 0); }
 
-  const stands = { position: new Float32Array(pos), normal: new Float32Array(nor), color: new Float32Array(col), count: pos.length / 3 };
+  const stands = { position: new Float32Array(pos), normal: new Float32Array(nor), color: new Float32Array(col), mat: new Float32Array(mats), count: pos.length / 3 };
 
   // The site's corners in the course frame, for the horizon scenery.
   const corners = [[0, 0], [SW, 0], [SW, -SH], [0, -SH]].map(([x, y]) => place.toCourse(x, y));
@@ -314,7 +330,7 @@ export function buildSiteMeshes(site, place, track) {
     minX: Math.min(...corners.map((c) => c[0])), maxX: Math.max(...corners.map((c) => c[0])),
     minY: Math.min(...corners.map((c) => c[1])), maxY: Math.max(...corners.map((c) => c[1])),
   };
-  return { terrain, stands, bounds, plane, stats: { terrainTris: tidx.length / 3, standTris: pos.length / 9, trees: nTrees, posts: nPosts } };
+  return { terrain, stands, bounds, plane, stats: { terrainTris: tidx.length / 3, standTris: pos.length / 9, trees: nTrees, posts: nPosts, ...structStats } };
 }
 
 /** A site-frame direction into the course frame (rotation only). */

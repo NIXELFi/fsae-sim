@@ -475,16 +475,7 @@ class Game {
     // autocross means nothing on the endurance loop.
     this.deltaTimer = new DeltaTimer(track.length);
     this.chasingRunId = null;
-    // The real venue around the course, where there is one (?site=0 draws
-    // the generic lot instead). Loaded once; drawing only.
-    if (EXPQ.get("site") !== "0" && ["autocross", "endurance", "skidpad", "accel"].includes(spec.id)) {
-      if (this.site === undefined) {
-        this.site = await loadSite();
-        if (this.site?.error) { console.warn("MIS site:", this.site.error); this.site = null; }
-      }
-      const place = coursePlacement(this.site, spec.id);
-      if (place) track.site = { site: this.site, place };
-    }
+    await this.attachSite(track, spec.id);
     this.renderer.setTrack(track);
 
     // Remembered across track changes so the file is fetched once.
@@ -870,6 +861,33 @@ class Game {
       return car;
     }
     return loadCarModel("./data/car.glb");
+  }
+
+  /**
+   * The real venue around a course (render/sitemesh.js), where there is one:
+   * on Medium and High; Low keeps the generic lot, and ?site=0 forces it.
+   * Loaded once; drawing only.
+   */
+  async attachSite(track, id) {
+    delete track.site;
+    const want = EXPQ.get("site") !== "0" && this.renderer?.quality?.id !== "low"
+      && ["autocross", "endurance", "skidpad", "accel"].includes(id);
+    if (!want) return;
+    if (this.site === undefined) {
+      this.site = await loadSite();
+      if (this.site?.error) { console.warn("MIS site:", this.site.error); this.site = null; }
+    }
+    const place = coursePlacement(this.site, id);
+    if (place) track.site = { site: this.site, place };
+  }
+
+  /** The preset changed: bring the venue in or take it away with Low. */
+  async refreshSiteForQuality() {
+    const t = this.track;
+    if (!t || t.kind === "venue") return;
+    const had = !!t.site;
+    await this.attachSite(t, this.trackId);
+    if (had !== !!t.site) this.renderer.setTrack(t);
   }
 
   /** Carbon, metals, cockpit culling and light shadows go with the HD car. */
@@ -4212,6 +4230,7 @@ async function boot() {
     saveGraphicsChoice(game.graphicsChoice);
     game.renderer.setQuality(resolvePreset(game.graphicsChoice, game.gpuName));
     void game.refreshCadCarForQuality();
+    void game.refreshSiteForQuality();
     refreshPauseCard();
   });
   pauseEl("pauseVolume").addEventListener("input", () => {

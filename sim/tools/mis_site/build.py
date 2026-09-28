@@ -110,11 +110,81 @@ for start in ends + [tuple(p) for p in np.argwhere(sk)]:
     chain = walk(*start)
     if len(chain) < 8: continue
     P = np.array([[x + 0.5, -(y + 0.5)] for y, x in chain])
-    P = rdp(P, 0.35)
+    if len(P) >= 7:   # skeleton pixels zigzag +-0.5 m: smooth, then simplify
+        k = np.ones(5) / 5
+        Ps = np.stack([np.convolve(np.pad(P[:, i], 2, mode="edge"), k, "valid") for i in range(2)], 1)
+        Ps[0], Ps[-1] = P[0], P[-1]
+        P = Ps
+    P = rdp(P, 0.6)
     hh = float(np.median([standH[y, x] for y, x in chain]))
     walls.append({"h": round(min(hh, 7.0), 1), "p": np.round(P, 2).tolist()})
 print("wall chains", len(walls), "points", sum(len(w["p"]) for w in walls),
       "length km", round(sum(float(np.hypot(*np.diff(np.array(w["p"]), axis=0).T).sum()) for w in walls) / 1000, 2))
+
+# ---- buildings, grandstands and the scoring pylon ------------------------------
+# Every structure (not wall) is traced at height tiers: the outline of what
+# stands at least z tall, for z every 3 m (1.5 m for a grandstand, so its
+# seating comes out as treads), simplified to clean polygons. The renderer
+# extrudes each tier from the one below. The tallest, slimmest structure is
+# the scoring pylon, which gets a model of its own.
+import cv2
+struct_only = (cls == 240)
+lab, n = ndimage.label(struct_only)
+objs = ndimage.find_objects(lab)
+calOrtho1 = None   # filled after calibration below (roof colours)
+buildings_raw = []
+pylon = None
+for i, sl in enumerate(objs):
+    m = lab[sl] == i + 1
+    area = int(m.sum())
+    if area < 20: continue
+    h = chm[sl] * m
+    hmax = float(h.max()); hmed = float(np.median(h[m]))
+    y0, x0 = sl[0].start, sl[1].start
+    if area < 150 and hmax > 35 and pylon is None:
+        pts = np.ascontiguousarray(np.argwhere(m)[:, ::-1] + (x0, y0), np.float32)
+        (cx, cy), (w, d), ang = cv2.minAreaRect(pts)
+        pylon = {"x": round(float(cx) + 0.5, 2), "y": round(-(float(cy) + 0.5), 2), "w": round(float(max(w, d)) + 1, 2),
+                 "d": round(float(min(w, d)) + 1, 2), "angDeg": round(float(ang if w >= d else ang + 90), 2), "h": round(hmax, 1)}
+        continue
+    stand = area > 1500 and hmax - hmed > 5
+    step = 1.5 if stand else 3.0
+    tiers = []
+    z = step
+    while z <= hmax + 1e-6:
+        lev = ((h >= z - step * 0.5) & m).astype(np.uint8)
+        lev = cv2.morphologyEx(lev, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        cs, _ = cv2.findContours(lev, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        polys = []
+        for c in cs:
+            if cv2.contourArea(c) < 6: continue
+            ap = cv2.approxPolyDP(c, 0.8, True)[:, 0, :].astype(float)
+            if len(ap) < 3: continue
+            polys.append([[round(px + x0 + 0.5, 2), round(-(py + y0 + 0.5), 2)] for px, py in ap])
+        if polys: tiers.append({"z": round(min(z, hmax), 2), "p": polys})
+        z += step
+    if not tiers: continue
+    # the top tier to the lidar's own top, not the step above it
+    tiers[-1]["z"] = round(float(np.percentile(h[m], 97)), 2) if len(tiers) == 1 else tiers[-1]["z"]
+    buildings_raw.append({"kind": "stand" if stand else "building", "sl": sl, "m": m, "tiers": tiers, "area": area})
+print("buildings", sum(b["kind"] == "building" for b in buildings_raw), "stands", sum(b["kind"] == "stand" for b in buildings_raw),
+      "tier polys", sum(len(t["p"]) for b in buildings_raw for t in b["tiers"]), "pylon", pylon)
+
+# ---- light poles: lone thin tall returns on open ground (not trees, not
+# buildings), well clear of anything else tall.
+tall = (chm > 7) & (cls != 160) & (cls != 240)
+anyTall = ndimage.binary_dilation((chm > 2.5) & ~tall, iterations=3)
+lab, n = ndimage.label(tall)
+poles = []
+for i, sl in enumerate(ndimage.find_objects(lab)):
+    m = lab[sl] == i + 1
+    if m.sum() > 4: continue
+    yy, xx = np.argwhere(m)[0] + (sl[0].start, sl[1].start)
+    if anyTall[yy, xx]: continue
+    ground_cls = cls[max(0, yy - 3):yy + 4, max(0, xx - 3):xx + 4]
+    if (ground_cls == 160).any(): continue
+    poles.append([round(float(xx) + 0.5, 1), round(-(float(yy) + 0.5), 1), round(float(chm[yy, xx]), 1)])
+print("poles", len(poles))
 
 # ---- individual trees: tops of the canopy (local maxima of the smoothed
 # canopy height, at least ~5 m apart), for real tree models near the courses.
@@ -136,6 +206,11 @@ cal = np.clip(lum + (cal - lum) * SAT_BOOST, 0, 1)
 gm = np.array([np.median(cal[::2, ::2][..., c][(green & ~tree)[: cal.shape[0] // 2, : cal.shape[1] // 2]]) for c in range(3)])
 print("ortho pave median", pm.round(3), "gain", (TARGET_PAVE / pm).round(3), "calibrated grass median", gm.round(3))
 Image.fromarray((cal * 255 + 0.5).astype(np.uint8)).save(os.path.join(DATA, "mis-ortho.jpg"), quality=86, optimize=True)
+cal1 = cal[::2, ::2][:H, :Wd]
+buildings = []
+for b in buildings_raw:
+    roof = np.median(cal1[b["sl"]][b["m"]], axis=0)
+    buildings.append({"kind": b["kind"], "roof": [round(float(v), 3) for v in roof], "tiers": b["tiers"]})
 
 # ---- layers ---------------------------------------------------------------------
 zMin = float(np.floor(dtm.min()))
@@ -181,6 +256,10 @@ site = {
                "zUnitM": 0.01, "standUnitM": 0.2},
     "courses": courses,
     "trees": {"note": "site x, site y, height m -- lidar canopy tops", "xyh": trees},
+    "buildings": {"note": "tiers: outline (site polygons) of what stands at least up to z (m above ground); extrude each from the tier below",
+                  "list": buildings},
+    "pylon": pylon,
+    "poles": {"note": "site x, site y, height m -- lone lidar returns on open ground", "xyh": poles},
     "walls": {"note": "concrete walls, site-frame polylines; h = what the lidar saw on top (catch fence)", "lines": walls},
 }
 json.dump(site, open(os.path.join(DATA, "mis-site.json"), "w"), separators=(",", ":"))
