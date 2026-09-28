@@ -108,3 +108,63 @@ fn grass_is_bumpy_and_the_bumps_reach_the_car_and_the_wheel() {
     assert!(hv_g > 2.0 && zu_g > 3.0 && zu_g < 60.0, "heave {hv_g:.2} mm, wheel {zu_g:.1} mm");
     assert!(kp_g > 2.0 * kp_a.max(0.05), "kingpin {kp_g:.2} vs {kp_a:.2}");
 }
+
+/// A lap-like drive ON a course laid over grass everywhere: straight, a
+/// steady turn, braking. Returns the whole state trace.
+fn on_course(fid: Fidelity, surface: Option<Arc<SurfaceMap>>) -> Vec<[u64; 6]> {
+    let mut c = build(
+        fid,
+        Chassis::new(sdm26(), Box::new(MagicFormulaTyre::sdm26()), Box::new(GearedEngine::sdm26())),
+    );
+    c.set_surface(surface);
+    c.set_roughness(2.0);
+    c.powertrain_mut().set_gear(2);
+    c.reset(0.0, 0.0, 0.0, 12.0);
+    let mut trace = vec![];
+    for i in 0..(6.0 / DT) as usize {
+        let t = i as f64 * DT;
+        let (steer, throttle, brake) = if t < 2.0 { (0.0, 0.5, 0.0) } else if t < 4.0 { (0.08, 0.3, 0.0) } else { (0.0, 0.0, 0.6) };
+        c.step(DT, Controls { steer, throttle, brake });
+        let s = c.state();
+        let tel = c.telemetry();
+        trace.push([s.x.to_bits(), s.y.to_bits(), s.psi.to_bits(), s.u.to_bits(), tel.fz[0].to_bits(), tel.rim_torque_nm.to_bits()]);
+    }
+    trace
+}
+
+/// A course that follows wherever that drive goes (so every wheel stays in
+/// the always-asphalt corridor), on a site that is grass everywhere.
+fn grass_with_course(fid: Fidelity) -> Arc<SurfaceMap> {
+    let mut c = build(
+        fid,
+        Chassis::new(sdm26(), Box::new(MagicFormulaTyre::sdm26()), Box::new(GearedEngine::sdm26())),
+    );
+    c.powertrain_mut().set_gear(2);
+    c.reset(0.0, 0.0, 0.0, 12.0);
+    let mut centre = vec![[-20.0, 0.0], [-10.0, 0.0]];
+    for i in 0..(6.0 / DT) as usize {
+        let t = i as f64 * DT;
+        let (steer, throttle, brake) = if t < 2.0 { (0.0, 0.5, 0.0) } else if t < 4.0 { (0.08, 0.3, 0.0) } else { (0.0, 0.0, 0.6) };
+        c.step(DT, Controls { steer, throttle, brake });
+        if i % 6 == 0 { centre.push([c.state().x, c.state().y]); }
+    }
+    let n = 400;
+    let hw = vec![1.75; centre.len()]; // a 3.5 m autocross course
+    Arc::new(SurfaceMap::new(n, n, 10.0, vec![0u8; n * n], 1.0, 0.0, [2000.0, -2000.0], centre, hw))
+}
+
+#[test]
+fn on_the_course_nothing_changes_on_either_model() {
+    for fid in [Fidelity::DoubleTrack, Fidelity::Bicycle] {
+        let base = on_course(fid, None);
+        let with = on_course(fid, Some(grass_with_course(fid)));
+        assert_eq!(base, with, "{fid:?}: driving on the course over a grass site changed the car");
+    }
+}
+
+#[test]
+fn the_bicycle_ignores_grass_even_off_the_course() {
+    let base = on_course(Fidelity::Bicycle, None);
+    let with = on_course(Fidelity::Bicycle, Some(site(0)));
+    assert_eq!(base, with);
+}
